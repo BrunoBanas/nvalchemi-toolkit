@@ -4,6 +4,14 @@
 
 ### Added
 
+- GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
+  evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
+  planning that emits serial overflow waves across requested GPUs. The existing
+  `SizeAwareSampler` GPU heuristic is now configurable through explicit
+  per-atom and model-overhead parameters.
+- `RunSpec` / `CampaignSpec` dependency graphs with cooling-branch generation,
+  checkpointed final atomic states, ready-batch GPU-wave planning, and
+  per-graph SGC chemical-potential reservoirs.
 - Domain decomposition for distributed inference and dynamics: a spatial halo
   strategy and a graph-parallel strategy, both driven by a declarative
   `MLIPSpec` a model wrapper publishes as `distribution_spec`. Ewald, PME,

@@ -138,6 +138,172 @@ with NPT(
 
 The model must return `stress` for NPT to propagate the cell degrees of freedom.
 
+## Monte Carlo
+
+The independent `nvalchemi.mc` package provides batched Monte Carlo samplers.
+`SGC` proposes single-site species transmutations and samples the
+semi-grand-canonical potential `E - sum(mu_i N_i)`:
+
+```python
+from nvalchemi.mc import SGC
+
+with SGC(
+  model=model,
+  temperature=1000.0,
+  species=[1, 2],
+  chemical_potentials={1: 0.0, 2: 0.2},
+  n_steps=10000,
+) as mc:
+  result = mc.run(batch)
+
+```
+
+One proposal is attempted independently for every active graph per step.
+Accepted moves are available as the graph-level boolean `batch.mc_accepted`.
+Composition-conserving Kawasaki sampling will be added as a separate MC style;
+it is intentionally not exposed until its local proposal graph and detailed
+balance tests are complete.
+
+## Hybrid MC-MD blocks
+
+`HybridMCMD` owns the alternation between an MC sampler and a Toolkit MD
+integrator. Both stages must use the same model object. The scheduler keeps one
+`Batch` on the active GPU, refreshes forces and stress after MC, then starts the
+MD block from the accepted configuration:
+
+```python
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.mc import SGC
+
+mc = SGC(
+  model=model,
+  temperature=1000.0,
+  species=[1, 2],
+  chemical_potentials={1: 0.0, 2: 0.2},
+)
+scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20)
+result = scheduler.run(batch, n_blocks=1000)
+```
+
+The supplied batch must contain a preallocated `forces` field, as required by
+the selected MD integrator. Do not combine the MC stage with `FusedStage`:
+alternating MC-MD needs a candidate-energy evaluation and an accepted-state
+force evaluation at different points in each block.
+
+### Simulation batch planning
+
+`SimulationBatchPlanner` selects a batch width for any collection of independent
+simulations: MC, MD, geometry optimization, hybrid MC-MD, or a user-defined
+runner. Its `profile` method runs representative work at candidate widths,
+records actual CUDA reserved memory and throughput, then `recommend_width`
+selects the smallest width near peak throughput while retaining memory headroom.
+Its `assign_runs` method packs a larger campaign into concurrent per-GPU batches
+and serial queue waves. `HybridBatchPlanner` remains an alias for compatibility.
+
+```python
+import torch
+
+from nvalchemi.scheduling import SimulationBatchPlanner
+
+planner = SimulationBatchPlanner(memory_fraction=0.85, throughput_fraction=0.95)
+measurements = planner.profile(
+  workload_factory=make_workload,
+  widths=[1, 2, 4, 8, 16],
+  device="cuda:0",
+  warmup_blocks=2,
+  measured_blocks=4,
+)
+width = planner.recommend_width(
+  measurements,
+  total_memory_bytes=torch.cuda.get_device_properties(0).total_memory,
+)
+assignments = planner.assign_runs(total_runs=100, batch_width=width, gpu_ids=[0, 1])
+```
+
+`make_workload(width, device)` must reuse the production model and
+return a newly constructed `(runner, batch)` pair of that width. The runner only
+needs a `run(batch, n_blocks=...)` method, so it can wrap an MC, MD, optimizer,
+or hybrid protocol. Assignments
+for the same GPU are deliberately serial: one model and one full batch occupy
+the device at a time. Launch one process per requested GPU and feed it that
+GPU's queue in wave order.
+
+For a quick estimate on a second, memory-different GPU, fit the successful
+profile points and use the fitted model with the target device memory:
+
+```python
+memory = planner.infer_memory_model(measurements)
+estimated_width = planner.estimate_width(
+  total_memory_bytes=target_gpu_total_memory,
+  model_resident_bytes=memory.model_resident_bytes,
+  bytes_per_walker=memory.bytes_per_walker,
+)
+```
+
+This extrapolation is deliberately conservative and should only choose the
+candidate widths for a short target-GPU profile; it should not be treated as a
+production capacity claim after changing the model or physics configuration.
+
+For heterogeneous system sizes, use `SizeAwareSampler` to pack each active GPU
+batch subject to calibrated `max_atoms`, `max_edges`, and `max_batch_size`
+budgets. Its default `estimated_bytes_per_atom=300` and
+`model_memory_fraction=0.2` remain available as a conservative starting
+heuristic. They are explicit parameters: validate them for the selected model
+with a representative profile, then override them if needed. A completed
+independent run may be replaced from the queue; an active run must retain its
+own configuration and simulation state until it reaches its declared stopping
+condition.
+
+### Dependency-aware campaigns
+
+`CampaignSpec` describes state points as explicit `RunSpec` nodes. A run may
+have one `parent_id`, whose final atomic state seeds a serial continuation, and
+additional `depends_on` edges that express a barrier without changing the
+continuation state. `CampaignScheduler` only exposes runs whose dependencies
+have durable final-state checkpoints. It batches compatible ready runs even
+when their temperatures, pressures, chemical potentials, structures, or sizes
+differ; the selected runner must support the corresponding per-graph tensors.
+
+```python
+from nvalchemi.scheduling import CampaignSpec, RunSpec
+
+reference = [
+    RunSpec(
+        run_id="mu_minus",
+        temperature_k=3000.0,
+        pressure_ev_per_a3=6.324e-7,
+        species=(79, 78),
+        chemical_potentials_ev={79: 0.0, 78: -0.10},
+    ),
+    RunSpec(
+        run_id="mu_plus",
+        temperature_k=3000.0,
+        pressure_ev_per_a3=6.324e-7,
+        species=(79, 78),
+        chemical_potentials_ev={79: 0.0, 78: +0.10},
+    ),
+]
+campaign = CampaignSpec.cooling_from_reference(
+    reference,
+    temperatures_k=[3000.0, 2800.0, 2600.0],
+)
+```
+
+When a run completes, pass its individual `AtomicData` final state to
+`CampaignScheduler.complete`. The `FinalStateStore` writes it atomically and a
+child subsequently receives it through `parent_state`. The record includes
+positions, cell, atom types, velocities, and other atomic fields. Advanced
+integrator/MC restart state may be supplied separately as a tensor-only
+`runtime_state` payload.
+
+`SGC` accepts scalar reservoirs or one chemical-potential value per graph for
+each species. Thus different `delta_mu` values can be batched with different
+temperatures, provided all graphs share the model, MC style, and reservoir
+species. `NPT` already accepts per-graph temperatures and pressures. For a
+mixed-size campaign, apply `SizeAwareSampler` or an equivalent atom/edge budget
+when choosing `max_batch_size`; `CampaignScheduler` preserves the dependency
+graph while the capacity layer decides how many ready runs fit together.
+
 ## Writing your own dynamics
 
 All integrators and optimizers inherit from

@@ -72,6 +72,14 @@ class SizeAwareSampler(Sampler[int]):
         Fraction of GPU memory to use when estimating atom capacity. Default
         0.8 (80%), leaving 20% headroom for model parameters and CUDA context.
         Only used when CUDA is available.
+    estimated_bytes_per_atom : int
+        Per-atom memory estimate used only by the automatic GPU capacity
+        heuristic. Default 300 bytes. Retain the default until a representative
+        profile of the selected model supplies a better value.
+    model_memory_fraction : float
+        Fraction of total GPU memory reserved by the automatic heuristic for
+        model parameters, CUDA context, and persistent allocations. Default
+        0.2. This is a heuristic parameter, not a measured model footprint.
 
     Raises
     ------
@@ -100,6 +108,8 @@ class SizeAwareSampler(Sampler[int]):
         bin_width: int = 1,
         shuffle: bool = False,
         max_gpu_memory_fraction: float = 0.8,
+        estimated_bytes_per_atom: int = 300,
+        model_memory_fraction: float = 0.2,
     ) -> None:
         """Initialize the size-aware sampler.
 
@@ -127,6 +137,13 @@ class SizeAwareSampler(Sampler[int]):
             Fraction of GPU memory to use when estimating atom capacity. Default
             0.8 (80%), leaving 20% headroom for model parameters and CUDA context.
             Only used when CUDA is available.
+        estimated_bytes_per_atom : int
+            Per-atom memory estimate used by the automatic GPU capacity
+            heuristic. Default 300 bytes. Set from a measured model profile
+            when a tighter capacity estimate is required.
+        model_memory_fraction : float
+            Fraction of total GPU memory reserved by the automatic heuristic
+            for model and runtime overhead. Default 0.2.
 
         Raises
         ------
@@ -150,6 +167,16 @@ class SizeAwareSampler(Sampler[int]):
             raise ValueError(
                 f"max_gpu_memory_fraction must be in (0.0, 1.0], got {max_gpu_memory_fraction}"
             )
+        if estimated_bytes_per_atom < 1:
+            raise ValueError(
+                "estimated_bytes_per_atom must be >= 1, "
+                f"got {estimated_bytes_per_atom}"
+            )
+        if not 0.0 <= model_memory_fraction < 1.0:
+            raise ValueError(
+                "model_memory_fraction must be in [0.0, 1.0), "
+                f"got {model_memory_fraction}"
+            )
 
         # Runtime validation of dataset interface
         if not hasattr(dataset, "__len__"):
@@ -168,6 +195,8 @@ class SizeAwareSampler(Sampler[int]):
         self._bin_width = bin_width
         self._shuffle = shuffle
         self._max_gpu_memory_fraction = max_gpu_memory_fraction
+        self._estimated_bytes_per_atom = estimated_bytes_per_atom
+        self._model_memory_fraction = model_memory_fraction
 
         # Pre-scan dataset and build bins
         self._sample_meta: list[tuple[int, int]] = []  # (num_atoms, num_edges) per idx
@@ -250,10 +279,16 @@ class SizeAwareSampler(Sampler[int]):
         # atomic_masses (4 bytes), batch index (8 bytes),
         # plus model hidden states (estimate ~256 bytes per atom for embeddings)
         # Conservative estimate: ~300 bytes per atom
-        bytes_per_atom = 300
+        # bytes_per_atom = 300
 
         # Also account for model parameters and CUDA overhead (~20% of memory)
-        model_overhead = int(total_mem * 0.2)
+        # model_overhead = int(total_mem * 0.2)
+
+        # Default parameters preserve the historical 300-byte/atom and 20%
+        # overhead heuristic. They are deliberately configurable because an
+        # MLIP's graph, hidden-state, and persistent-memory costs vary.
+        bytes_per_atom = self._estimated_bytes_per_atom
+        model_overhead = int(total_mem * self._model_memory_fraction)
         available_for_data = max(usable_mem - model_overhead, 0)
 
         return max(available_for_data // bytes_per_atom, 1)
