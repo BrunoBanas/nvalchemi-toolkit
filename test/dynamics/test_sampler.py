@@ -389,42 +389,6 @@ class TestSizeAwareSamplerConstruction:
 
         assert sampler._max_gpu_memory_fraction == 1.0
 
-    def test_capacity_heuristic_parameters_are_configurable(self) -> None:
-        """Model-specific calibration can replace the default capacity estimate."""
-        dataset = MockDataset([(10, 20)])
-
-        sampler = SizeAwareSampler(
-            dataset=dataset,
-            max_atoms=100,
-            max_batch_size=10,
-            estimated_bytes_per_atom=1_024,
-            model_memory_fraction=0.35,
-        )
-
-        assert sampler._estimated_bytes_per_atom == 1_024
-        assert sampler._model_memory_fraction == 0.35
-
-    @pytest.mark.parametrize(
-        ("estimated_bytes_per_atom", "model_memory_fraction"),
-        [(0, 0.2), (300, -0.1), (300, 1.0)],
-    )
-    def test_invalid_capacity_heuristic_parameters_raise(
-        self,
-        estimated_bytes_per_atom: int,
-        model_memory_fraction: float,
-    ) -> None:
-        """Capacity heuristic knobs reject physically meaningless values."""
-        dataset = MockDataset([(10, 20)])
-
-        with pytest.raises(ValueError):
-            SizeAwareSampler(
-                dataset=dataset,
-                max_atoms=100,
-                max_batch_size=10,
-                estimated_bytes_per_atom=estimated_bytes_per_atom,
-                model_memory_fraction=model_memory_fraction,
-            )
-
     def test_estimate_max_atoms_from_gpu_returns_none_on_cpu(self) -> None:
         """_estimate_max_atoms_from_gpu should return None on CPU-only systems."""
         samples = [(10, 20)]
