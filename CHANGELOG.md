@@ -4,6 +4,11 @@
 
 ### Added
 
+- GPU-resident canonical (`Kawasaki`) Monte Carlo with fixed-composition
+  nearest-neighbour site-swap moves. The proposal graph is a short-range
+  cutoff neighbor search independent of the energy model's own interaction
+  neighbor list, so it stays valid on the disordered geometry produced by a
+  finite-temperature MD block.
 - GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
   evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
   planning that emits serial overflow waves across requested GPUs. The existing
