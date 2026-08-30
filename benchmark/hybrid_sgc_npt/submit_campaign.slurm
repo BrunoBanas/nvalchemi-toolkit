@@ -38,7 +38,7 @@ mkdir -p benchmark/hybrid_sgc_npt/logs
 export UV_PROJECT_ENVIRONMENT=.venv-uma
 
 # The UMA checkpoint is gated on Hugging Face. Authenticate once ahead of
-# time (`huggingface-cli login`, cached under $HF_HOME) or export HF_TOKEN
+# time (`hf auth login`, cached under $HF_HOME) or export HF_TOKEN
 # in the submitting shell's environment before `sbatch`.
 export HF_HOME="${HF_HOME:-$REPO_ROOT/.cache/huggingface}"
 

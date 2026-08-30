@@ -61,7 +61,7 @@ Interactively, one size at a time:
 
 ```bash
 UV_PROJECT_ENVIRONMENT=.venv-uma uv sync --extra uma --extra ase
-huggingface-cli login   # once, for the gated UMA checkpoint
+hf auth login   # once, for the gated UMA checkpoint
 
 uv run python benchmark/hybrid_sgc_npt/run_campaign.py \
     --n-atoms 500 \
