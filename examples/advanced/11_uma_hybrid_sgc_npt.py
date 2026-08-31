@@ -63,7 +63,7 @@ from nvalchemi.scheduling import (
 
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
-INFERENCE_SETTINGS = "default"  # SGC changes atomic composition.
+INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ASE crystal template. ``bulk`` supports common elemental structures such as

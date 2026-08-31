@@ -94,7 +94,7 @@ from nvalchemi.scheduling import (
 
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
-INFERENCE_SETTINGS = "default"  # SGC changes atomic composition.
+INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
 
 TEMPLATE_SYMBOL = "Au"
 CRYSTAL_STRUCTURE = "fcc"
