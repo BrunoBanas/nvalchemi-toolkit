@@ -141,21 +141,21 @@ class BaseMonteCarlo(BaseDynamics):
 
     def _ensure_observables(self, batch: Batch) -> None:
         """Allocate graph-level energy and acceptance storage if absent."""
+        # NOTE: Batch has no ``add_system_property`` -- that method only exists
+        # on AtomicData. A new per-graph tensor is added to a Batch by plain
+        # attribute/item assignment instead: MultiLevelStorage.__setitem__
+        # (invoked via Batch.__setattr__) routes an unrecognized key straight
+        # into the "system" group. This mirrors how "energy" is already set
+        # elsewhere in this codebase (e.g. test/mc/test_kawasaki.py).
         energy = getattr(batch, "energy", None)
         if energy is None:
-            batch.add_system_property(
-                "energy",
-                torch.zeros(
-                    (batch.num_graphs, 1),
-                    dtype=batch.positions.dtype,
-                    device=batch.device,
-                ),
+            batch.energy = torch.zeros(
+                (batch.num_graphs, 1), dtype=batch.positions.dtype, device=batch.device
             )
         accepted = getattr(batch, "mc_accepted", None)
         if accepted is None:
-            batch.add_system_property(
-                "mc_accepted",
-                torch.zeros((batch.num_graphs, 1), dtype=torch.bool, device=batch.device),
+            batch.mc_accepted = torch.zeros(
+                (batch.num_graphs, 1), dtype=torch.bool, device=batch.device
             )
         elif accepted.shape != (batch.num_graphs, 1):
             raise ValueError("batch.mc_accepted must have shape [num_graphs, 1]")

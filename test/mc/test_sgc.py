@@ -78,7 +78,7 @@ def test_unfavourable_transmutation_restores_the_accepted_type() -> None:
 def test_inactive_graph_is_not_mutated() -> None:
     """A graduated graph is excluded from proposals and acceptance statistics."""
     batch = _batch([[1], [1]])
-    batch.add_system_property("status", torch.tensor([[0], [1]], dtype=torch.long))
+    batch.status = torch.tensor([[0], [1]], dtype=torch.long)
     sampler = _sampler({1: 0.0, 2: 1.0e6})
 
     sampler.run(batch, n_steps=1)

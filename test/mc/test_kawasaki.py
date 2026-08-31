@@ -73,7 +73,7 @@ def test_inactive_graph_is_not_mutated() -> None:
     """A graduated graph is excluded from proposals and acceptance statistics."""
     batch = Batch.from_data_list([_pair(1, 2), _pair(1, 2)])
     batch.energy = torch.zeros(batch.num_graphs, 1)
-    batch.add_system_property("status", torch.tensor([[0], [1]], dtype=torch.long))
+    batch.status = torch.tensor([[0], [1]], dtype=torch.long)
     sampler = _sampler()
 
     sampler.run(batch, n_steps=1)
