@@ -108,11 +108,18 @@ SIZE_REPEATS: dict[int, tuple[int, int, int]] = {
     500: (5, 5, 5),
     1372: (7, 7, 7),
     2048: (8, 8, 8),
+    4000: (10, 10, 10),
 }
 BATCH_WIDTH_CANDIDATES: dict[int, tuple[int, ...]] = {
     500: (2, 4, 6, 8, 10, 12, 14, 16),
     1372: (1, 2, 3, 4, 5, 6),
     2048: (1, 2, 3, 4),
+    # Existing entries follow max_width * n_atoms ~= 8000-8200 (500->16,
+    # 1372->6, 2048->4); extrapolating gives ~2 at 4000. Widths beyond what
+    # fits are not a crash risk -- SimulationBatchPlanner.profile() reports
+    # a per-width "oom" status and moves on -- so 3 is included as a free
+    # extra data point above the naive extrapolation, not a verified-safe one.
+    4000: (1, 2, 3),
 }
 
 TEMPERATURES_K: tuple[float, ...] = tuple(float(t) for t in range(3000, 1599, -200))
