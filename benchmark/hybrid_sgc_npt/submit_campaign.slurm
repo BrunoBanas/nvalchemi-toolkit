@@ -46,6 +46,22 @@ SIZES=(500 1372 2048)
 N_ATOMS="${SIZES[$SLURM_ARRAY_TASK_ID]}"
 CHECKPOINT_ROOT="$REPO_ROOT/benchmark/hybrid_sgc_npt/checkpoints"
 
+# Set REFERENCE_ENERGIES_JSON (in the submitting shell, before sbatch) to a
+# reference_energy_calibration.py output to use the calibrated, trustworthy
+# delta_mu -- recommended, see run_campaign.py's module docstring
+# "Chemical-potential calibration". Leave it unset to fall back to the
+# literal, uncalibrated DELTA_MU_EV sweep (fine for a pure throughput
+# benchmark, not for real phase-diagram production).
+REFERENCE_ENERGIES_JSON="${REFERENCE_ENERGIES_JSON:-}"
+ALLOW_UNRESOLVED_REFERENCE="${ALLOW_UNRESOLVED_REFERENCE:-0}"
+delta_mu_args=()
+if [[ -n "${REFERENCE_ENERGIES_JSON}" ]]; then
+  delta_mu_args=(--reference-energies-json "${REFERENCE_ENERGIES_JSON}")
+  if [[ "${ALLOW_UNRESOLVED_REFERENCE}" == "1" ]]; then
+    delta_mu_args+=(--allow-unresolved-reference)
+  fi
+fi
+
 echo "[task $SLURM_ARRAY_TASK_ID] n_atoms=$N_ATOMS on $(hostname), GPU=$CUDA_VISIBLE_DEVICES"
 
 # Re-running an already-completed campaign is a no-op per state point:
@@ -55,4 +71,5 @@ echo "[task $SLURM_ARRAY_TASK_ID] n_atoms=$N_ATOMS on $(hostname), GPU=$CUDA_VIS
 srun uv run python benchmark/hybrid_sgc_npt/run_campaign.py \
     --n-atoms "$N_ATOMS" \
     --checkpoint-root "$CHECKPOINT_ROOT" \
-    --device cuda
+    --device cuda \
+    "${delta_mu_args[@]}"

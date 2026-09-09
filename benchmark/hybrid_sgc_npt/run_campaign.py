@@ -20,12 +20,46 @@ One process runs one system size end-to-end (see ``--n-atoms``); submit
 Grid
 ----
 * Temperature: 3000 K -> 1600 K in 200 K steps (8 points).
-* Chemical potential delta_mu = mu(Pt, Z=78) - mu(Au, Z=79): -1.0 -> 1.0 eV
-  in 0.2 eV steps (11 points).
+* Chemical potential: DELTA_MU_EV, -1.0 -> 1.0 eV in 0.2 eV steps (11
+  points). What this quantity actually means depends on
+  --reference-energies-json (see "Chemical-potential calibration" below):
+  uncalibrated, it is the literal, raw mu(Pt, Z=78) - mu(Au, Z=79); with a
+  calibration file it is delta_mu_excess added on top of the calibrated
+  delta_mu_ref(T) at each run's own temperature.
 * Sizes: 500 / 1372 / 2048 atom conventional-cubic Au fcc supercells
   (5x5x5 / 7x7x7 / 8x8x8 conventional cells).
 
 That is 8 * 11 = 88 state points per size, 264 total across all three sizes.
+
+Chemical-potential calibration
+-------------------------------
+`nvalchemi.mc.SGC`'s chemical_potentials is a literal, absolute per-atom
+energy, not a relative bias: {Au: 0.0, Pt: delta_mu} does not mean "Au and
+Pt are equally favorable," it means "whatever this checkpoint's own raw
+energy convention already encodes between the two species, uncorrected."
+That raw offset is 1-3 eV/atom on this UMA checkpoint -- large enough to
+swamp the +-1.0 eV DELTA_MU_EV sweep above and drive every run to one pure
+phase regardless of delta_mu (nvalchemi-toolkit-quest-deploy's
+scout_sgc_temperature_composition_drift.py job 5484379 is a documented
+example of exactly this failure mode, at delta_mu=0.0).
+
+--reference-energies-json <reference_energy_calibration.py output>
+(recommended; see nvalchemi-toolkit-quest-deploy/phase_diagram_guide.md
+section 3) fixes this: every run's chemical_potentials_ev is rebuilt as
+{Au: 0.0, Pt: reference[T]["delta_mu_ref_eV"] + delta_mu_excess}, looked up
+at THAT RUN'S OWN temperature_k -- not just the 3000 K reference row's --
+since delta_mu_ref(T) genuinely varies with T. delta_mu_excess is
+DELTA_MU_EV's per-column value, recovered from each run's
+metadata["delta_mu_ev"] (identical across every reference and
+continuation-child row in that column, since cooling_from_reference and the
+flat-grid branch both copy metadata unchanged). Refuses to run if a
+requested temperature is missing from the file, if its species order
+doesn't match SPECIES, or if either species' equilibration_gate.resolved
+at that temperature isn't true, unless --allow-unresolved-reference is
+passed (not recommended). Omitting --reference-energies-json keeps the old
+literal, uncalibrated behavior (a runtime warning is printed) -- fine for a
+pure throughput/memory benchmark, not for drawing conclusions about the
+real Au-Pt phase boundary.
 
 Continuation
 ------------
@@ -46,9 +80,24 @@ Hybrid block
 ------------
 One block is ``MD_STEPS_PER_BLOCK`` MD steps at ``DT_FS`` followed by
 ``round(MC_STEP_FRACTION * n_atoms)`` MC trials (one attempted transmutation
-per graph per MC step). Equilibration is assumed within
-``EQUILIBRATION_BLOCKS``; reference runs run ``N_BLOCKS_REFERENCE`` blocks
+per graph per MC step). Reference runs run ``N_BLOCKS_REFERENCE`` blocks
 total, continuation children run ``N_BLOCKS_CONTINUATION``.
+
+Equilibration gate
+-------------------
+Equilibration used to be *assumed* within the first ``EQUILIBRATION_BLOCKS``
+(50) and never checked. ``_run_hybrid_with_observables`` now records each
+block's per-graph Pt fraction and energy/atom (one extra small GPU->CPU
+transfer per block -- see its docstring for the cost/why), and after each
+run ``_equilibration_gate`` (PHASE_DIAGRAM_MANUAL.md section 7, the same
+one-shot pattern reference_energy_calibration.py already uses) compares the
+last two ``EQUILIBRATION_WINDOW_BLOCKS``-block windows of both series
+against twice their combined standard error. This is a single end-of-run
+check, not the manual's full three-consecutive-checks promotion protocol --
+a run that fails it is logged as unresolved (throughput CSV's ``resolved``
+column, plus a per-run ``<run_id>.equilibration.json`` sidecar in the
+checkpoint directory with both gates' window means/difference/standard
+error), not retried or extended automatically.
 
 Batch width
 -----------
@@ -66,13 +115,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import statistics
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
 import torch
 from ase import Atoms
 from ase.build import bulk
+from ase.data import chemical_symbols
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.integrators.npt import NPT
@@ -135,6 +188,7 @@ SEED = 20260827
 EQUILIBRATION_BLOCKS = 50
 N_BLOCKS_REFERENCE = 200  # 50 equilibration + 150 production; no parent state.
 N_BLOCKS_CONTINUATION = 100  # 50 equilibration + 50 production; warm-started.
+EQUILIBRATION_WINDOW_BLOCKS = 25  # _equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
 
 USE_CONTINUATION = True
 
@@ -288,6 +342,84 @@ def _build_campaign(n_atoms: int, reference_runs: tuple[RunSpec, ...]) -> Campai
     return CampaignSpec(runs=runs, name=f"aupt_{n_atoms}atoms_independent")
 
 
+def _load_delta_mu_ref(
+    reference_path: Path, temperatures_k: Sequence[float], symbols: list[str], *, allow_unresolved: bool,
+) -> dict[float, float]:
+    """delta_mu_ref_eV per requested temperature, from
+    reference_energy_calibration.py's reference_energies.json (this file's
+    own TEMPERATURES_K, imported there as ``campaign.TEMPERATURES_K``, so the
+    default calibration grid already covers every temperature this campaign
+    needs). Raises on a missing temperature, a species mismatch, or an
+    unresolved equilibration_gate (unless allow_unresolved) -- silently
+    proceeding on any of those would reproduce exactly the uncalibrated-
+    delta_mu problem this loader exists to fix. Ported from
+    nvalchemi-toolkit-quest-deploy's
+    tests/scout_sgc_temperature_composition_drift.py (different repo, no
+    shared import path).
+    """
+    reference_data = json.loads(reference_path.read_text())
+    reference = reference_data["reference"]
+    if list(reference_data.get("symbols", [])) != list(symbols):
+        raise ValueError(
+            f"{reference_path} was calibrated for symbols {reference_data.get('symbols')}, "
+            f"this run uses {symbols} -- refusing to mix calibrations across species orderings"
+        )
+    resolved: dict[float, float] = {}
+    for t in temperatures_k:
+        key = f"{t:g}"
+        entry = reference.get(key)
+        if entry is None:
+            raise ValueError(
+                f"{reference_path} has no entry for T={t:g} K -- rerun "
+                f"reference_energy_calibration.py with --temperatures-k including {t:g}, "
+                "or this campaign's TEMPERATURES_K no longer matches its calibration"
+            )
+        if "delta_mu_ref_eV" not in entry:
+            raise ValueError(
+                f"{reference_path}'s T={t:g} K entry has no delta_mu_ref_eV "
+                "(only written for the 2-species case)"
+            )
+        gate_status = {
+            symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols
+        }
+        if not allow_unresolved and not all(status is True for status in gate_status.values()):
+            raise ValueError(
+                f"T={t:g} K: equilibration_gate.resolved is {gate_status}, not all True -- "
+                "this reference value isn't trustworthy enough to anchor delta_mu on. Pass "
+                "--allow-unresolved-reference to proceed anyway (not recommended)."
+            )
+        resolved[t] = entry["delta_mu_ref_eV"]
+    return resolved
+
+
+def _apply_calibrated_delta_mu(
+    campaign: CampaignSpec, delta_mu_ref_by_t: dict[float, float],
+) -> CampaignSpec:
+    """Replace every run's literal chemical_potentials_ev with
+    {Au: 0.0, Pt: delta_mu_ref_by_t[T] + delta_mu_excess}, using each run's
+    OWN temperature_k -- not just the 3000 K reference row's -- since
+    delta_mu_ref(T) genuinely varies with T (phase_diagram_guide.md section
+    3). delta_mu_excess is recovered from each run's
+    metadata["delta_mu_ev"] -- the DELTA_MU_EV column identity that
+    _build_campaign already carries unchanged through every reference and
+    continuation-child row (``dataclasses.replace`` only overrides the
+    fields it's given), so this is a pure post-processing pass: it does not
+    change which runs exist or how they're connected, only the chemical
+    potentials attached to each.
+    """
+    runs = tuple(
+        replace(
+            run,
+            chemical_potentials_ev={
+                SPECIES[0]: 0.0,
+                SPECIES[1]: delta_mu_ref_by_t[run.temperature_k] + float(run.metadata["delta_mu_ev"]),
+            },
+        )
+        for run in campaign.runs
+    )
+    return replace(campaign, runs=runs)
+
+
 def profile_workload(
     model: UMAWrapper,
     template: Atoms,
@@ -361,6 +493,91 @@ def select_batch_width(
     return width
 
 
+def _pt_fraction_per_graph(batch: Batch, pt_number: int, n_graphs: int) -> list[float]:
+    """Per-graph Pt atomic fraction, one GPU->CPU sync. Ported from
+    nvalchemi-toolkit-quest-deploy's scout_sgc_temperature_composition_drift.py
+    (different repo, no shared import path).
+    """
+    dtype = batch.positions.dtype
+    pt_mask = (batch.atomic_numbers == pt_number).to(dtype)
+    n_pt = torch.bincount(batch.batch_idx, weights=pt_mask, minlength=n_graphs)
+    n_total = torch.bincount(batch.batch_idx, minlength=n_graphs).to(dtype)
+    return (n_pt / n_total).detach().cpu().tolist()
+
+
+def _equilibration_gate(series: list[float], window: int) -> dict:
+    """PHASE_DIAGRAM_MANUAL.md section 7's live gate, one-shot: compare the
+    last two `window`-block windows' means against twice their combined
+    standard error. A single check run once at the end of a fixed-length run
+    -- NOT that section's full three-consecutive-checks protocol. Identical
+    to reference_energy_calibration.py's helper of the same name (different
+    repo, no shared import path).
+    """
+    if len(series) < 2 * window:
+        return {
+            "resolved": False,
+            "reason": f"fewer than {2 * window} blocks recorded ({len(series)})",
+        }
+    penultimate, last = series[-2 * window : -window], series[-window:]
+    mean_a, mean_b = statistics.fmean(penultimate), statistics.fmean(last)
+    se_a = statistics.pstdev(penultimate) / (window**0.5) if window > 1 else 0.0
+    se_b = statistics.pstdev(last) / (window**0.5) if window > 1 else 0.0
+    combined_se = (se_a**2 + se_b**2) ** 0.5
+    difference = mean_b - mean_a
+    return {
+        "resolved": bool(abs(difference) < 2 * combined_se) if combined_se > 0 else None,
+        "window_blocks": window,
+        "mean_penultimate_window": mean_a,
+        "mean_last_window": mean_b,
+        "difference": difference,
+        "combined_standard_error": combined_se,
+    }
+
+
+def _run_hybrid_with_observables(
+    hybrid: HybridMCMD, batch: Batch, n_blocks: int, n_graphs: int, pt_number: int,
+) -> tuple[Batch, list[list[float]], list[list[float]]]:
+    """Run n_blocks hybrid MC-MD blocks, recording each block's per-graph Pt
+    fraction and energy/atom -- the observable series _equilibration_gate
+    needs, which a plain ``hybrid.run(batch, n_blocks=n_blocks)`` call
+    doesn't expose (it returns only the final batch).
+
+    Reimplements ``HybridMCMD.run``'s loop body locally, using only its
+    public ``mc``/``md``/``mc_steps``/``md_steps`` attributes, instead of
+    calling ``hybrid.run(batch, n_blocks=1)`` in a Python loop: that would
+    re-enter ``with self.md:`` (a CUDA-stream context, see BaseDynamics) and
+    re-run ``md.compute``/``mc.synchronize`` once per recorded block instead
+    of once for the whole run, roughly doubling the compute cost. This
+    version enters the stream context exactly once, matching the original
+    method's cost, at the price of one extra small GPU->CPU transfer per
+    block for the recorded series (the same per-block-transfer pattern
+    reference_energy_calibration.py already uses).
+    """
+    if n_blocks < 1:
+        raise ValueError("n_blocks must be positive")
+    if getattr(batch, "forces", None) is None:
+        raise ValueError("hybrid MC-MD requires preallocated batch.forces")
+    atoms_per_graph = batch.num_nodes // n_graphs
+    pt_fraction_series: list[list[float]] = []
+    energy_per_atom_series: list[list[float]] = []
+
+    def _record() -> None:
+        pt_fraction_series.append(_pt_fraction_per_graph(batch, pt_number, n_graphs))
+        energies = batch.energy.flatten().detach().cpu().tolist()
+        energy_per_atom_series.append([e / atoms_per_graph for e in energies])
+
+    with hybrid.md:
+        hybrid.md.compute(batch)
+        hybrid.mc.synchronize(batch)
+        for _ in range(n_blocks):
+            hybrid.mc.run(batch, n_steps=hybrid.mc_steps)
+            hybrid.md.compute(batch)
+            hybrid.md.run(batch, n_steps=hybrid.md_steps)
+            hybrid.mc.synchronize(batch)
+            _record()
+    return batch, pt_fraction_series, energy_per_atom_series
+
+
 def _run_campaign(
     model: UMAWrapper,
     template: Atoms,
@@ -386,8 +603,12 @@ def _run_campaign(
                     "walker_blocks_per_second",
                     "mc_acceptance",
                     "continuation",
+                    "composition_gate_resolved",
+                    "energy_gate_resolved",
+                    "resolved",
                 ]
             )
+        pt_number = SPECIES[1]
         while ready := scheduler.ready_batches(batch_width):
             for runs in ready:
                 n_blocks = N_BLOCKS_REFERENCE if runs[0].parent_id is None else N_BLOCKS_CONTINUATION
@@ -396,14 +617,43 @@ def _run_campaign(
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 start = time.perf_counter()
-                result = hybrid.run(batch, n_blocks=n_blocks)
+                result, pt_fraction_series, energy_per_atom_series = _run_hybrid_with_observables(
+                    hybrid, batch, n_blocks, len(runs), pt_number,
+                )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 elapsed = time.perf_counter() - start
                 acceptance = hybrid.mc.stats.acceptance
                 atoms_per_walker = result.num_nodes // len(runs)
-                for run, final_state in zip(runs, result.to_data_list()):
+                unresolved_run_ids = []
+                for graph_index, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
                     scheduler.complete(run.run_id, final_state)
+                    composition_series = [block[graph_index] for block in pt_fraction_series]
+                    energy_series = [block[graph_index] for block in energy_per_atom_series]
+                    composition_gate = _equilibration_gate(composition_series, EQUILIBRATION_WINDOW_BLOCKS)
+                    energy_gate = _equilibration_gate(energy_series, EQUILIBRATION_WINDOW_BLOCKS)
+                    resolved = (
+                        bool(composition_gate.get("resolved")) and bool(energy_gate.get("resolved"))
+                        if composition_gate.get("resolved") is not None and energy_gate.get("resolved") is not None
+                        else None
+                    )
+                    if resolved is not True:
+                        unresolved_run_ids.append(run.run_id)
+                    (scheduler.state_store.root / f"{run.run_id}.equilibration.json").write_text(
+                        json.dumps(
+                            {
+                                "run_id": run.run_id,
+                                "temperature_K": run.temperature_k,
+                                "n_blocks": n_blocks,
+                                "window_blocks": EQUILIBRATION_WINDOW_BLOCKS,
+                                "composition_gate": composition_gate,
+                                "energy_gate": energy_gate,
+                                "resolved": resolved,
+                            },
+                            indent=2,
+                        )
+                        + "\n"
+                    )
                     writer.writerow(
                         [
                             run.run_id,
@@ -414,6 +664,9 @@ def _run_campaign(
                             f"{len(runs) * n_blocks / elapsed:.4f}",
                             f"{acceptance:.4f}",
                             run.parent_id is not None,
+                            composition_gate.get("resolved"),
+                            energy_gate.get("resolved"),
+                            resolved,
                         ]
                     )
                 handle.flush()
@@ -422,6 +675,11 @@ def _run_campaign(
                     f"({len(runs) * n_blocks / elapsed:.3f} walker-blocks/s); "
                     f"SGC acceptance={acceptance:.3f}"
                 )
+                if unresolved_run_ids:
+                    print(
+                        f"[equilibration] WARNING: unresolved after {n_blocks} blocks (see "
+                        f"<run_id>.equilibration.json for diagnostics): {unresolved_run_ids}"
+                    )
     print(
         f"Campaign {campaign.name!r} complete: "
         f"{len(scheduler.completed_ids)} final states in {scheduler.state_store.root}"
@@ -439,6 +697,19 @@ def main() -> None:
         type=int,
         default=None,
         help="Skip auto-profiling and use this batch width instead.",
+    )
+    parser.add_argument(
+        "--reference-energies-json", type=Path, default=None,
+        help="reference_energy_calibration.py output. Rebuilds every run's "
+        "chemical_potentials_ev as {Au: 0.0, Pt: delta_mu_ref_eV(T) + delta_mu_excess} "
+        "at each run's own temperature, replacing the literal, uncalibrated DELTA_MU_EV "
+        "sweep. Recommended -- see module docstring 'Chemical-potential calibration'. "
+        "Omit to keep the old literal behavior (a warning is printed).",
+    )
+    parser.add_argument(
+        "--allow-unresolved-reference", action="store_true",
+        help="Proceed even if a needed temperature's calibration entry has "
+        "equilibration_gate.resolved != true. Off by default.",
     )
     args = parser.parse_args()
 
@@ -458,6 +729,21 @@ def main() -> None:
 
     reference_runs = _build_reference_runs(n_atoms)
     campaign = _build_campaign(n_atoms, reference_runs)
+    if args.reference_energies_json is not None:
+        symbols = [chemical_symbols[z] for z in SPECIES]
+        delta_mu_ref_by_t = _load_delta_mu_ref(
+            args.reference_energies_json, TEMPERATURES_K, symbols,
+            allow_unresolved=args.allow_unresolved_reference,
+        )
+        campaign = _apply_calibrated_delta_mu(campaign, delta_mu_ref_by_t)
+        print(f"[delta_mu] calibrated from {args.reference_energies_json}")
+    else:
+        print(
+            "[delta_mu] WARNING: no --reference-energies-json given -- using the "
+            "literal, uncalibrated DELTA_MU_EV sweep (chemical_potentials_ev="
+            "{Au: 0.0, Pt: delta_mu}). This does not locate the real Au-Pt phase "
+            "boundary; see module docstring 'Chemical-potential calibration'."
+        )
     scheduler = CampaignScheduler(campaign, FinalStateStore(checkpoint_dir))
     print(
         f"Campaign {campaign.name!r}: {len(campaign.runs)} runs, "
