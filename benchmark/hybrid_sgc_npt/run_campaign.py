@@ -61,6 +61,70 @@ literal, uncalibrated behavior (a runtime warning is printed) -- fine for a
 pure throughput/memory benchmark, not for drawing conclusions about the
 real Au-Pt phase boundary.
 
+Modes
+-----
+``--mode cooling`` (default) is the grid described above. ``--mode
+delta-mu-scan`` instead runs ``CampaignSpec.delta_mu_scan_runs`` (see also
+its convenience wrapper ``delta_mu_scan_from_endpoints``, for a single
+temperature with no cross-temperature continuation) across one or more
+``--scan-temperatures-k`` (highest first): at the highest
+temperature, two fresh A-rich/B-rich endpoints are built from scratch; at
+every next (lower) temperature, new endpoints are built as CONTINUATION
+CHILDREN of the immediately preceding temperature's own endpoints; then EACH
+temperature's own endpoint pair seeds its own two-branch delta_mu_excess scan,
+marching from +-``--delta-mu-excess-bracket-ev`` toward 0.0
+(``--delta-mu-excess-min-step-ev`` / ``--delta-mu-excess-refine-ratio``;
+non-uniform -- see "Delta_mu ladder spacing" below) (PHASE_DIAGRAM_MANUAL.md
+section 4, all of steps 1-4). Every temperature is built into ONE combined
+``CampaignSpec`` in a single script invocation -- a ``CampaignSpec`` must be
+a self-contained dependency graph, so chaining across separate script
+invocations by a bare run_id string does not work: the later invocation's
+campaign would reference a parent outside its own run set, which
+``CampaignSpec`` rejects at construction. A single-element
+``--scan-temperatures-k`` degenerates to one from-scratch scan with no
+cross-temperature continuation.
+
+Cross-temperature continuation chains each temperature's two SEED runs to
+the previous temperature's two seeds only -- not to that temperature's
+whole delta_mu ladder -- so a lower temperature becomes ready once the
+higher temperature's seeds finish, and from there ``ready_batches`` can
+pack that ladder together with the next temperature's seeds (batch
+compatibility ignores temperature). Generation 1 is still only the highest
+temperature's 2 seeds, though, regardless of how many temperatures are
+requested. Pass ``--scan-independent-temperatures`` to drop the chaining
+altogether: every temperature's seed pair gets ``parent_id=None`` and all
+of them (``2 * len(--scan-temperatures-k)`` walkers) are ready at once in
+generation 1, at the cost of a fresh random-composition start at each
+temperature instead of a warm start from a neighboring one.
+
+Delta_mu ladder spacing
+------------------------
+Each branch's ladder is NON-uniform (``_endpoint_ladder``): every new point
+sits ``--delta-mu-excess-refine-ratio`` (default 0.5, i.e. halving) of the
+way from the previous point to 0.0, so the absolute step size shrinks
+geometrically approaching 0.0 and refinement stops once it would fall
+tighter than ``--delta-mu-excess-min-step-ev`` (default 0.01 eV) -- coarse
+sampling near the safe bracket endpoint (deep in one pure/near-pure phase,
+flat response, extra points buy nothing), fine sampling near the
+transition (steep response, where the coexistence boundary actually sits).
+E.g. bracket=0.2, min_step=0.01: -0.2, -0.1, -0.05, -0.025, -0.0125, 0.0.
+
+Auto-calibration
+-----------------
+``--reference-energies-json`` is now OPTIONAL in ``--mode delta-mu-scan``
+(it remains required-if-given-must-be-complete for ``--mode cooling``, via
+``_load_delta_mu_ref``). In scan mode, ``_load_available_delta_mu_ref`` uses
+whatever entries the file already has (or nothing, if the flag is omitted)
+and reports which requested ``--scan-temperatures-k`` are still missing;
+``compute_reference_energies`` then runs the missing temperatures' pure-Au/
+pure-Pt NPT calibration in-process, with the model already loaded for the
+alloy runs above -- one script invocation, one GPU, no manual pre-step. The
+result is written to ``<--checkpoint-root>/atoms<n>/auto_reference_energies.json``
+for provenance and reuse (pass it back in as ``--reference-energies-json``
+next time to skip recalibrating). Each auto-calibrated temperature's own
+``equilibration_gate`` is still checked, exactly as for a file-supplied one
+(``--allow-unresolved-reference`` governs both).
+
 Continuation
 ------------
 Each delta_mu column is one ``CampaignSpec.cooling_from_reference`` chain: an
@@ -188,6 +252,8 @@ SEED = 20260827
 EQUILIBRATION_BLOCKS = 50
 N_BLOCKS_REFERENCE = 200  # 50 equilibration + 150 production; no parent state.
 N_BLOCKS_CONTINUATION = 100  # 50 equilibration + 50 production; warm-started.
+N_BLOCKS_SCAN_SEED = 200  # Fresh A-rich/B-rich endpoint burn-in; no parent state.
+N_BLOCKS_SCAN_STEP = 100  # Per delta_mu_excess step along a scan branch; warm-started.
 EQUILIBRATION_WINDOW_BLOCKS = 25  # _equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
 
 USE_CONTINUATION = True
@@ -340,6 +406,389 @@ def _build_campaign(n_atoms: int, reference_runs: tuple[RunSpec, ...]) -> Campai
         for temperature in TEMPERATURES_K
     )
     return CampaignSpec(runs=runs, name=f"aupt_{n_atoms}atoms_independent")
+
+
+def _endpoint_ladder(seed_value: float, min_step_ev: float, refine_ratio: float = 0.5) -> tuple[float, ...]:
+    """Values from ``seed_value`` in toward (and including) 0.0, NON-UNIFORMLY
+    spaced -- the per-branch delta_mu_excess ladder for
+    ``CampaignSpec.delta_mu_scan_from_endpoints``. ``seed_value`` is the safe,
+    extreme starting point (PHASE_DIAGRAM_MANUAL.md section 4 step 1); walking
+    it toward 0.0 is section 4 step 3's "sweep outward from each endpoint,"
+    i.e. away from the safe corner and toward the transition.
+
+    Each new point is ``refine_ratio`` (default 0.5, i.e. halving) times the
+    PREVIOUS point's own remaining distance to 0.0, so the absolute step size
+    shrinks geometrically every point: coarse near the endpoint (deep in one
+    pure/near-pure phase, where composition responds flatly to delta_mu_excess
+    and extra resolution buys nothing) and increasingly fine near 0.0 (the
+    interesting, steep-response region close to the coexistence boundary).
+    Stops refining once the NEXT point would fall closer than ``min_step_ev``
+    to its predecessor, and always lands exactly on 0.0.
+    """
+    if min_step_ev <= 0.0:
+        raise ValueError("min_step_ev must be positive")
+    if not 0.0 < refine_ratio < 1.0:
+        raise ValueError("refine_ratio must be strictly between 0.0 and 1.0")
+    values = [seed_value]
+    remaining = abs(seed_value)
+    sign = 1.0 if seed_value > 0.0 else -1.0
+    while remaining * refine_ratio > min_step_ev:
+        remaining *= refine_ratio
+        values.append(round(sign * remaining, 10))
+    if values[-1] != 0.0:
+        values.append(0.0)
+    return tuple(values)
+
+
+def _build_delta_mu_scan_schedule(
+    n_atoms: int,
+    temperatures_k: Sequence[float],
+    delta_mu_ref_by_t: dict[float, float],
+    bracket_ev: float,
+    min_step_ev: float,
+    refine_ratio: float = 0.5,
+    *,
+    independent_temperatures: bool = False,
+) -> tuple[CampaignSpec, tuple[RunSpec, ...]]:
+    """Two-branch chemical-potential scans across one or more temperatures,
+    combined into ONE ``CampaignSpec`` (PHASE_DIAGRAM_MANUAL.md section 4,
+    all of steps 1-4).
+
+    At ``temperatures_k[0]`` (the highest), two fresh A-rich/B-rich endpoints
+    are built from scratch (step 1). At every next, lower temperature, new
+    endpoints are built as continuation children of the immediately
+    preceding temperature's own endpoints via ``RunSpec.parent_id`` --
+    ``cooling_from_reference``'s pattern, applied to just the two endpoints
+    -- never an interior, history-dependent state (step 4). Independently at
+    EACH temperature, that temperature's own endpoint pair seeds a two-branch
+    delta_mu_excess scan marching toward 0.0
+    (``CampaignSpec.delta_mu_scan_from_endpoints``, step 3). Every run across
+    every temperature lands in the one returned ``CampaignSpec`` -- required,
+    since a ``CampaignSpec`` must be a self-contained dependency graph (see
+    module docstring "Modes").
+
+    ``temperatures_k`` must be strictly decreasing (a single-element sequence
+    is a from-scratch scan with no cross-temperature continuation).
+    ``delta_mu_ref_by_t`` must already have every requested temperature's
+    calibrated reference (section 3), keyed exactly as ``_load_delta_mu_ref``
+    returns it. Returns the campaign plus every temperature's two endpoint
+    ``RunSpec``s, in schedule order, for batch-width profiling (see
+    ``select_batch_width``).
+
+    Concurrency note: cross-temperature continuation only chains each
+    temperature's two SEED runs to the previous temperature's two seeds --
+    not to that temperature's entire delta_mu ladder. So a lower temperature
+    becomes ready as soon as the higher temperature's seeds finish, not after
+    its whole scan finishes; from there on, ``ready_batches`` can pack that
+    temperature's own ladder steps together with the next temperature's
+    seeds (same ``compatibility_key``, which ignores temperature). The one
+    real bottleneck is generation 1: only the highest temperature's 2 seeds
+    are ready at the very start, so early batch width is 2 regardless of how
+    many temperatures are requested. Pass ``independent_temperatures=True``
+    to remove cross-temperature continuation altogether -- every
+    temperature's seed pair becomes ``parent_id=None`` and all of them are
+    ready simultaneously in generation 1 (``2 * len(temperatures_k)`` walkers
+    at once), at the cost of each temperature's endpoints starting from a
+    fresh random composition instead of a warm start from a nearby T.
+    """
+    temperatures = tuple(float(t) for t in temperatures_k)
+    if not temperatures:
+        raise ValueError("at least one temperature is required")
+    if any(left <= right for left, right in zip(temperatures, temperatures[1:])):
+        raise ValueError("temperatures_k must decrease strictly")
+    if bracket_ev <= 0.0:
+        raise ValueError("bracket_ev must be positive")
+    missing = set(temperatures) - set(delta_mu_ref_by_t)
+    if missing:
+        raise ValueError(f"delta_mu_ref_by_t has no entry for {sorted(missing)!r}")
+
+    ladder_a_excess = _endpoint_ladder(-bracket_ev, min_step_ev, refine_ratio)
+    ladder_b_excess = _endpoint_ladder(bracket_ev, min_step_ev, refine_ratio)
+
+    runs: list[RunSpec] = []
+    endpoints: list[RunSpec] = []
+    parent_a: str | None = None
+    parent_b: str | None = None
+    for temperature_k in temperatures:
+        delta_mu_ref_ev = delta_mu_ref_by_t[temperature_k]
+        ladder_a = tuple(delta_mu_ref_ev + excess for excess in ladder_a_excess)
+        ladder_b = tuple(delta_mu_ref_ev + excess for excess in ladder_b_excess)
+        seed_a = RunSpec(
+            run_id=f"atoms{n_atoms}.T{temperature_k:g}.Arich",
+            temperature_k=temperature_k,
+            pressure_ev_per_a3=PRESSURE_EV_PER_A3,
+            chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: ladder_a[0]},
+            parent_id=parent_a,
+            species=SPECIES,
+            batch_group=f"atoms{n_atoms}",
+            metadata={
+                "seed_delta_mu_excess_ev": ladder_a_excess[0],
+                "n_atoms": n_atoms,
+                "branch": "A_rich",
+                "pt_fraction": 0.05,
+            },
+        )
+        seed_b = RunSpec(
+            run_id=f"atoms{n_atoms}.T{temperature_k:g}.Brich",
+            temperature_k=temperature_k,
+            pressure_ev_per_a3=PRESSURE_EV_PER_A3,
+            chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: ladder_b[0]},
+            parent_id=parent_b,
+            species=SPECIES,
+            batch_group=f"atoms{n_atoms}",
+            metadata={
+                "seed_delta_mu_excess_ev": ladder_b_excess[0],
+                "n_atoms": n_atoms,
+                "branch": "B_rich",
+                "pt_fraction": 0.95,
+            },
+        )
+        # delta_mu_scan_runs (not delta_mu_scan_from_endpoints): when
+        # temperature_k is not the first in the schedule, seed_a/seed_b's own
+        # parent_id points at the PREVIOUS temperature's endpoints, which are
+        # not part of this call's own seeds -- delta_mu_scan_from_endpoints
+        # would reject that immediately. Every temperature's runs are
+        # accumulated here and validated together in exactly one
+        # CampaignSpec(...) call below, once every parent_id (both the
+        # within-temperature delta_mu ladder and the cross-temperature
+        # endpoint chain) resolves inside the same combined run set.
+        runs.extend(
+            CampaignSpec.delta_mu_scan_runs((seed_a, seed_b), (ladder_a, ladder_b), SPECIES[1])
+        )
+        endpoints.extend((seed_a, seed_b))
+        if not independent_temperatures:
+            # Chains to the SEED, not the last ladder child (see docstring above).
+            parent_a, parent_b = seed_a.run_id, seed_b.run_id
+
+    campaign = CampaignSpec(runs=tuple(runs), name=f"aupt_{n_atoms}atoms_deltamu_scan_schedule")
+    return campaign, tuple(endpoints)
+
+
+def _build_pure_element_template(symbol: str, n_atoms: int) -> Atoms:
+    """A pure-element supercell at ASE's own reference lattice constant,
+    matching the alloy's crystal structure/repeat count. Deliberately omits
+    ``a=`` (unlike ``build_ase_structure``, which always uses the shared,
+    Au-based ``LATTICE_A_ANG``): each end-member should start near its OWN
+    equilibrium volume -- reusing the shared lattice constant would just
+    reintroduce the volume-relaxation skew this calibration removes. NPT's
+    barostat does the actual equilibration; this only sets a physically
+    reasonable starting point. Adapted from nvalchemi-toolkit-quest-deploy's
+    reference_energy_calibration.py (different repo, no shared import path;
+    duplicated here, rather than imported, so ``--mode delta-mu-scan`` can
+    auto-calibrate in-process with the model already loaded for the alloy
+    runs -- see that script's module docstring for the full physical
+    rationale, and ``compute_reference_energies`` below).
+    """
+    repeats = SIZE_REPEATS[n_atoms]
+    unit_cell = bulk(symbol, crystalstructure=CRYSTAL_STRUCTURE, cubic=CONVENTIONAL_CELL)
+    template = unit_cell * repeats
+    if len(template) != n_atoms:
+        raise ValueError(f"expected {n_atoms} atoms for pure {symbol}, repeats={repeats} built {len(template)}")
+    return template
+
+
+def _pure_element_endpoint(
+    template: Atoms, temperature_k: float, velocity_seed: int, device: torch.device,
+) -> AtomicData:
+    """One pure-element ``AtomicData`` with a Maxwell-Boltzmann velocity draw
+    at ``temperature_k``. Adapted from reference_energy_calibration.py."""
+    data = AtomicData.from_atoms(template, device=device)
+    n = data.num_nodes
+    data.atomic_masses = None
+    data.use_default_masses()
+    generator = torch.Generator(device=device).manual_seed(velocity_seed)
+    velocity_std = torch.sqrt(torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses)
+    data.velocities = torch.randn((n, 3), device=device, generator=generator) * velocity_std[:, None]
+    data.velocities -= data.velocities.mean(dim=0, keepdim=True)
+    data.forces = torch.zeros_like(data.positions)
+    data.energy = torch.zeros(1, 1, device=device)
+    data.stress = torch.zeros(1, 3, 3, device=device)
+    return data
+
+
+def _cell_volumes(batch: Batch) -> torch.Tensor:
+    """Per-graph cell volume (A^3), robust to a possibly-unbatched cell tensor."""
+    cell = batch.cell if batch.cell.ndim == 3 else batch.cell.unsqueeze(0)
+    return torch.linalg.det(cell)
+
+
+def compute_reference_energies(
+    model: UMAWrapper,
+    temperatures_k: Sequence[float],
+    n_atoms: int,
+    *,
+    n_blocks: int,
+    md_steps_per_block: int,
+    equilibration_window_blocks: int,
+    velocity_seed: int,
+    device: torch.device,
+) -> dict:
+    """Pure Au/Pt NPT reference-energy calibration, in-process, on an
+    ALREADY-LOADED model -- PHASE_DIAGRAM_MANUAL.md section 6.2's
+    ``delta_mu_ref(T) = g_Pt(T) - g_Au(T)``, computed at every requested
+    temperature. This is what lets ``--mode delta-mu-scan`` run completely
+    automatically on a single GPU: no second checkpoint load, no separate
+    script invocation, no manually-prepared ``reference_energies.json``.
+
+    Ported from nvalchemi-toolkit-quest-deploy's
+    reference_energy_calibration.py (different repo, no shared import path;
+    kept here, rather than imported, precisely so this project's toolkit-side
+    entry point stays self-sufficient -- see that script's module docstring
+    for the full physical rationale: each pure element is equilibrated
+    independently, from its own ASE reference lattice constant, through a
+    real NPT trajectory at the target temperature and the alloy's own
+    pressure/thermostat/barostat settings, one graph per (element,
+    temperature) in a single batch).
+
+    Returns the same ``reference_energies.json``-shaped dict that script
+    writes (``reference[T][symbol]`` plus, for the 2-species case,
+    ``delta_mu_ref_eV`` per temperature) -- the caller decides whether/where
+    to persist it and whether its ``equilibration_gate`` is trustworthy
+    enough to use.
+    """
+    temperatures = tuple(float(t) for t in temperatures_k)
+    if not temperatures:
+        raise ValueError("at least one temperature is required")
+    symbols = [chemical_symbols[z] for z in SPECIES]
+    templates = {
+        number: _build_pure_element_template(symbol, n_atoms) for number, symbol in zip(SPECIES, symbols)
+    }
+
+    graph_index: list[tuple[int, float]] = [(number, t) for number in SPECIES for t in temperatures]
+    data_list = [
+        _pure_element_endpoint(templates[number], t, velocity_seed + i, device)
+        for i, (number, t) in enumerate(graph_index)
+    ]
+    batch = Batch.from_data_list(data_list)
+    n_graphs = len(graph_index)
+
+    temperatures_tensor = torch.tensor([t for _, t in graph_index], device=device)
+    npt = NPT(
+        model=model,
+        dt=DT_FS,
+        temperature=temperatures_tensor,
+        pressure=torch.full((n_graphs,), PRESSURE_EV_PER_A3, device=device),
+        thermostat_time=THERMOSTAT_TIME_FS,
+        barostat_time=BAROSTAT_TIME_FS,
+        pressure_coupling="isotropic",
+    )
+
+    energy_per_atom_series: list[list[float]] = [[] for _ in range(n_graphs)]
+    volume_per_atom_series: list[list[float]] = [[] for _ in range(n_graphs)]
+
+    def _record() -> None:
+        energies = batch.energy.detach().reshape(-1)
+        counts = batch.num_nodes_per_graph.to(energies.dtype)
+        volumes = _cell_volumes(batch)
+        for i in range(n_graphs):
+            energy_per_atom_series[i].append(float(energies[i] / counts[i]))
+            volume_per_atom_series[i].append(float(volumes[i] / counts[i]))
+
+    with npt:
+        npt.compute(batch)
+        _record()
+        for _ in range(n_blocks):
+            npt.run(batch, n_steps=md_steps_per_block)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            _record()
+
+    window = equilibration_window_blocks
+    n_rep = SIZE_REPEATS[n_atoms][0]
+    reference: dict[str, dict] = {}
+    for i, (number, t) in enumerate(graph_index):
+        symbol = chemical_symbols[number]
+        energy_gate = _equilibration_gate(energy_per_atom_series[i][1:], window)
+        volume_gate = _equilibration_gate(volume_per_atom_series[i][1:], window)
+        resolved = (
+            bool(energy_gate.get("resolved")) and bool(volume_gate.get("resolved"))
+            if energy_gate.get("resolved") is not None and volume_gate.get("resolved") is not None
+            else None
+        )
+        tail = min(window, len(energy_per_atom_series[i]))
+        mean_energy = statistics.fmean(energy_per_atom_series[i][-tail:])
+        mean_volume = statistics.fmean(volume_per_atom_series[i][-tail:])
+        se_energy = (
+            statistics.pstdev(energy_per_atom_series[i][-tail:]) / (tail**0.5) if tail > 1 else float("nan")
+        )
+        lattice_a = (mean_volume * n_atoms) ** (1 / 3) / n_rep
+        reference.setdefault(f"{t:g}", {})[symbol] = {
+            "atomic_number": number,
+            "energy_eV_per_atom": mean_energy,
+            "energy_eV_per_atom_standard_error": se_energy,
+            "volume_A3_per_atom": mean_volume,
+            "lattice_constant_a_ang": lattice_a,
+            "averaging_window_blocks": tail,
+            "equilibration_gate": {"energy": energy_gate, "volume": volume_gate, "resolved": resolved},
+        }
+
+    s0, s1 = symbols
+    for t_entry in reference.values():
+        t_entry["delta_mu_ref_eV"] = t_entry[s1]["energy_eV_per_atom"] - t_entry[s0]["energy_eV_per_atom"]
+        t_entry["delta_mu_ref_definition"] = f"mu({s1}) - mu({s0}), per PHASE_DIAGRAM_MANUAL.md section 6.2"
+
+    return {
+        "checkpoint": CHECKPOINT,
+        "task_name": TASK,
+        "species": list(SPECIES),
+        "symbols": symbols,
+        "crystal_structure": CRYSTAL_STRUCTURE,
+        "conventional_cell": CONVENTIONAL_CELL,
+        "n_atoms_per_graph": n_atoms,
+        "pressure_ev_per_a3": PRESSURE_EV_PER_A3,
+        "n_blocks": n_blocks,
+        "md_steps_per_block": md_steps_per_block,
+        "equilibration_window_blocks": window,
+        "reference": reference,
+    }
+
+
+def _load_available_delta_mu_ref(
+    reference_path: Path | None, temperatures_k: Sequence[float], symbols: list[str], *, allow_unresolved: bool,
+) -> tuple[dict[float, float], tuple[float, ...]]:
+    """Like ``_load_delta_mu_ref``, but tolerant of a MISSING temperature:
+    returns whatever calibrated ``delta_mu_ref_eV`` values ARE already in
+    ``reference_path`` (or an empty dict, with every requested temperature
+    reported missing, if ``reference_path`` is None), plus the requested
+    temperatures still needing calibration, highest first (ready to feed
+    straight into ``compute_reference_energies``). A species-order mismatch
+    or an unresolved ``equilibration_gate`` (without ``allow_unresolved``)
+    remain fatal -- those are correctness problems, not merely absent data,
+    so silently proceeding would reproduce the uncalibrated-delta_mu problem
+    this whole calibration step exists to fix; only a temperature's outright
+    absence is treated as "auto-calibrate it" rather than an error.
+    """
+    if reference_path is None:
+        return {}, tuple(sorted({float(t) for t in temperatures_k}, reverse=True))
+    reference_data = json.loads(reference_path.read_text())
+    reference = reference_data["reference"]
+    if list(reference_data.get("symbols", [])) != list(symbols):
+        raise ValueError(
+            f"{reference_path} was calibrated for symbols {reference_data.get('symbols')}, "
+            f"this run uses {symbols} -- refusing to mix calibrations across species orderings"
+        )
+    found: dict[float, float] = {}
+    missing: list[float] = []
+    for t in temperatures_k:
+        t = float(t)
+        entry = reference.get(f"{t:g}")
+        if entry is None:
+            missing.append(t)
+            continue
+        if "delta_mu_ref_eV" not in entry:
+            raise ValueError(
+                f"{reference_path}'s T={t:g} K entry has no delta_mu_ref_eV "
+                "(only written for the 2-species case)"
+            )
+        gate_status = {symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols}
+        if not allow_unresolved and not all(status is True for status in gate_status.values()):
+            raise ValueError(
+                f"T={t:g} K: equilibration_gate.resolved is {gate_status}, not all True -- "
+                "this reference value isn't trustworthy enough to anchor delta_mu on. Pass "
+                "--allow-unresolved-reference to proceed anyway (not recommended)."
+            )
+        found[t] = entry["delta_mu_ref_eV"]
+    return found, tuple(sorted(set(missing), reverse=True))
 
 
 def _load_delta_mu_ref(
@@ -586,8 +1035,18 @@ def _run_campaign(
     batch_width: int,
     device: torch.device,
     log_path: Path,
+    n_blocks_root: int,
+    n_blocks_continuation: int,
 ) -> None:
-    """Run every ready batch to completion, logging per-batch throughput."""
+    """Run every ready batch to completion, logging per-batch throughput.
+
+    ``n_blocks_root`` applies to a run with no parent (a fresh reference row
+    or scan endpoint); ``n_blocks_continuation`` applies to every run with a
+    parent_id, whether that continuation is across temperature (cooling),
+    across delta_mu_excess (a scan branch step), or an endpoint carried
+    forward to a new temperature (scan section 4 steps 2/4) -- the budget
+    only depends on whether a run is warm-started, not which axis moved.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not log_path.exists()
     with log_path.open("a", newline="") as handle:
@@ -611,7 +1070,7 @@ def _run_campaign(
         pt_number = SPECIES[1]
         while ready := scheduler.ready_batches(batch_width):
             for runs in ready:
-                n_blocks = N_BLOCKS_REFERENCE if runs[0].parent_id is None else N_BLOCKS_CONTINUATION
+                n_blocks = n_blocks_root if runs[0].parent_id is None else n_blocks_continuation
                 parents = tuple(scheduler.parent_state(run, device=device) for run in runs)
                 hybrid, batch = make_workload(model, template, runs, parents, device)
                 if device.type == "cuda":
@@ -644,6 +1103,9 @@ def _run_campaign(
                             {
                                 "run_id": run.run_id,
                                 "temperature_K": run.temperature_k,
+                                "chemical_potentials_ev": {
+                                    chemical_symbols[z]: run.chemical_potentials_ev[z] for z in SPECIES
+                                },
                                 "n_blocks": n_blocks,
                                 "window_blocks": EQUILIBRATION_WINDOW_BLOCKS,
                                 "composition_gate": composition_gate,
@@ -687,7 +1149,9 @@ def _run_campaign(
 
 
 def main() -> None:
-    """Entry point: run one system size's cooling campaign end-to-end."""
+    """Entry point: run one system size's cooling campaign, or its
+    two-branch delta_mu-scan schedule across one or more temperatures
+    (--mode delta-mu-scan), end-to-end."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints"))
@@ -711,6 +1175,81 @@ def main() -> None:
         help="Proceed even if a needed temperature's calibration entry has "
         "equilibration_gate.resolved != true. Off by default.",
     )
+    parser.add_argument(
+        "--mode", choices=["cooling", "delta-mu-scan"], default="cooling",
+        help="'cooling' (default): the existing 3000->1600 K, fixed-delta_mu "
+        "campaign. 'delta-mu-scan': a two-branch (A-rich/B-rich) "
+        "delta_mu_excess continuation across one or more "
+        "--scan-temperatures-k (PHASE_DIAGRAM_MANUAL.md section 4, all of "
+        "steps 1-4). Fully automatic: any requested temperature missing "
+        "from --reference-energies-json (or its complete absence) is "
+        "calibrated in-process first, on the same GPU and the same already-"
+        "loaded model, via compute_reference_energies -- see 'Auto-"
+        "calibration' below.",
+    )
+    parser.add_argument(
+        "--scan-temperatures-k", type=float, nargs="+", default=None,
+        help="--mode delta-mu-scan only: one or more temperatures, HIGHEST "
+        "FIRST. A single value is a from-scratch scan at that temperature; "
+        "two or more chain each next (lower) temperature's two endpoints as "
+        "continuation children of the previous temperature's own endpoints "
+        "(section 4 steps 2 and 4), UNLESS --scan-independent-temperatures "
+        "is passed -- run every temperature in this ONE invocation, not as "
+        "separate script calls (see module docstring 'Modes'). Required in "
+        "delta-mu-scan mode.",
+    )
+    parser.add_argument(
+        "--scan-independent-temperatures", action="store_true",
+        help="--mode delta-mu-scan only: drop cross-temperature continuation "
+        "-- every requested temperature's A-rich/B-rich seed pair gets "
+        "parent_id=None instead of chaining to the previous temperature's "
+        "seeds, so all 2 * len(--scan-temperatures-k) seeds are ready "
+        "simultaneously in generation 1 instead of only the highest "
+        "temperature's 2. Trades a warm-started composition at each lower "
+        "temperature for full generation-1 batch width. Off by default.",
+    )
+    parser.add_argument(
+        "--delta-mu-excess-bracket-ev", type=float, default=0.2,
+        help="--mode delta-mu-scan only: half-width of the scan -- the seed "
+        "endpoints sit at delta_mu_excess = -bracket (A-rich) and +bracket "
+        "(B-rich), each marching toward 0.0. Default 0.2 eV.",
+    )
+    parser.add_argument(
+        "--delta-mu-excess-min-step-ev", type=float, default=0.01,
+        help="--mode delta-mu-scan only: finest (last, closest to 0.0) step "
+        "size in each branch's NON-UNIFORM ladder -- see "
+        "--delta-mu-excess-refine-ratio. Default 0.01 eV.",
+    )
+    parser.add_argument(
+        "--delta-mu-excess-refine-ratio", type=float, default=0.5,
+        help="--mode delta-mu-scan only: each new ladder point sits this "
+        "fraction of the way from the previous point to 0.0 (default 0.5, "
+        "i.e. halving), so steps shrink geometrically approaching the "
+        "transition and stay coarse near the safe bracket endpoint. Must be "
+        "in (0, 1).",
+    )
+    parser.add_argument(
+        "--calibration-n-blocks", type=int, default=100,
+        help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
+        "missing temperature's pure-Au/pure-Pt NPT run. Default 100 (matches "
+        "reference_energy_calibration.py's own default).",
+    )
+    parser.add_argument(
+        "--calibration-md-steps-per-block", type=int, default=None,
+        help="--mode delta-mu-scan only, auto-calibration: MD steps/block "
+        "for the calibration run. Defaults to MD_STEPS_PER_BLOCK (the "
+        "alloy's own value).",
+    )
+    parser.add_argument(
+        "--calibration-equilibration-window-blocks", type=int, default=25,
+        help="--mode delta-mu-scan only, auto-calibration: equilibration-gate "
+        "window, PHASE_DIAGRAM_MANUAL.md section 7. Default 25.",
+    )
+    parser.add_argument(
+        "--calibration-velocity-seed", type=int, default=None,
+        help="--mode delta-mu-scan only, auto-calibration: base velocity "
+        "seed. Defaults to SEED (the alloy's own base seed).",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -727,23 +1266,70 @@ def main() -> None:
         CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
     )
 
-    reference_runs = _build_reference_runs(n_atoms)
-    campaign = _build_campaign(n_atoms, reference_runs)
-    if args.reference_energies_json is not None:
+    if args.mode == "delta-mu-scan":
+        if not args.scan_temperatures_k:
+            parser.error("--mode delta-mu-scan requires --scan-temperatures-k")
         symbols = [chemical_symbols[z] for z in SPECIES]
-        delta_mu_ref_by_t = _load_delta_mu_ref(
-            args.reference_energies_json, TEMPERATURES_K, symbols,
+        delta_mu_ref_by_t, missing_temperatures = _load_available_delta_mu_ref(
+            args.reference_energies_json, args.scan_temperatures_k, symbols,
             allow_unresolved=args.allow_unresolved_reference,
         )
-        campaign = _apply_calibrated_delta_mu(campaign, delta_mu_ref_by_t)
-        print(f"[delta_mu] calibrated from {args.reference_energies_json}")
-    else:
-        print(
-            "[delta_mu] WARNING: no --reference-energies-json given -- using the "
-            "literal, uncalibrated DELTA_MU_EV sweep (chemical_potentials_ev="
-            "{Au: 0.0, Pt: delta_mu}). This does not locate the real Au-Pt phase "
-            "boundary; see module docstring 'Chemical-potential calibration'."
+        if missing_temperatures:
+            print(
+                f"[calibration] no reference energy for T={list(missing_temperatures)} K -- "
+                f"auto-calibrating pure {symbols[0]}/{symbols[1]} there now (same process, "
+                "same GPU, same model already loaded above)"
+            )
+            calibration = compute_reference_energies(
+                model, missing_temperatures, n_atoms,
+                n_blocks=args.calibration_n_blocks,
+                md_steps_per_block=args.calibration_md_steps_per_block or MD_STEPS_PER_BLOCK,
+                equilibration_window_blocks=args.calibration_equilibration_window_blocks,
+                velocity_seed=args.calibration_velocity_seed or SEED,
+                device=device,
+            )
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            calibration_path = checkpoint_dir / "auto_reference_energies.json"
+            calibration_path.write_text(json.dumps(calibration, indent=2) + "\n")
+            for t in missing_temperatures:
+                entry = calibration["reference"][f"{t:g}"]
+                gate_status = {symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols}
+                if not args.allow_unresolved_reference and not all(v is True for v in gate_status.values()):
+                    raise SystemExit(
+                        f"[calibration] auto-calibration at T={t:g} K did not pass the "
+                        f"equilibration gate ({gate_status}) -- rerun with a larger "
+                        "--calibration-n-blocks, or pass --allow-unresolved-reference to "
+                        "proceed anyway (not recommended)."
+                    )
+                delta_mu_ref_by_t[t] = entry["delta_mu_ref_eV"]
+                print(f"  T={t:g} K: delta_mu_ref = {entry['delta_mu_ref_eV']:.6f} eV (auto-calibrated)")
+            print(f"[calibration] wrote {calibration_path}")
+        campaign, endpoints = _build_delta_mu_scan_schedule(
+            n_atoms, args.scan_temperatures_k, delta_mu_ref_by_t,
+            args.delta_mu_excess_bracket_ev, args.delta_mu_excess_min_step_ev,
+            args.delta_mu_excess_refine_ratio,
+            independent_temperatures=args.scan_independent_temperatures,
         )
+        reference_runs = endpoints
+        print(f"[delta_mu] scan ready across T={args.scan_temperatures_k} K")
+    else:
+        reference_runs = _build_reference_runs(n_atoms)
+        campaign = _build_campaign(n_atoms, reference_runs)
+        if args.reference_energies_json is not None:
+            symbols = [chemical_symbols[z] for z in SPECIES]
+            delta_mu_ref_by_t = _load_delta_mu_ref(
+                args.reference_energies_json, TEMPERATURES_K, symbols,
+                allow_unresolved=args.allow_unresolved_reference,
+            )
+            campaign = _apply_calibrated_delta_mu(campaign, delta_mu_ref_by_t)
+            print(f"[delta_mu] calibrated from {args.reference_energies_json}")
+        else:
+            print(
+                "[delta_mu] WARNING: no --reference-energies-json given -- using the "
+                "literal, uncalibrated DELTA_MU_EV sweep (chemical_potentials_ev="
+                "{Au: 0.0, Pt: delta_mu}). This does not locate the real Au-Pt phase "
+                "boundary; see module docstring 'Chemical-potential calibration'."
+            )
     scheduler = CampaignScheduler(campaign, FinalStateStore(checkpoint_dir))
     print(
         f"Campaign {campaign.name!r}: {len(campaign.runs)} runs, "
@@ -758,7 +1344,12 @@ def main() -> None:
         batch_width = 1
         print("CUDA unavailable; using batch_width=1")
 
-    _run_campaign(model, template, scheduler, campaign, batch_width, device, log_path)
+    n_blocks_root = N_BLOCKS_SCAN_SEED if args.mode == "delta-mu-scan" else N_BLOCKS_REFERENCE
+    n_blocks_continuation = N_BLOCKS_SCAN_STEP if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
+    _run_campaign(
+        model, template, scheduler, campaign, batch_width, device, log_path,
+        n_blocks_root, n_blocks_continuation,
+    )
 
 
 if __name__ == "__main__":

@@ -198,6 +198,119 @@ class CampaignSpec:
                 parent_id = child_id
         return cls(runs=tuple(runs), name=name)
 
+    @classmethod
+    def delta_mu_scan_runs(
+        cls,
+        branch_seeds: Sequence[RunSpec],
+        branch_ladders: Sequence[Sequence[float]],
+        species: int,
+        *,
+        start_after: Sequence[str] = (),
+    ) -> tuple[RunSpec, ...]:
+        """Build two-branch chemical-potential continuation runs at one fixed temperature.
+
+        Each entry of ``branch_seeds`` is an already-defined endpoint run --
+        typically an A-rich and a B-rich state at the SAME temperature -- and
+        becomes the root of its own chain. ``branch_ladders`` gives, per seed
+        in the same order, every ``chemical_potentials_ev[species]`` value
+        that branch marches through in order; ``branch_ladders[i][0]`` must
+        equal ``branch_seeds[i].chemical_potentials_ev[species]`` (the seed's
+        own starting point), and later entries walk toward the opposite
+        branch's own value. Every step's only new dependency is the
+        immediately preceding step in its OWN branch, via ``RunSpec.parent_id``
+        -- branches never share a parent, so neither can be silently re-seeded
+        from the other's basin. This implements PHASE_DIAGRAM_MANUAL.md
+        section 4 step 3: "From the A-rich endpoint, perform an
+        increasing-delta_mu sweep; from the B-rich endpoint, perform a
+        decreasing-delta_mu sweep. Within either sweep, start each point from
+        the final state at the preceding chemical potential."
+
+        Returns a RAW tuple of every seed plus every marching child, in
+        construction order -- NOT yet wrapped in a validated
+        :class:`CampaignSpec`. A seed's own ``parent_id`` is deliberately not
+        checked against this method's own output: that lets a caller building
+        a LARGER combined campaign (e.g. one seed continuation-chained onto a
+        different temperature's own endpoint, ``run_campaign.py``'s
+        ``_build_delta_mu_scan_schedule``) accumulate several calls' runs and
+        validate the complete graph once, in one final
+        ``CampaignSpec(runs=..., name=...)``. Use
+        :meth:`delta_mu_scan_from_endpoints` instead for the common
+        standalone case (fresh, parentless seeds; validate immediately).
+
+        ``start_after`` adds a completion barrier to every step of every
+        branch; use it, e.g., to require an independent calibration or
+        coarse-screen job to finish first.
+        """
+        seeds = tuple(branch_seeds)
+        ladders = tuple(tuple(float(value) for value in ladder) for ladder in branch_ladders)
+        if len(seeds) < 2:
+            raise ValueError("a delta_mu scan requires at least two branch seeds")
+        if len(seeds) != len(ladders):
+            raise ValueError("branch_seeds and branch_ladders must have equal length")
+        ids = [seed.run_id for seed in seeds]
+        if len(ids) != len(set(ids)):
+            raise ValueError("branch seed run_id values must be unique")
+        temperature = seeds[0].temperature_k
+        if any(seed.temperature_k != temperature for seed in seeds):
+            raise ValueError("every branch seed must share one temperature")
+        for seed, ladder in zip(seeds, ladders):
+            if not ladder:
+                raise ValueError(
+                    f"branch ladder for {seed.run_id!r} must contain at least the seed's own value"
+                )
+            if species not in seed.chemical_potentials_ev:
+                raise ValueError(f"seed run {seed.run_id!r} has no chemical potential for species {species}")
+            if seed.chemical_potentials_ev[species] != ladder[0]:
+                raise ValueError(
+                    f"branch ladder for {seed.run_id!r} must start at its seed's own "
+                    f"chemical_potentials_ev[{species}] "
+                    f"({seed.chemical_potentials_ev[species]:g} eV), got {ladder[0]:g} eV"
+                )
+        barrier = tuple(start_after)
+        if set(barrier) & set(ids):
+            raise ValueError("start_after must not reference the branch seeds themselves")
+
+        runs = list(seeds)
+        for seed, ladder in zip(seeds, ladders):
+            parent_id = seed.run_id
+            for step_index, mu_value in enumerate(ladder[1:], start=1):
+                child_id = f"{seed.run_id}.dmu{step_index}.mu{mu_value:g}"
+                potentials = dict(seed.chemical_potentials_ev)
+                potentials[species] = mu_value
+                runs.append(
+                    replace(
+                        seed,
+                        run_id=child_id,
+                        chemical_potentials_ev=potentials,
+                        parent_id=parent_id,
+                        depends_on=barrier,
+                    )
+                )
+                parent_id = child_id
+        return tuple(runs)
+
+    @classmethod
+    def delta_mu_scan_from_endpoints(
+        cls,
+        branch_seeds: Sequence[RunSpec],
+        branch_ladders: Sequence[Sequence[float]],
+        species: int,
+        *,
+        name: str = "delta_mu_scan",
+        start_after: Sequence[str] = (),
+    ) -> CampaignSpec:
+        """Convenience wrapper around :meth:`delta_mu_scan_runs` for one
+        standalone, self-contained two-branch scan: builds the runs and
+        immediately validates them as a complete :class:`CampaignSpec`. Every
+        branch seed must therefore already be a root (``parent_id=None``) or
+        reference a parent within this SAME call's own seeds/children -- a
+        seed continued from a DIFFERENT temperature's own endpoint is not
+        representable here; use :meth:`delta_mu_scan_runs` directly and defer
+        validation to a combined, multi-temperature ``CampaignSpec`` instead.
+        """
+        runs = cls.delta_mu_scan_runs(branch_seeds, branch_ladders, species, start_after=start_after)
+        return cls(runs=runs, name=name)
+
 
 class FinalStateStore:
     """Atomic on-disk final states for continuation or campaign restart.
