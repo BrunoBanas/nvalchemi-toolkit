@@ -145,7 +145,12 @@ Hybrid block
 One block is ``MD_STEPS_PER_BLOCK`` MD steps at ``DT_FS`` followed by
 ``round(MC_STEP_FRACTION * n_atoms)`` MC trials (one attempted transmutation
 per graph per MC step). Reference runs run ``N_BLOCKS_REFERENCE`` blocks
-total, continuation children run ``N_BLOCKS_CONTINUATION``.
+total, continuation children run ``N_BLOCKS_CONTINUATION``. ``--md-steps-
+per-block`` overrides ``MD_STEPS_PER_BLOCK`` for the whole campaign (both
+modes); ``--md-steps-per-block 0`` runs pure SGC (MC moves only, no MD
+sub-step) for a direct SGC-vs-hybrid comparison -- use a different
+``--checkpoint-root`` for each, since run_ids (and therefore every output
+filename) are otherwise identical between the two.
 
 Equilibration gate
 -------------------
@@ -338,11 +343,14 @@ def make_workload(
     runs: tuple[RunSpec, ...],
     parent_states: tuple[AtomicData | None, ...],
     device: torch.device,
+    md_steps_per_block: int = MD_STEPS_PER_BLOCK,
 ) -> tuple[HybridMCMD, Batch]:
     """Return one per-graph hybrid MC-MD workload for compatible runs.
 
     The same model object is deliberately passed to both stages: ``HybridMCMD``
     requires every trial energy and MD force to come from one potential.
+    ``md_steps_per_block=0`` degenerates to pure SGC (MC moves only, no MD
+    sub-step) -- see ``--md-steps-per-block``.
     """
     if not runs:
         raise ValueError("a workload requires at least one run")
@@ -372,7 +380,7 @@ def make_workload(
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
     )
-    hybrid = HybridMCMD(mc=sgc, md=npt, mc_steps=mc_steps, md_steps=MD_STEPS_PER_BLOCK)
+    hybrid = HybridMCMD(mc=sgc, md=npt, mc_steps=mc_steps, md_steps=md_steps_per_block)
     return hybrid, _make_batch(template, runs, parent_states, device)
 
 
@@ -875,13 +883,14 @@ def profile_workload(
     reference_runs: tuple[RunSpec, ...],
     width: int,
     device: torch.device,
+    md_steps_per_block: int = MD_STEPS_PER_BLOCK,
 ) -> tuple[HybridMCMD, Batch]:
     """Build representative reference-row states for a capacity profile."""
     runs = tuple(
         replace(reference_runs[index % len(reference_runs)], run_id=f"profile.{index}")
         for index in range(width)
     )
-    return make_workload(model, template, runs, (None,) * width, device)
+    return make_workload(model, template, runs, (None,) * width, device, md_steps_per_block)
 
 
 def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> None:
@@ -916,6 +925,7 @@ def select_batch_width(
     reference_runs: tuple[RunSpec, ...],
     n_atoms: int,
     device: torch.device,
+    md_steps_per_block: int = MD_STEPS_PER_BLOCK,
 ) -> int:
     """Profile candidate widths, verify the memory floor, and recommend one."""
     planner = SimulationBatchPlanner(
@@ -923,7 +933,7 @@ def select_batch_width(
         throughput_fraction=BATCH_THROUGHPUT_FRACTION,
     )
     measurements = planner.profile(
-        lambda width, dev: profile_workload(model, template, reference_runs, width, dev),
+        lambda width, dev: profile_workload(model, template, reference_runs, width, dev, md_steps_per_block),
         BATCH_WIDTH_CANDIDATES[n_atoms],
         device=device,
         warmup_blocks=PROFILE_WARMUP_BLOCKS,
@@ -1037,6 +1047,7 @@ def _run_campaign(
     log_path: Path,
     n_blocks_root: int,
     n_blocks_continuation: int,
+    md_steps_per_block: int = MD_STEPS_PER_BLOCK,
 ) -> None:
     """Run every ready batch to completion, logging per-batch throughput.
 
@@ -1046,6 +1057,8 @@ def _run_campaign(
     across delta_mu_excess (a scan branch step), or an endpoint carried
     forward to a new temperature (scan section 4 steps 2/4) -- the budget
     only depends on whether a run is warm-started, not which axis moved.
+    ``md_steps_per_block=0`` runs pure SGC (MC moves only, no MD sub-step)
+    for every batch -- see ``--md-steps-per-block``.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not log_path.exists()
@@ -1072,7 +1085,7 @@ def _run_campaign(
             for runs in ready:
                 n_blocks = n_blocks_root if runs[0].parent_id is None else n_blocks_continuation
                 parents = tuple(scheduler.parent_state(run, device=device) for run in runs)
-                hybrid, batch = make_workload(model, template, runs, parents, device)
+                hybrid, batch = make_workload(model, template, runs, parents, device, md_steps_per_block)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 start = time.perf_counter()
@@ -1156,6 +1169,17 @@ def main() -> None:
     parser.add_argument("--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints"))
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--md-steps-per-block", type=int, default=None,
+        help="MD steps per hybrid block for the actual campaign runs (both "
+        "--mode cooling and --mode delta-mu-scan) -- NOT the calibration "
+        "sub-step (see --calibration-md-steps-per-block for that). Defaults "
+        "to MD_STEPS_PER_BLOCK (currently 50). Pass 0 for pure SGC (MC moves "
+        "only, no MD dynamics) -- e.g. to compare a pure-SGC job against a "
+        "hybrid job at the same --checkpoint-root-adjacent path (use "
+        "DIFFERENT --checkpoint-root values for the two, since run_ids and "
+        "therefore output filenames are otherwise identical).",
+    )
     parser.add_argument(
         "--batch-width",
         type=int,
@@ -1265,6 +1289,10 @@ def main() -> None:
     model = UMAWrapper.from_checkpoint(
         CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
     )
+    md_steps_per_block = (
+        args.md_steps_per_block if args.md_steps_per_block is not None else MD_STEPS_PER_BLOCK
+    )
+    print(f"[hybrid] md_steps_per_block={md_steps_per_block}" + (" (pure SGC)" if md_steps_per_block == 0 else ""))
 
     if args.mode == "delta-mu-scan":
         if not args.scan_temperatures_k:
@@ -1339,7 +1367,7 @@ def main() -> None:
     if args.batch_width is not None:
         batch_width = args.batch_width
     elif device.type == "cuda":
-        batch_width = select_batch_width(model, template, reference_runs, n_atoms, device)
+        batch_width = select_batch_width(model, template, reference_runs, n_atoms, device, md_steps_per_block)
     else:
         batch_width = 1
         print("CUDA unavailable; using batch_width=1")
@@ -1348,7 +1376,7 @@ def main() -> None:
     n_blocks_continuation = N_BLOCKS_SCAN_STEP if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
     _run_campaign(
         model, template, scheduler, campaign, batch_width, device, log_path,
-        n_blocks_root, n_blocks_continuation,
+        n_blocks_root, n_blocks_continuation, md_steps_per_block,
     )
 
 
