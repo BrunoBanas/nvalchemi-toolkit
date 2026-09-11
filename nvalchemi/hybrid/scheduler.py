@@ -56,8 +56,8 @@ class HybridMCMD:
         """
         if mc.model is not md.model:
             raise ValueError("MC and MD must share the same model object")
-        if mc_steps < 1 or md_steps < 1:
-            raise ValueError("mc_steps and md_steps must both be positive")
+        if mc_steps < 0 or md_steps < 0:
+            raise ValueError("mc_steps and md_steps must both be non-negative")
         self.mc = mc
         self.md = md
         self.mc_steps = mc_steps
