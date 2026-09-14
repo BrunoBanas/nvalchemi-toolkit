@@ -1,33 +1,54 @@
-"""Standalone diagnostic: NPT-then-SGC full-trajectory dump.
+"""Standalone diagnostic: NPT-then-SGC full-trajectory dump, MACE energy engine.
 
-Runs 300 raw NPT steps (equilibration, no MC at all) on a fresh 50/50 Au-Pt
-500-atom FCC alloy at 1400 K, then switches to 0.2*n_atoms = 100 raw SGC
-trial moves at a fixed delta_mu_ref_eV -- two sequential, NON-interleaved
-phases (unlike the real campaign's block-interleaved HybridMCMD), built to
-isolate whether the close-contact defect found in the delta-mu scan comes
-from NPT alone, from SGC alone, or only shows up once the two are combined.
+MACE counterpart of ``debug_npt_then_sgc.py``. Runs the exact same protocol
+against a MACE-MP foundation model instead of UMA: 300 raw NPT steps
+(equilibration, no MC at all) on a fresh 50/50 Au-Pt 500-atom FCC alloy at
+1400 K, then 0.2*n_atoms = 100 raw SGC trial moves at a fixed
+delta_mu_ref_eV -- two sequential, NON-interleaved phases (unlike the real
+campaign's block-interleaved HybridMCMD).
 
-Saves the FULL configuration after every single step of BOTH phases (not
-just once per block, the campaign's own granularity) as a normal
-FinalStateStore checkpoint, so the whole trajectory can be walked afterwards
-frame by frame. Also runs the same minimum-image overlap check and prints
-GPU memory every step, live, so a crash mid-run still leaves a usable trace.
+Only three things differ from the UMA original:
 
-Reuses run_campaign.py's own constants and _refresh_masses_after_transmutation
-(the mass-desync fix) plus export_structures.py's _to_atoms/_check_min_distance,
-via plain sibling-script imports -- run this from the same directory as those
-two files (matches how run_campaign.py itself is invoked).
+1. Model loading: :class:`~nvalchemi.models.mace.MACEWrapper` in place of
+   :class:`~nvalchemi.models.uma.UMAWrapper` (``--mace-checkpoint`` /
+   ``--dtype`` / ``--enable-cueq`` / ``--compile-model`` replace
+   ``CHECKPOINT`` / ``TASK`` / ``INFERENCE_SETTINGS``).
+2. Neighbor list wiring: UMA builds its own neighbor graph internally
+   (``UMAWrapper.model_config.neighbor_config`` is ``None``), so the UMA
+   script never registers a hook. MACE expects the framework to maintain
+   its COO neighbor list (see ``nvalchemi/models/mace.py``'s module
+   docstring), so this script explicitly registers a
+   :class:`~nvalchemi.hooks.NeighborListHook` on BOTH the NPT integrator
+   (rebuilds every MD step as positions/cell move) and the SGC sampler
+   (rebuilds before every trial's energy evaluation -- cheap insurance;
+   positions are frozen during the pure-SGC phase so the list computed at
+   the end of NPT would in practice stay valid, but rebuilding on the
+   sampler too removes any dependence on integrator step ordering).
+3. ``--delta-mu-ref-ev`` has NO default here (it does for the UMA script,
+   hardcoded from a prior UMA calibration). MACE's raw per-element energy
+   convention is a different model with a different offset -- reusing the
+   UMA number would silently encode the wrong chemical-potential origin
+   (see ``nvalchemi.mc.SGC``'s docstring and
+   ``reference_energy_calibration_mace.py``'s module docstring for why).
+   Run that calibration script first and pass its
+   ``reference[T]["delta_mu_ref_eV"]`` here.
+
+Everything else -- structure construction, the two-phase NPT-then-SGC
+protocol, the mass-desync fix, the min-image overlap check, the
+per-step FinalStateStore checkpointing -- is identical and reused from
+run_campaign.py / export_structures.py exactly as the UMA script does,
+which is the point: nvalchemi's BaseModelMixin interface makes the dynamics
+code model-agnostic (see docs/userguide/models.md).
 
 Run on Quest:
     source hpc/quest/env.sh
-    "$QUEST_ENV/bin/python" benchmark/hybrid_sgc_npt/debug_npt_then_sgc.py \\
-        --out-dir "$RUN_ROOT/hybrid_sgc_npt/debug_npt_then_sgc"
+    "$QUEST_ENV_MACE/bin/python" benchmark/hybrid_sgc_npt/debug_npt_then_sgc_mace.py \\
+        --out-dir "$RUN_ROOT/hybrid_sgc_npt/debug_npt_then_sgc_mace" \\
+        --delta-mu-ref-ev <value from reference_energy_calibration_mace.py at T=1400 K>
 
 Then convert/inspect the resulting checkpoints/*.pt the same way as any
-other campaign checkpoint directory, e.g. with export_structures.py against
---checkpoint-root pointed at this run's checkpoints/ folder (its run_ids
-won't match that script's <run_id> regex, which is fine -- this script
-writes its own two-phase .extxyz trajectories directly, below).
+other campaign checkpoint directory -- see debug_npt_then_sgc.py's own
+docstring for details (identical here).
 """
 
 from __future__ import annotations
@@ -42,18 +63,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from run_campaign import (  # noqa: E402
     BAROSTAT_TIME_FS,
-    CHECKPOINT,
     CONVENTIONAL_CELL,
     CRYSTAL_STRUCTURE,
     DT_FS,
-    INFERENCE_SETTINGS,
     KB_EV,
     LATTICE_A_ANG,
     PRESSURE_EV_PER_A3,
     SEED,
     SIZE_REPEATS,
     SPECIES,
-    TASK,
     TEMPLATE_SYMBOL,
     THERMOSTAT_TIME_FS,
     _refresh_masses_after_transmutation,
@@ -62,10 +80,19 @@ from run_campaign import (  # noqa: E402
 from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 
 from nvalchemi.data import AtomicData, Batch
+from nvalchemi.dynamics.base import DynamicsStage
 from nvalchemi.dynamics.integrators.npt import NPT
+from nvalchemi.hooks import NeighborListHook
 from nvalchemi.mc import SGC
-from nvalchemi.models.uma import UMAWrapper
+from nvalchemi.models.mace import MACEWrapper
 from nvalchemi.scheduling.campaign import FinalStateStore
+
+# MACE-MP checkpoint download cache: honor XDG_CACHE_HOME (see mace.tools.utils
+# .get_cache_dir) the same way run_campaign.py's UMA path honors HF_HOME --
+# both point at $RUN_ROOT/cache via hpc/quest/env.sh so neither fills $HOME's
+# default quota on Quest. No-op off Quest.
+
+_DTYPES = {"float32": torch.float32, "float64": torch.float64}
 
 
 def _print_memory(device: torch.device, label: str) -> None:
@@ -83,7 +110,7 @@ def _build_initial_state(
 ) -> AtomicData:
     """Fresh 500-atom state at the requested composition -- same construction
     as run_campaign.py's _walker(), minus the RunSpec/continuation machinery
-    this standalone test doesn't need."""
+    this standalone test doesn't need. Identical to the UMA script's version."""
     data = AtomicData.from_atoms(template, device=device)
     n_atoms = data.num_nodes
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -129,9 +156,39 @@ def main() -> None:
         "--n-sgc-steps", type=int, default=None,
         help="Default: round(0.2 * n_atoms), matching MC_STEP_FRACTION in run_campaign.py",
     )
-    parser.add_argument("--delta-mu-ref-ev", type=float, default=-2.9662178325653072)
+    parser.add_argument(
+        "--delta-mu-ref-ev", type=float, required=True,
+        help="mu(Pt) - mu(Au) for THIS MACE checkpoint, from "
+        "reference_energy_calibration_mace.py's reference[T]['delta_mu_ref_eV'] at "
+        "--temperature-k. No default -- see module docstring point 3.",
+    )
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument(
+        "--mace-checkpoint", type=str, default="medium-mpa-0",
+        help="Named MACE-MP foundation checkpoint (auto-downloaded and cached under "
+        "XDG_CACHE_HOME/mace) or a local .model/.pt path. Default 'medium-mpa-0' -- "
+        "mace-torch's own current default (MPtrj + Alexandria), 89-element coverage "
+        "including Au and Pt.",
+    )
+    parser.add_argument(
+        "--dtype", type=str, default="float32", choices=sorted(_DTYPES),
+        help="Cast MACE weights to this dtype. float32 matches the toolkit docs' "
+        "GPU-throughput recommendation; float64 trades speed for the precision some "
+        "MACE-MP checkpoints were originally released at.",
+    )
+    parser.add_argument(
+        "--enable-cueq", action="store_true",
+        help="Convert to cuEquivariance format for GPU speedup (requires the "
+        "cuequivariance-torch + cuequivariance-ops-torch-cuXX packages, i.e. the "
+        "toolkit's 'mace' extra installed alongside 'cu12' or 'cu13'). Off by default "
+        "for the first correctness pass.",
+    )
+    parser.add_argument(
+        "--compile-model", action="store_true",
+        help="torch.compile the model (inference-only afterward). Off by default: for "
+        "a short 400-step debug run, compilation overhead can dominate wall time.",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -150,12 +207,18 @@ def main() -> None:
     print(
         f"[setup] n_atoms={args.n_atoms} pt_fraction={args.pt_fraction} T={args.temperature_k} K "
         f"n_npt_steps={args.n_npt_steps} n_sgc_steps={n_sgc_steps} "
-        f"delta_mu_ref_eV={args.delta_mu_ref_ev} device={device}",
+        f"delta_mu_ref_eV={args.delta_mu_ref_ev} device={device} "
+        f"mace_checkpoint={args.mace_checkpoint} dtype={args.dtype} "
+        f"enable_cueq={args.enable_cueq} compile_model={args.compile_model}",
         flush=True,
     )
 
-    model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
+    model = MACEWrapper.from_checkpoint(
+        args.mace_checkpoint,
+        device=device,
+        dtype=_DTYPES[args.dtype],
+        enable_cueq=args.enable_cueq,
+        compile_model=args.compile_model,
     )
 
     data = _build_initial_state(template, args.temperature_k, args.pt_fraction, args.seed, device)
@@ -183,6 +246,17 @@ def main() -> None:
         species=list(SPECIES),
         chemical_potentials=chemical_potentials,
         random_seed=args.seed,
+    )
+
+    # MACE needs the framework to maintain its COO neighbor list (unlike UMA,
+    # which builds its own internally -- see module docstring point 2). Two
+    # separate hook instances, one per dynamics engine that calls the model,
+    # both firing at BEFORE_COMPUTE.
+    npt.register_hook(
+        NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
+    )
+    sgc.register_hook(
+        NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
     )
 
     # Phase 1: pure NPT equilibration -- no MC at all.

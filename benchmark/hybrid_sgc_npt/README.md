@@ -8,6 +8,7 @@ single 40 GB A100 GPU per size.
 | --- | --- |
 | `run_campaign.py` | The app: builds the grid, profiles a batch width, runs the campaign, logs throughput. |
 | `submit_campaign.slurm` | The input script: a 3-task SLURM array job, one task per size. |
+| `debug_npt_then_sgc_mace.py` | MACE counterpart of the sibling standalone diagnostic below -- see its module docstring. |
 
 ## Grid
 
