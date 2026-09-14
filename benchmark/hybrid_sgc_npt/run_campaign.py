@@ -187,6 +187,7 @@ import csv
 import json
 import statistics
 import time
+from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
@@ -1080,11 +1081,14 @@ def _run_campaign(
             writer.writerow(
                 [
                     "run_id",
+                    "timestamp_utc",
                     "n_atoms",
                     "batch_width",
                     "n_blocks",
                     "wall_seconds",
                     "walker_blocks_per_second",
+                    "peak_gpu_allocated_gb",
+                    "peak_gpu_reserved_gb",
                     "mc_acceptance",
                     "continuation",
                     "composition_gate_resolved",
@@ -1100,6 +1104,7 @@ def _run_campaign(
                 hybrid, batch = make_workload(model, template, runs, parents, device, md_steps_per_block)
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
+                    torch.cuda.reset_peak_memory_stats(device)
                 start = time.perf_counter()
                 result, pt_fraction_series, energy_per_atom_series = _run_hybrid_with_observables(
                     hybrid, batch, n_blocks, len(runs), pt_number,
@@ -1107,6 +1112,13 @@ def _run_campaign(
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 elapsed = time.perf_counter() - start
+                if device.type == "cuda":
+                    peak_allocated_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+                    peak_reserved_gb = torch.cuda.max_memory_reserved(device) / 1024**3
+                else:
+                    peak_allocated_gb = 0.0
+                    peak_reserved_gb = 0.0
+                timestamp_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 acceptance = hybrid.mc.stats.acceptance
                 atoms_per_walker = result.num_nodes // len(runs)
                 unresolved_run_ids = []
@@ -1144,11 +1156,14 @@ def _run_campaign(
                     writer.writerow(
                         [
                             run.run_id,
+                            timestamp_utc,
                             atoms_per_walker,
                             batch_width,
                             n_blocks,
                             f"{elapsed:.3f}",
                             f"{len(runs) * n_blocks / elapsed:.4f}",
+                            f"{peak_allocated_gb:.3f}",
+                            f"{peak_reserved_gb:.3f}",
                             f"{acceptance:.4f}",
                             run.parent_id is not None,
                             composition_gate.get("resolved"),
