@@ -36,6 +36,7 @@ import csv
 import re
 from pathlib import Path
 
+import numpy as np
 import torch
 from ase import Atoms
 from ase.io import write
@@ -65,12 +66,21 @@ def _to_atoms(state: dict, run_id: str, pt_atomic_number: int) -> Atoms:
     positions = state["positions"].numpy()
     cell = state.get("cell")
     pbc = state.get("pbc")
+    # cell/pbc are system-level fields stored with a leading graph-count
+    # dimension even for a single structure -- [1, 3, 3] / [1, 3], matching
+    # AtomicData.from_atoms and examples/basic/03_ase_integration.py's
+    # data_to_atoms -- so squeeze it off before handing shapes to ASE.
     atoms = Atoms(
         numbers=atomic_numbers,
         positions=positions,
-        cell=cell.numpy() if cell is not None else None,
-        pbc=pbc.numpy() if pbc is not None else False,
+        cell=cell.numpy().reshape(3, 3) if cell is not None else None,
+        pbc=pbc.numpy().reshape(3) if pbc is not None else False,
     )
+    if cell is not None and atoms.pbc.any():
+        # NPT/MC moves don't keep positions folded into the primary cell
+        # every step -- wrap so every viewer frame shows one contiguous
+        # cell's worth of atoms instead of some drifted outside its bounds.
+        atoms.wrap()
     pt_fraction = float((atomic_numbers == pt_atomic_number).mean())
     atoms.info["run_id"] = run_id
     atoms.info["pt_fraction"] = pt_fraction
@@ -80,6 +90,37 @@ def _to_atoms(state: dict, run_id: str, pt_atomic_number: int) -> Atoms:
         atoms.info["energy_eV"] = energy_ev
         atoms.info["energy_eV_per_atom"] = energy_ev / len(atoms)
     return atoms
+
+
+def _check_min_distance(atoms: Atoms, run_id: str, threshold_ang: float = 1.5) -> None:
+    """Print the closest atom pair if it's below a physically implausible
+    distance, so an "atoms on top of each other" report can be pinned to an
+    exact pair/distance/run_id instead of eyeballed in a viewer.
+
+    1.5 A is well inside any Au-Pt bond length (~2.6-2.8 A at equilibrium),
+    so anything under it is a real coincidence/collision in the data, not
+    close packing. Reports both the minimum-image (mic) distance and the
+    plain, non-periodic Euclidean distance for the same pair: mic is what
+    the model's neighbor list actually sees (wrap() cannot change it --
+    it only changes how positions render, not this number), while the raw
+    distance tells you whether the two atoms are also close in absolute,
+    unwrapped Cartesian space or only close through a periodic image.
+    """
+    if len(atoms) < 2:
+        return
+    has_pbc = bool(atoms.pbc.any())
+    distances_mic = atoms.get_all_distances(mic=has_pbc)
+    np.fill_diagonal(distances_mic, np.inf)
+    i, j = np.unravel_index(np.argmin(distances_mic), distances_mic.shape)
+    min_distance = distances_mic[i, j]
+    if min_distance < threshold_ang:
+        symbols = atoms.get_chemical_symbols()
+        raw_distance = float(np.linalg.norm(atoms.positions[i] - atoms.positions[j]))
+        print(
+            f"[overlap] {run_id}: atoms {i}({symbols[i]}) and {j}({symbols[j]}) "
+            f"are {min_distance:.4f} A apart (mic) vs {raw_distance:.4f} A apart (raw, "
+            f"non-periodic); pbc={atoms.pbc.tolist()}, cell_volume={atoms.cell.volume:.3f} A^3"
+        )
 
 
 def main() -> None:
@@ -105,6 +146,7 @@ def main() -> None:
             print(f"[skip] unrecognized run_id format: {run_id}")
             continue
         atoms = _to_atoms(_load_state(path), run_id, args.pt_atomic_number)
+        _check_min_distance(atoms, run_id)
         temperature = match["temperature"]
         branch = match["branch"]
         dmu_index = int(match["dmu_index"]) if match["dmu_index"] is not None else 0  # seed sorts first

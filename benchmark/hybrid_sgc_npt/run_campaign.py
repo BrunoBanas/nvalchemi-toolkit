@@ -198,6 +198,8 @@ from ase.build import bulk
 from ase.data import chemical_symbols
 
 from nvalchemi.data import AtomicData, Batch
+from nvalchemi.data.atomic_data import _default_mass_table  # noqa: PLC2701 -- reused for
+# refresh_masses_after_transmutation, to stay bit-identical with AtomicData.use_default_masses()
 from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.hybrid import HybridMCMD
 from nvalchemi.mc import SGC
@@ -1006,6 +1008,27 @@ def _equilibration_gate(series: list[float], window: int) -> dict:
     }
 
 
+def _refresh_masses_after_transmutation(batch: Batch) -> None:
+    """Resync ``batch.atomic_masses`` with the current ``atomic_numbers``.
+
+    ``_walker`` sets ``atomic_masses`` once, from the composition at
+    construction time, via ``AtomicData.use_default_masses()``. Nothing
+    else in the SGC/NPT stack ever refreshes it afterwards: ``SGC`` only
+    ever mutates ``atomic_numbers`` (see ``nvalchemi/mc/sgc.py`` --
+    ``_mutable_fields`` on ``BaseMonteCarlo`` deliberately excludes
+    masses), so every accepted transmutation silently leaves that atom's
+    mass pinned to its *previous* species for the rest of the run. NPT's
+    force/velocity update and its Nose-Hoover kinetic-energy terms both
+    consume ``batch.atomic_masses`` directly (``nph_velocity_half_step``,
+    ``_compute_ke`` in ``nvalchemi/dynamics/integrators/npt.py``), so a
+    transmuted atom is integrated with the wrong mass in every subsequent
+    MD block until this is called. Call once per MC block, right after
+    ``hybrid.mc.run(...)`` and before the next ``hybrid.md.compute(...)``.
+    """
+    table = _default_mass_table().to(device=batch.device, dtype=batch.positions.dtype)
+    batch.atomic_masses = table[batch.atomic_numbers.long()]
+
+
 def _run_hybrid_with_observables(
     hybrid: HybridMCMD, batch: Batch, n_blocks: int, n_graphs: int, pt_number: int,
 ) -> tuple[Batch, list[list[float]], list[list[float]]]:
@@ -1038,15 +1061,38 @@ def _run_hybrid_with_observables(
         energies = batch.energy.flatten().detach().cpu().tolist()
         energy_per_atom_series.append([e / atoms_per_graph for e in energies])
 
+    device = batch.device
     with hybrid.md:
         hybrid.md.compute(batch)
         hybrid.mc.synchronize(batch)
-        for _ in range(n_blocks):
+        for block_index in range(n_blocks):
+            if device.type == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
             hybrid.mc.run(batch, n_steps=hybrid.mc_steps)
+            _refresh_masses_after_transmutation(batch)
             hybrid.md.compute(batch)
             hybrid.md.run(batch, n_steps=hybrid.md_steps)
             hybrid.mc.synchronize(batch)
             _record()
+            if device.type == "cuda":
+                # Printed (not just logged to the throughput CSV) every block so
+                # a crash mid-run still leaves a memory trace in the .out file
+                # up to the last completed block -- the CSV row for this whole
+                # call is only written after all n_blocks finish, so it never
+                # gets written for a run that OOMs partway through.
+                # allocated/reserved (no reset) show the *residual* baseline
+                # still held after this block -- a genuine leak shows this
+                # climbing block over block; peak_reserved shows this block's
+                # transient high-water mark -- a one-off spike (e.g. an
+                # anomalously large neighbor list from a close-contact defect)
+                # shows there without moving the residual baseline.
+                print(
+                    f"[memory] block {block_index + 1}/{n_blocks}: "
+                    f"allocated={torch.cuda.memory_allocated(device) / 1024**3:.3f} GB "
+                    f"reserved={torch.cuda.memory_reserved(device) / 1024**3:.3f} GB "
+                    f"peak_reserved_this_block={torch.cuda.max_memory_reserved(device) / 1024**3:.3f} GB",
+                    flush=True,
+                )
     return batch, pt_fraction_series, energy_per_atom_series
 
 
