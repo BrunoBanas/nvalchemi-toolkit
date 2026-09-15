@@ -61,9 +61,22 @@ def _load_state(path: Path) -> dict:
 
 
 def _to_atoms(state: dict, run_id: str, pt_atomic_number: int) -> Atoms:
-    """Rebuild an ASE ``Atoms`` from one AtomicData's raw field dict."""
-    atomic_numbers = state["atomic_numbers"].numpy()
-    positions = state["positions"].numpy()
+    """Rebuild an ASE ``Atoms`` from one AtomicData's raw field dict.
+
+    Tensors here may already be on CPU (``_load_state`` loads checkpoints
+    with ``map_location="cpu"``) or still on the training/inference device
+    (``debug_npt_then_sgc.py`` / ``debug_npt_then_sgc_mace.py`` call this
+    directly on a live GPU batch via ``batch.get_data(0).model_dump(...)``,
+    with no CPU copy in between) -- ``.detach().cpu()`` is a no-op in the
+    former case and required in the latter, so always go through it before
+    ``.numpy()``.
+    """
+
+    def _np(tensor):
+        return tensor.detach().cpu().numpy()
+
+    atomic_numbers = _np(state["atomic_numbers"])
+    positions = _np(state["positions"])
     cell = state.get("cell")
     pbc = state.get("pbc")
     # cell/pbc are system-level fields stored with a leading graph-count
@@ -73,8 +86,8 @@ def _to_atoms(state: dict, run_id: str, pt_atomic_number: int) -> Atoms:
     atoms = Atoms(
         numbers=atomic_numbers,
         positions=positions,
-        cell=cell.numpy().reshape(3, 3) if cell is not None else None,
-        pbc=pbc.numpy().reshape(3) if pbc is not None else False,
+        cell=_np(cell).reshape(3, 3) if cell is not None else None,
+        pbc=_np(pbc).reshape(3) if pbc is not None else False,
     )
     if cell is not None and atoms.pbc.any():
         # NPT/MC moves don't keep positions folded into the primary cell
