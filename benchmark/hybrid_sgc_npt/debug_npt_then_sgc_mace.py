@@ -262,6 +262,15 @@ def main() -> None:
     # Phase 1: pure NPT equilibration -- no MC at all.
     print("[phase] starting NPT equilibration", flush=True)
     with npt:
+        # npt.compute() is a bare one-off model evaluation and, unlike npt.step()/
+        # npt.run(), does NOT fire BEFORE_COMPUTE hooks -- the NeighborListHook
+        # registered above only runs inside step()/run(). Without this explicit
+        # call, MACE's adapt_input() finds no batch.neighbor_list on this first
+        # evaluation and raises "AttributeError: 'Batch' has no attribute
+        # 'neighbor_list'" (see reference_energy_calibration_mace.py, which hit
+        # this same bug). Every subsequent npt.step() call fires the hook on its
+        # own, so this is only needed once, up front.
+        npt._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch)
         npt.compute(batch)
         for step in range(1, args.n_npt_steps + 1):
             npt.step(batch)
