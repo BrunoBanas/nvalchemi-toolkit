@@ -220,6 +220,15 @@ def main() -> None:
         enable_cueq=args.enable_cueq,
         compile_model=args.compile_model,
     )
+    # MACEWrapper defaults active_outputs to {"energy", "forces"} only --
+    # unlike UMAWrapper (task-aware, adds "stress" automatically for
+    # stress-capable tasks), MACE never enables stress on its own even
+    # though it supports computing it (see reference_energy_calibration_mace.py,
+    # which hit "RuntimeError: NPT requires 'stress' ... but the model did
+    # not produce it" from this same gap). NPT's barostat needs 'stress'
+    # every step; the model is shared with SGC below, which ignores the
+    # extra output.
+    model.model_config.active_outputs = {"energy", "forces", "stress"}
 
     data = _build_initial_state(template, args.temperature_k, args.pt_fraction, args.seed, device)
     batch = Batch.from_data_list([data])
