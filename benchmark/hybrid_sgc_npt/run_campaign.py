@@ -200,7 +200,10 @@ from ase.data import chemical_symbols
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.data.atomic_data import _default_mass_table  # noqa: PLC2701 -- reused for
 # refresh_masses_after_transmutation, to stay bit-identical with AtomicData.use_default_masses()
+from nvalchemi.dynamics import DynamicsStage
 from nvalchemi.dynamics.integrators.npt import NPT
+from nvalchemi.hooks import WrapPeriodicHook
+from nvalchemi.hooks.periodic import wrap_positions_into_cell
 from nvalchemi.hybrid import HybridMCMD
 from nvalchemi.mc import SGC
 from nvalchemi.models.uma import UMAWrapper
@@ -274,6 +277,42 @@ PROFILE_MEASURED_BLOCKS = 2
 KB_EV = 8.617333262e-5  # Boltzmann constant, eV/K.
 EXPECTED_BYTES_PER_ATOM = (3.5 * 1024**3) / 500  # ~3.5 GB reserved @ 500 atoms.
 MEMORY_FLOOR_TOLERANCE = 0.75  # Require >= 75% of the atom-count-scaled estimate.
+
+
+def _npt_wrap_hooks() -> list[WrapPeriodicHook]:
+    """Keep positions inside the cell during NPT.
+
+    NPT's position update (``r += (v + eps_dot . r) dt``) never wraps, and the
+    UMA adapter hands raw positions to fairchem, whose periodic graph builder
+    only scans image offsets of +-ceil(cutoff / L) (+-1 here). Once an atom has
+    diffused more than about one cell length from a neighbour in *unwrapped*
+    coordinates (liquid-like Au-rich cells at 1200-1400 K do this within one or
+    two 15 ps ladder steps), that pair's minimum image is never generated. The
+    two atoms feel no repulsion and can fall onto each other: every
+    collapsed (< 1.5 A) pair in the scan_1200_1400_hybrid checkpoints needed an
+    image offset > +-1. Wrapping every step keeps every pair within +-1 image.
+    """
+    return [WrapPeriodicHook(frequency=1, stage=DynamicsStage.AFTER_POST_UPDATE)]
+
+
+def _wrap_batch_positions(batch: Batch) -> None:
+    """Wrap a (restored) batch into its cells once, before its first force call.
+
+    The hook above only fires after an MD step, but ``md.compute`` and
+    ``mc.synchronize`` (and every MC trial of the first block) run first, so a
+    warm-started parent saved with unwrapped positions must be folded back here.
+    """
+    cell = batch.cell
+    pbc = getattr(batch, "pbc", None)
+    if pbc is None:
+        pbc = torch.ones((batch.num_graphs, 3), dtype=torch.bool, device=batch.device)
+    # Same shape normalisation as WrapPeriodicHook._wrap_positions.
+    if cell.dim() == 4:
+        cell = cell.squeeze(1)
+    if pbc.dim() == 3:
+        pbc = pbc.squeeze(1)
+    with torch.no_grad():
+        wrap_positions_into_cell(batch.positions, cell, pbc.to(torch.bool), batch.batch_idx)
 
 
 def build_ase_structure(
@@ -382,9 +421,12 @@ def make_workload(
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
+        hooks=_npt_wrap_hooks(),
     )
     hybrid = HybridMCMD(mc=sgc, md=npt, mc_steps=mc_steps, md_steps=md_steps_per_block)
-    return hybrid, _make_batch(template, runs, parent_states, device)
+    batch = _make_batch(template, runs, parent_states, device)
+    _wrap_batch_positions(batch)
+    return hybrid, batch
 
 
 def _build_reference_runs(n_atoms: int) -> tuple[RunSpec, ...]:
@@ -682,6 +724,7 @@ def compute_reference_energies(
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
+        hooks=_npt_wrap_hooks(),
     )
 
     energy_per_atom_series: list[list[float]] = [[] for _ in range(n_graphs)]

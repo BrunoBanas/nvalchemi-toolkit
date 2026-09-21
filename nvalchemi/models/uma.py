@@ -1358,7 +1358,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         ``data.positions.device``, preserving GPU residency and autograd.
         ``edge_index`` is left empty ``(2, 0)`` so fairchem's ``MLIPPredictUnit``
         rebuilds the graph internally, matching the default ``FAIRChemCalculator``
-        path (``r_edges=False``), so outputs are equivalent. Charge/spin default
+        path (``r_edges=False``), so outputs are equivalent. [BUG: this
+        equivalence does not hold for unwrapped positions; see the BUG note at
+        ``pos = ...`` below.] Charge/spin default
         per the ASE-calculator convention (per-system LongTensors; spin defaults
         to the closed-shell singlet for OMol, 0 for periodic tasks) unless the
         caller provides them on the batch.
@@ -1390,6 +1392,24 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         # Nothing is sharded: under DD every input arrives plain (owned+ghost) and
         # fairchem's GNN never sees a ShardTensor.
+        #
+        # BUG: positions are passed to fairchem UNWRAPPED. fairchem's own ASE path
+        # (fairchem.core.datasets.atomic_data.AtomicData.from_ase, used by
+        # FAIRChemCalculator) wraps them first -- ``pos = wrap_positions(pos, cell,
+        # pbc=pbc, eps=0)``, commented "wrap positions for CPU graph Generation" --
+        # because its periodic graph builder (core/graph/radius_graph_pbc.py) only
+        # scans image offsets +-ceil(radius * inverse plane spacing) around the RAW
+        # positions (+-1 for a 6 A cutoff in a ~21 A cell). Nothing in nvalchemi
+        # wraps either: NPT's position update never folds coordinates back, and
+        # WrapPeriodicHook is opt-in. Once atoms drift more than about one cell
+        # length apart in unwrapped coordinates (e.g. a diffusing liquid over a
+        # long MD run), a pair's minimum image is never generated. The model then
+        # silently misses that interaction, and atoms can fall onto each other.
+        # Observed: Au-Pt hybrid NPT+SGC, uma-s-1p2/omat, 500 atoms, 1200-1400 K;
+        # all 2143 collapsed (< 1.5 A) pairs needed an image offset beyond +-1.
+        # Suggested fix: fold ``pos`` into the cell here (a whole-lattice-vector
+        # translation per atom, so energy/forces/stress are unchanged and autograd
+        # through positions is preserved).
         pos = data.positions.to(target_dtype)
         atomic_numbers = data.atomic_numbers.to(torch.long)
         batch_idx = data.batch_idx.to(torch.long)
