@@ -193,6 +193,7 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+import torch._inductor.config
 from ase import Atoms
 from ase.build import bulk
 from ase.data import chemical_symbols
@@ -223,6 +224,12 @@ from nvalchemi.scheduling import (
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
 INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
+# Inductor's pad_mm pass benchmarks real, padded copies of large batched
+# matmul operands while compiling (a ~20 GiB one-shot allocation at wide
+# batches), so a compiled model can OOM during compilation at a batch width
+# whose steady-state run fits. Applied in main(), not at import, so modules
+# that import this one for its constants keep their own inductor config.
+INDUCTOR_SHAPE_PADDING = False
 
 TEMPLATE_SYMBOL = "Au"
 CRYSTAL_STRUCTURE = "fcc"
@@ -1391,6 +1398,7 @@ def main() -> None:
         "seed. Defaults to SEED (the alloy's own base seed).",
     )
     args = parser.parse_args()
+    torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
 
     device = torch.device(args.device)
     n_atoms = args.n_atoms
