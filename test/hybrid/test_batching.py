@@ -90,3 +90,27 @@ def test_assign_runs_is_the_generic_queue_api() -> None:
         (1, 0, 2),
         (0, 1, 1),
     ]
+
+
+def test_compile_wrapped_oom_is_classified_as_oom() -> None:
+    """An OOM raised inside torch.compile arrives wrapped, not as OutOfMemoryError."""
+    import torch
+
+    from nvalchemi.scheduling.batching import _is_out_of_memory
+
+    class BackendCompilerFailed(Exception):  # mirrors torch._dynamo.exc's shape
+        def __init__(self, inner: BaseException) -> None:
+            super().__init__(f"backend='inductor' raised:\n{inner}")
+            self.inner_exception = inner
+
+    oom = torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 19.78 GiB.")
+    assert _is_out_of_memory(oom)
+    assert _is_out_of_memory(BackendCompilerFailed(oom))
+    try:
+        try:
+            raise oom
+        except torch.cuda.OutOfMemoryError as inner:
+            raise RuntimeError("wrapped") from inner
+    except RuntimeError as chained:
+        assert _is_out_of_memory(chained)
+    assert not _is_out_of_memory(BackendCompilerFailed(ValueError("bad graph")))

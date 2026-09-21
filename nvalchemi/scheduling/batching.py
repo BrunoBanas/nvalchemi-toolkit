@@ -22,6 +22,25 @@ __all__ = [
 ]
 
 
+def _is_out_of_memory(error: BaseException | None) -> bool:
+    """Return whether ``error`` is, or wraps, a CUDA out-of-memory error.
+
+    An OOM raised while ``torch.compile`` lowers a graph (e.g. inductor's
+    pad_mm pass benchmarking real padded operands) surfaces as
+    ``torch._dynamo.exc.BackendCompilerFailed``, which carries the original
+    error on ``inner_exception`` rather than as a ``torch.cuda.OutOfMemoryError``.
+    """
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        if isinstance(error, torch.cuda.OutOfMemoryError):
+            return True
+        seen.add(id(error))
+        error = (
+            getattr(error, "inner_exception", None) or error.__cause__ or error.__context__
+        )
+    return False
+
+
 @dataclass(frozen=True)
 class BatchMemoryEstimate:
     """Conservative memory model inferred from successful profile points."""
@@ -105,6 +124,7 @@ class SimulationBatchPlanner:
         device: torch.device | str = "cuda",
         warmup_blocks: int = 1,
         measured_blocks: int = 1,
+        stop_on_oom: bool = True,
     ) -> list[BatchMeasurement]:
         """Measure simulation capacity and throughput over candidate widths.
 
@@ -112,6 +132,13 @@ class SimulationBatchPlanner:
         the intended production workload. The runner contract is
         ``runner.run(batch, n_blocks=...)``; adapters can provide that contract
         for MC, MD, optimization, or hybrid simulation stages.
+
+        ``peak_reserved_bytes`` spans warmup as well as the measured blocks, so
+        a compiled model's first-call compilation peak (which a fresh
+        production run pays again) counts against the memory budget. An OOM,
+        including one raised inside ``torch.compile``, is recorded as
+        ``status="oom"``; with ``stop_on_oom`` the sweep ends there, since
+        larger widths in an ascending ladder cannot fit either.
         """
         if not widths or any(width < 1 for width in widths):
             raise ValueError("widths must contain positive batch widths")
@@ -127,11 +154,11 @@ class SimulationBatchPlanner:
             batch = None
             try:
                 torch.cuda.empty_cache()
+                torch.cuda.reset_peak_memory_stats(resolved_device)
                 runner, batch = workload_factory(width, resolved_device)
                 if warmup_blocks:
                     runner.run(batch, n_blocks=warmup_blocks)
                 torch.cuda.synchronize(resolved_device)
-                torch.cuda.reset_peak_memory_stats(resolved_device)
                 start = time.perf_counter()
                 runner.run(batch, n_blocks=measured_blocks)
                 torch.cuda.synchronize(resolved_device)
@@ -145,10 +172,14 @@ class SimulationBatchPlanner:
                         atoms_per_walker=batch.num_nodes // width,
                     )
                 )
-            except torch.cuda.OutOfMemoryError as error:
+            except Exception as error:
+                if not _is_out_of_memory(error):
+                    raise
                 measurements.append(
                     BatchMeasurement(batch_width=width, status="oom", error=str(error))
                 )
+                if stop_on_oom:
+                    break
             finally:
                 del runner, batch
                 torch.cuda.empty_cache()
