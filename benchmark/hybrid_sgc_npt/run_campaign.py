@@ -468,7 +468,9 @@ def _build_campaign(n_atoms: int, reference_runs: tuple[RunSpec, ...]) -> Campai
     return CampaignSpec(runs=runs, name=f"aupt_{n_atoms}atoms_independent")
 
 
-def _endpoint_ladder(seed_value: float, min_step_ev: float, refine_ratio: float = 0.5) -> tuple[float, ...]:
+def _endpoint_ladder(
+    seed_value: float, min_step_ev: float, refine_ratio: float = 0.5, overshoot_ev: float = 0.0
+) -> tuple[float, ...]:
     """Values from ``seed_value`` in toward (and including) 0.0, NON-UNIFORMLY
     spaced -- the per-branch delta_mu_excess ladder for
     ``CampaignSpec.delta_mu_scan_from_endpoints``. ``seed_value`` is the safe,
@@ -484,6 +486,10 @@ def _endpoint_ladder(seed_value: float, min_step_ev: float, refine_ratio: float 
     interesting, steep-response region close to the coexistence boundary).
     Stops refining once the NEXT point would fall closer than ``min_step_ev``
     to its predecessor, and always lands exactly on 0.0.
+
+    ``overshoot_ev`` (0.0 = the old behaviour) continues the ladder past 0.0 by
+    that much, with the step size doubling away from 0.0, so both branches cover
+    a shared delta_mu window and hysteresis becomes measurable.
     """
     if min_step_ev <= 0.0:
         raise ValueError("min_step_ev must be positive")
@@ -497,6 +503,22 @@ def _endpoint_ladder(seed_value: float, min_step_ev: float, refine_ratio: float 
         values.append(round(sign * remaining, 10))
     if values[-1] != 0.0:
         values.append(0.0)
+    if overshoot_ev > 0.0:
+        # Continue PAST 0.0 into the opposite branch's territory, so the two
+        # branches share a dmu window instead of only touching at 0.0. Without
+        # that overlap neither walker is ever metastable at a dmu the other one
+        # also visited, so a first-order transition cannot show hysteresis and
+        # van de Walle & Asta's phi_alpha = phi_gamma crossing has nothing to
+        # bracket (exactly what left the 1200/1400 K scans undecidable).
+        # Spacing doubles away from 0.0: the finest resolution belongs next to
+        # the transition, and points deep inside the other phase's basin are
+        # only there to extend the metastable branch.
+        step = min_step_ev
+        total = 0.0
+        while total < overshoot_ev - 1e-12:
+            total = min(total + step, overshoot_ev)
+            values.append(round(-sign * total, 10))
+            step *= 2.0
     return tuple(values)
 
 
@@ -507,6 +529,7 @@ def _build_delta_mu_scan_schedule(
     bracket_ev: float,
     min_step_ev: float,
     refine_ratio: float = 0.5,
+    overshoot_ev: float = 0.0,
     *,
     independent_temperatures: bool = False,
 ) -> tuple[CampaignSpec, tuple[RunSpec, ...]]:
@@ -562,8 +585,8 @@ def _build_delta_mu_scan_schedule(
     if missing:
         raise ValueError(f"delta_mu_ref_by_t has no entry for {sorted(missing)!r}")
 
-    ladder_a_excess = _endpoint_ladder(-bracket_ev, min_step_ev, refine_ratio)
-    ladder_b_excess = _endpoint_ladder(bracket_ev, min_step_ev, refine_ratio)
+    ladder_a_excess = _endpoint_ladder(-bracket_ev, min_step_ev, refine_ratio, overshoot_ev)
+    ladder_b_excess = _endpoint_ladder(bracket_ev, min_step_ev, refine_ratio, overshoot_ev)
 
     runs: list[RunSpec] = []
     endpoints: list[RunSpec] = []
@@ -1376,6 +1399,25 @@ def main() -> None:
         "in (0, 1).",
     )
     parser.add_argument(
+        "--delta-mu-excess-overshoot-ev", type=float, default=0.0,
+        help="--mode delta-mu-scan only: continue each branch PAST delta_mu_excess "
+        "= 0.0 by this much (step size doubling away from 0.0), so the A-rich and "
+        "B-rich branches share a delta_mu window. Required to see hysteresis and "
+        "therefore to locate a first-order boundary: with the default 0.0 the two "
+        "branches meet at a single point and neither is ever metastable where the "
+        "other has data. Costs roughly log2(overshoot/min_step)+1 extra runs per "
+        "branch per temperature.",
+    )
+    parser.add_argument(
+        "--n-blocks-scan-seed", type=int, default=N_BLOCKS_SCAN_SEED,
+        help=f"Blocks for each from-scratch A-rich/B-rich endpoint (default {N_BLOCKS_SCAN_SEED}).",
+    )
+    parser.add_argument(
+        "--n-blocks-scan-step", type=int, default=N_BLOCKS_SCAN_STEP,
+        help=f"Blocks per warm-started delta_mu step (default {N_BLOCKS_SCAN_STEP}). Raise when runs "
+        "near the transition fail the equilibration gate.",
+    )
+    parser.add_argument(
         "--calibration-n-blocks", type=int, default=100,
         help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
         "missing temperature's pure-Au/pure-Pt NPT run. Default 100 (matches "
@@ -1459,7 +1501,7 @@ def main() -> None:
         campaign, endpoints = _build_delta_mu_scan_schedule(
             n_atoms, args.scan_temperatures_k, delta_mu_ref_by_t,
             args.delta_mu_excess_bracket_ev, args.delta_mu_excess_min_step_ev,
-            args.delta_mu_excess_refine_ratio,
+            args.delta_mu_excess_refine_ratio, args.delta_mu_excess_overshoot_ev,
             independent_temperatures=args.scan_independent_temperatures,
         )
         reference_runs = endpoints
@@ -1496,8 +1538,8 @@ def main() -> None:
         batch_width = 1
         print("CUDA unavailable; using batch_width=1")
 
-    n_blocks_root = N_BLOCKS_SCAN_SEED if args.mode == "delta-mu-scan" else N_BLOCKS_REFERENCE
-    n_blocks_continuation = N_BLOCKS_SCAN_STEP if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
+    n_blocks_root = args.n_blocks_scan_seed if args.mode == "delta-mu-scan" else N_BLOCKS_REFERENCE
+    n_blocks_continuation = args.n_blocks_scan_step if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
     _run_campaign(
         model, template, scheduler, campaign, batch_width, device, log_path,
         n_blocks_root, n_blocks_continuation, md_steps_per_block,
