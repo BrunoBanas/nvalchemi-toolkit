@@ -104,6 +104,19 @@
   (including `"turbo"` for `torch.compile`). See the
   `examples/advanced/09_uma_nve.py` NVE/NVT/NPT walkthrough.
 
+### Changed
+
+- **`Kawasaki` proposes only unlike-species pairs** (`unlike_pairs_only=True`,
+  the new default). The species-blind draw spent a model evaluation on every
+  same-species pick -- about half of all steps on an equiatomic fcc alloy --
+  and those proposals cannot change the state. Drawing uniformly from the
+  current unlike pairs makes the proposal probability configuration-dependent,
+  so acceptance now carries the Metropolis-Hastings factor `n(x)/n(x')` over
+  unlike-pair counts; sampling stays exact. A graph whose neighbours are all
+  same-species has no legal move and is excluded from the step's proposals and
+  statistics, so reported acceptance is now acceptance among real moves. Pass
+  `unlike_pairs_only=False` to reproduce runs recorded before this change.
+
 ### Fixed
 
 - **Ewald charge gradients and cell derivatives** — the reciprocal term was only

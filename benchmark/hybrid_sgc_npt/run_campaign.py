@@ -144,7 +144,7 @@ Hybrid block
 ------------
 One block is ``MD_STEPS_PER_BLOCK`` MD steps at ``DT_FS`` followed by
 ``round(MC_STEP_FRACTION * n_atoms)`` MC trials (one attempted transmutation
-per graph per MC step). Reference runs run ``N_BLOCKS_REFERENCE`` blocks
+per graph per MC step), overridable with ``--mc-step-fraction``. Reference runs run ``N_BLOCKS_REFERENCE`` blocks
 total, continuation children run ``N_BLOCKS_CONTINUATION``. ``--md-steps-
 per-block`` overrides ``MD_STEPS_PER_BLOCK`` for the whole campaign (both
 modes); ``--md-steps-per-block 0`` runs pure SGC (MC moves only, no MD
@@ -393,6 +393,7 @@ def make_workload(
     parent_states: tuple[AtomicData | None, ...],
     device: torch.device,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
+    mc_step_fraction: float = MC_STEP_FRACTION,
 ) -> tuple[HybridMCMD, Batch]:
     """Return one per-graph hybrid MC-MD workload for compatible runs.
 
@@ -412,7 +413,7 @@ def make_workload(
         number: torch.tensor([run.chemical_potentials_ev[number] for run in runs], device=device)
         for number in species
     }
-    mc_steps = max(1, round(MC_STEP_FRACTION * len(template)))
+    mc_steps = max(1, round(mc_step_fraction * len(template)))
     sgc = SGC(
         model=model,
         temperature=temperatures,
@@ -960,13 +961,14 @@ def profile_workload(
     width: int,
     device: torch.device,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
+    mc_step_fraction: float = MC_STEP_FRACTION,
 ) -> tuple[HybridMCMD, Batch]:
     """Build representative reference-row states for a capacity profile."""
     runs = tuple(
         replace(reference_runs[index % len(reference_runs)], run_id=f"profile.{index}")
         for index in range(width)
     )
-    return make_workload(model, template, runs, (None,) * width, device, md_steps_per_block)
+    return make_workload(model, template, runs, (None,) * width, device, md_steps_per_block, mc_step_fraction)
 
 
 def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> None:
@@ -1014,6 +1016,7 @@ def select_batch_width(
     n_atoms: int,
     device: torch.device,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
+    mc_step_fraction: float = MC_STEP_FRACTION,
 ) -> int:
     """Profile candidate widths, verify the memory floor, and recommend one."""
     planner = SimulationBatchPlanner(
@@ -1021,7 +1024,9 @@ def select_batch_width(
         throughput_fraction=BATCH_THROUGHPUT_FRACTION,
     )
     measurements = planner.profile(
-        lambda width, dev: profile_workload(model, template, reference_runs, width, dev, md_steps_per_block),
+        lambda width, dev: profile_workload(
+            model, template, reference_runs, width, dev, md_steps_per_block, mc_step_fraction
+        ),
         BATCH_WIDTH_CANDIDATES[n_atoms],
         device=device,
         warmup_blocks=PROFILE_WARMUP_BLOCKS,
@@ -1180,6 +1185,7 @@ def _run_campaign(
     n_blocks_root: int,
     n_blocks_continuation: int,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
+    mc_step_fraction: float = MC_STEP_FRACTION,
 ) -> None:
     """Run every ready batch to completion, logging per-batch throughput.
 
@@ -1220,7 +1226,9 @@ def _run_campaign(
             for runs in ready:
                 n_blocks = n_blocks_root if runs[0].parent_id is None else n_blocks_continuation
                 parents = tuple(scheduler.parent_state(run, device=device) for run in runs)
-                hybrid, batch = make_workload(model, template, runs, parents, device, md_steps_per_block)
+                hybrid, batch = make_workload(
+                    model, template, runs, parents, device, md_steps_per_block, mc_step_fraction
+                )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                     torch.cuda.reset_peak_memory_stats(device)
@@ -1325,6 +1333,20 @@ def main() -> None:
         "hybrid job at the same --checkpoint-root-adjacent path (use "
         "DIFFERENT --checkpoint-root values for the two, since run_ids and "
         "therefore output filenames are otherwise identical).",
+    )
+    parser.add_argument(
+        "--mc-step-fraction", type=float, default=MC_STEP_FRACTION,
+        help=f"MC trials per block = round(fraction * n_atoms); default {MC_STEP_FRACTION} "
+        "(100 trials at 500 atoms). Raise it when MC acceptance is so low that a block "
+        "accepts well under one move, which is what pins a hybrid MD+MC walker at a pure "
+        "composition: on a RELAXED lattice at 700 K, Au-Pt acceptance is 0.002-0.03 "
+        "(vs 0.20-0.32 for fixed-lattice SGC), i.e. ~0.5 accepted transmutations per "
+        "100-trial block. Cost per block scales as (mc_steps + md_steps) / (100 + 50) at "
+        "500 atoms, so 0.6 (300 trials) is ~2.3x a 0.2 block. Note this buys sampling, not "
+        "an unbiased fix: the acceptance is low because inserting a solute into a pure, "
+        "relaxed host costs strain energy, and a single-site transmutation cannot relax "
+        "that. A move set that can (Kawasaki swaps of unlike neighbours, or a "
+        "relaxation-aware proposal) would raise acceptance at its root.",
     )
     parser.add_argument(
         "--batch-width",
@@ -1533,7 +1555,9 @@ def main() -> None:
     if args.batch_width is not None:
         batch_width = args.batch_width
     elif device.type == "cuda":
-        batch_width = select_batch_width(model, template, reference_runs, n_atoms, device, md_steps_per_block)
+        batch_width = select_batch_width(
+            model, template, reference_runs, n_atoms, device, md_steps_per_block, args.mc_step_fraction
+        )
     else:
         batch_width = 1
         print("CUDA unavailable; using batch_width=1")
@@ -1542,7 +1566,7 @@ def main() -> None:
     n_blocks_continuation = args.n_blocks_scan_step if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
     _run_campaign(
         model, template, scheduler, campaign, batch_width, device, log_path,
-        n_blocks_root, n_blocks_continuation, md_steps_per_block,
+        n_blocks_root, n_blocks_continuation, md_steps_per_block, args.mc_step_fraction,
     )
 
 

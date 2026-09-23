@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import Counter
 from typing import Any
 
@@ -23,6 +24,7 @@ import pytest
 import torch
 
 from nvalchemi.data import AtomicData, Batch
+from nvalchemi.dynamics.hooks._utils import KB_EV
 from nvalchemi.mc import Kawasaki
 from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
@@ -57,16 +59,68 @@ def test_composition_is_conserved_for_unlike_neighbors() -> None:
     assert sampler.stats.attempted == 1
 
 
-def test_same_species_neighbors_are_a_no_op() -> None:
-    """A like-species draw leaves atom types unchanged and is trivially accepted."""
+def test_all_same_species_graph_has_no_legal_move() -> None:
+    """With no unlike pair to draw, the graph is skipped instead of proposing a no-op."""
     batch = Batch.from_data_list([_pair(1, 1)])
     batch.energy = torch.zeros(batch.num_graphs, 1)
     sampler = _sampler()
+
+    sampler.run(batch, n_steps=3)
+
+    assert batch.atomic_numbers.tolist() == [1, 1]
+    assert not bool(batch.mc_accepted.reshape(-1)[0])
+    assert sampler.stats.attempted == 0
+
+
+def test_species_blind_draw_still_available() -> None:
+    """unlike_pairs_only=False restores the older no-op-on-like-species draw."""
+    batch = Batch.from_data_list([_pair(1, 1)])
+    batch.energy = torch.zeros(batch.num_graphs, 1)
+    sampler = _sampler(unlike_pairs_only=False)
 
     sampler.run(batch, n_steps=1)
 
     assert batch.atomic_numbers.tolist() == [1, 1]
     assert bool(batch.mc_accepted.reshape(-1)[0])
+    assert sampler.stats.attempted == 1
+
+
+def _chain(numbers: list[int], *, separation: float = 1.0) -> AtomicData:
+    """One open chain of atoms spaced `separation` apart along x."""
+    return AtomicData(
+        atomic_numbers=torch.tensor(numbers, dtype=torch.long),
+        positions=torch.tensor([[index * separation, 0.0, 0.0] for index in range(len(numbers))]),
+    )
+
+
+def test_every_proposal_swaps_an_unlike_pair() -> None:
+    """Each active graph's drawn pair is always exchanged -- no wasted model call."""
+    batch = Batch.from_data_list([_chain([1, 1, 2, 2]), _chain([1, 2, 1, 2])])
+    batch.energy = torch.zeros(batch.num_graphs, 1)
+    sampler = _sampler(cutoff=1.5)
+
+    for _ in range(5):
+        sampler.pre_update(batch)
+        # White-box on purpose: this flag is what decides whether the model
+        # evaluation that follows can change anything.
+        assert bool(sampler._proposal_swapped.all())
+
+    assert Counter(batch.atomic_numbers.tolist()) == Counter([1, 1, 2, 2] + [1, 2, 1, 2])
+
+
+def test_proposal_correction_matches_the_unlike_pair_ratio() -> None:
+    """The MH term is kT ln[n(x')/n(x)] over unlike-pair counts."""
+    batch = Batch.from_data_list([_chain([1, 1, 2, 2])])
+    batch.energy = torch.zeros(batch.num_graphs, 1)
+    sampler = _sampler(cutoff=1.5)
+
+    # (1,2) is the chain's only unlike pair, so the draw is deterministic;
+    # swapping it makes all three chain bonds unlike: n goes 1 -> 3.
+    sampler.pre_update(batch)
+
+    assert batch.atomic_numbers.tolist() == [1, 2, 1, 2]
+    expected = KB_EV * 1000.0 * math.log(3.0)
+    assert sampler._chemical_delta(batch).item() == pytest.approx(expected, rel=1e-6)
 
 
 def test_inactive_graph_is_not_mutated() -> None:

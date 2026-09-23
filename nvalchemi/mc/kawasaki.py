@@ -26,6 +26,7 @@ from nvalchemiops.torch.neighbors.neighbor_utils import (
 )
 
 from nvalchemi.data import Batch
+from nvalchemi.dynamics.hooks._utils import KB_EV
 from nvalchemi.mc.base import BaseMonteCarlo
 
 if TYPE_CHECKING:
@@ -112,13 +113,33 @@ class Kawasaki(BaseMonteCarlo):
     r"""Batched canonical MC with nearest-neighbour site-swap moves.
 
     Composition is fixed. A proposal draws one nearest-neighbour edge per
-    active graph, uniformly, from a fixed-geometry proposal graph and swaps
-    the pair's identities when the two species differ; a same-species draw
-    leaves the state unchanged. The edge is chosen independently of species,
-    so every ordered configuration has exactly one reverse proposal of equal
-    probability -- plain Metropolis acceptance is therefore detailed-balance
-    exact and no chemical-potential correction applies (the inherited
-    :meth:`~nvalchemi.mc.base.BaseMonteCarlo._chemical_delta` stays zero).
+    active graph from a fixed-geometry proposal graph and swaps the pair's
+    identities.
+
+    With ``unlike_pairs_only=True`` (the default) the draw is uniform over
+    only that graph's *unlike-species* edges, so every proposal changes the
+    state and every model evaluation does useful work. That proposal
+    distribution depends on the configuration -- :math:`q(x \to x') =
+    1 / n(x)` for :math:`n(x)` unlike pairs -- so acceptance carries the
+    Metropolis-Hastings ratio
+
+    .. math::
+
+        A(x \to x') = \min\left[1, \frac{n(x)}{n(x')}
+                        e^{-\Delta E / k_B T}\right],
+
+    applied through :meth:`_chemical_delta` as the equivalent energy term
+    :math:`k_B T \ln[n(x') / n(x)]`. The swapped edge is still unlike after
+    the swap, so the reverse move always exists and :math:`n(x') > 0`. A
+    graph whose neighbour pairs are all same-species has no legal move and is
+    dropped from the step's proposals and statistics.
+
+    With ``unlike_pairs_only=False`` the draw is uniform over all edges
+    regardless of species and a same-species draw leaves the state unchanged
+    (still evaluating the model, which is the waste the default avoids). The
+    edge is then chosen independently of species, so every ordered
+    configuration has exactly one reverse proposal of equal probability and
+    plain Metropolis acceptance is detailed-balance exact with no correction.
 
     The proposal graph is a short-range nearest-neighbour list, independent
     of any interaction cutoff the energy model uses for its own neighbor
@@ -132,6 +153,7 @@ class Kawasaki(BaseMonteCarlo):
         model: BaseModelMixin,
         temperature: float | torch.Tensor,
         cutoff: float,
+        unlike_pairs_only: bool = True,
         **kwargs: Any,
     ) -> None:
         """Initialize a canonical Kawasaki sampler.
@@ -146,6 +168,11 @@ class Kawasaki(BaseMonteCarlo):
             Nearest-neighbour proposal cutoff radius in Angstrom, e.g. the
             system's first RDF minimum. Independent of the model's own
             interaction cutoff.
+        unlike_pairs_only
+            Draw proposals only from unlike-species pairs (default), so no
+            model evaluation is spent on a same-species no-op. ``False``
+            restores the older species-blind draw -- kept for reproducing
+            runs recorded before this became the default.
         **kwargs
             Forwarded to :class:`~nvalchemi.mc.base.BaseMonteCarlo`.
         """
@@ -153,6 +180,8 @@ class Kawasaki(BaseMonteCarlo):
         if cutoff <= 0.0:
             raise ValueError("Kawasaki proposal cutoff must be positive")
         self.cutoff = cutoff
+        self.unlike_pairs_only = unlike_pairs_only
+        self._unlike_before: torch.Tensor | None = None
         self._edges: torch.Tensor | None = None
         self._edge_offsets: torch.Tensor | None = None
         self._graph_batch_id: int | None = None
@@ -189,6 +218,20 @@ class Kawasaki(BaseMonteCarlo):
         super().synchronize(batch)
         self._build_proposal_graph(batch)
 
+    def _unlike_counts(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return per-graph unlike-species edge counts and their running total.
+
+        The second value is the inclusive cumulative count over the
+        graph-ordered proposal edge list, which :meth:`_propose` searches to
+        turn a per-graph rank into an edge row.
+        """
+        edges = self._edges
+        numbers = batch.atomic_numbers.reshape(-1)
+        unlike = numbers[edges[:, 0]] != numbers[edges[:, 1]]
+        graph_per_edge = batch.batch_idx[edges[:, 0]]
+        counts = torch.bincount(graph_per_edge[unlike], minlength=batch.num_graphs)
+        return counts, torch.cumsum(unlike.to(torch.long), dim=0)
+
     def _propose(
         self,
         batch: Batch,
@@ -197,23 +240,64 @@ class Kawasaki(BaseMonteCarlo):
     ) -> None:
         """Swap one random nearest-neighbour pair per active graph."""
         self._ensure_proposal_graph(batch)
-        counts = self._edge_offsets[1:] - self._edge_offsets[:-1]
-        local_indices = torch.floor(
-            torch.rand(batch.num_graphs, device=batch.device, generator=generator) * counts
-        ).to(torch.long)
-        rows = self._edge_offsets[:-1] + local_indices
+        starts = self._edge_offsets[:-1]
+        draws = torch.rand(batch.num_graphs, device=batch.device, generator=generator)
+        if self.unlike_pairs_only:
+            counts, cumulative = self._unlike_counts(batch)
+            self._unlike_before = counts
+            # All-same-species neighbours mean no legal move: drop the graph
+            # from this step's proposals and statistics (``active`` is the
+            # sampler's own mask tensor, so this narrows it in place).
+            active &= counts > 0
+            # Rank of the drawn unlike edge among all unlike edges, then the
+            # row holding it: the first row whose running total reaches it.
+            exclusive = torch.cat((cumulative.new_zeros(1), cumulative[:-1]))
+            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(torch.long)
+            rows = torch.searchsorted(cumulative, ranks + 1)
+            # Inactive graphs draw no edge; keep their row in range anyway.
+            rows = torch.where(active, rows, starts)
+        else:
+            counts = self._edge_offsets[1:] - starts
+            self._unlike_before = None
+            rows = starts + torch.floor(draws * counts).to(torch.long)
         first = self._edges[rows, 0]
         second = self._edges[rows, 1]
         numbers = batch.atomic_numbers
         first_z = numbers[first].clone()
         second_z = numbers[second].clone()
-        swap = active & (first_z != second_z)
+        swap = active & (first_z.reshape(-1) != second_z.reshape(-1))
         with torch.no_grad():
             numbers[first[swap]] = second_z[swap]
             numbers[second[swap]] = first_z[swap]
         self._proposal_first = first
         self._proposal_second = second
         self._proposal_swapped = swap
+
+    def _chemical_delta(self, batch: Batch) -> torch.Tensor:
+        r"""Return the Metropolis-Hastings correction for unlike-pair proposals.
+
+        Drawing uniformly from the *current* unlike-species pairs gives
+        :math:`q(x \to x') = 1 / n(x)`, which changes with the configuration,
+        so acceptance needs the factor :math:`n(x) / n(x')`. The base class
+        adds this return value to :math:`\Delta E` before dividing by
+        :math:`k_B T`, so the equivalent energy term is
+        :math:`k_B T \ln[n(x') / n(x)]`. Called after the trial swap, so
+        ``batch`` already holds :math:`x'`.
+        """
+        if not self.unlike_pairs_only or self._unlike_before is None:
+            return super()._chemical_delta(batch)
+        after, _ = self._unlike_counts(batch)
+        before = self._unlike_before
+        dtype = batch.positions.dtype
+        # A swapped unlike pair is still unlike, so n(x') > 0 whenever the
+        # graph moved; the guard covers graphs that proposed nothing.
+        movable = (before > 0) & (after > 0)
+        ratio = torch.where(
+            movable,
+            torch.log(after.to(dtype).clamp(min=1.0) / before.to(dtype).clamp(min=1.0)),
+            torch.zeros(batch.num_graphs, dtype=dtype, device=batch.device),
+        )
+        return KB_EV * self._temperature_for(batch) * ratio
 
     def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
         """Swap back rejected trial pairs that were actually exchanged."""
