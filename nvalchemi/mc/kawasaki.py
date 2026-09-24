@@ -224,13 +224,18 @@ class Kawasaki(BaseMonteCarlo):
         The second value is the inclusive cumulative count over the
         graph-ordered proposal edge list, which :meth:`_propose` searches to
         turn a per-graph rank into an edge row.
+
+        Runs twice per MC step, so it avoids ops whose output size depends on
+        the data (``torch.bincount``, boolean-mask indexing): on CUDA those
+        force a device-to-host sync that stalls the next model call.
         """
         edges = self._edges
         numbers = batch.atomic_numbers.reshape(-1)
-        unlike = numbers[edges[:, 0]] != numbers[edges[:, 1]]
+        unlike = (numbers[edges[:, 0]] != numbers[edges[:, 1]]).to(torch.long)
         graph_per_edge = batch.batch_idx[edges[:, 0]]
-        counts = torch.bincount(graph_per_edge[unlike], minlength=batch.num_graphs)
-        return counts, torch.cumsum(unlike.to(torch.long), dim=0)
+        counts = torch.zeros(batch.num_graphs, dtype=torch.long, device=numbers.device)
+        counts.index_add_(0, graph_per_edge, unlike)
+        return counts, torch.cumsum(unlike, dim=0)
 
     def _propose(
         self,

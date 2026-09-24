@@ -123,6 +123,25 @@ def test_proposal_correction_matches_the_unlike_pair_ratio() -> None:
     assert sampler._chemical_delta(batch).item() == pytest.approx(expected, rel=1e-6)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="sync detection needs CUDA")
+def test_unlike_pair_counting_does_not_sync_the_device() -> None:
+    """Counting runs twice per step; a device-to-host sync there stalls the next model call."""
+    batch = Batch.from_data_list([_chain([1, 1, 2, 2]), _chain([1, 2, 1, 2])]).to("cuda")
+    sampler = _sampler(cutoff=1.5)
+    sampler._ensure_proposal_graph(batch)  # the neighbour search may sync; not under test
+    torch.cuda.synchronize()
+
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        counts, cumulative = sampler._unlike_counts(batch)
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+
+    assert counts.tolist() == [1, 3]
+    assert int(cumulative[-1]) == 4  # edge order is the neighbour search's; only the total is fixed
+
+
 def test_inactive_graph_is_not_mutated() -> None:
     """A graduated graph is excluded from proposals and acceptance statistics."""
     batch = Batch.from_data_list([_pair(1, 2), _pair(1, 2)])
