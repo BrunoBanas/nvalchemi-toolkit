@@ -19,5 +19,6 @@ from __future__ import annotations
 from nvalchemi.mc.base import BaseMonteCarlo, MonteCarloStats
 from nvalchemi.mc.kawasaki import Kawasaki
 from nvalchemi.mc.sgc import SGC
+from nvalchemi.mc.vcsgc import VCSGC
 
-__all__ = ["BaseMonteCarlo", "Kawasaki", "MonteCarloStats", "SGC"]
+__all__ = ["BaseMonteCarlo", "Kawasaki", "MonteCarloStats", "SGC", "VCSGC"]

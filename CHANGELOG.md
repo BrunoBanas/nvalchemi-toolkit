@@ -9,6 +9,13 @@
   cutoff neighbor search independent of the energy model's own interaction
   neighbor list, so it stays valid on the disordered geometry produced by a
   finite-temperature MD block.
+- GPU-resident binary variance-constrained semi-grand-canonical (`VCSGC`)
+  Monte Carlo (Sadigh et al., Phys. Rev. B 85, 184203, 2012). It reuses `SGC`'s
+  single-site transmutations with a quadratic concentration constraint, so a
+  graph can be held at any composition, including inside a miscibility gap,
+  and returns the free-energy slope `mu_B - mu_A = -(phi + 2 kappa cbar)` from
+  the mean concentration. Parametrised by `phi` or `target_concentration`, with
+  an intensive `kappa` (eV); scalar or per-graph parameters.
 - GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
   evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
   planning that emits serial overflow waves across requested GPUs. The existing

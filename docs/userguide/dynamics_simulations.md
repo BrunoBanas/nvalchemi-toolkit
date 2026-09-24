@@ -160,6 +160,39 @@ with SGC(
 
 One proposal is attempted independently for every active graph per step.
 Accepted moves are available as the graph-level boolean `batch.mc_accepted`.
+
+`VCSGC` (variance-constrained SGC, binary systems) uses the same transmutation
+move but replaces the linear reservoir with a quadratic constraint on the
+concentration `c` of one species, sampling `E + N (phi c + kappa c^2)`. Plain
+SGC cannot hold a composition inside a miscibility gap, because the
+concentration jumps to one side; `VCSGC` can, and the slope of the free energy
+at the sampled mean `cbar` is `mu_B - mu_A = -(phi + 2 kappa cbar)`.
+Integrating that slope over a grid of target compositions gives `F(c)` for a
+common-tangent construction:
+
+```python
+from nvalchemi.mc import VCSGC
+
+mc = VCSGC(
+  model=model,
+  temperature=700.0,
+  species=[79, 78],            # c is the fraction of species[1] (Pt) by default
+  kappa=1.0,                   # eV, intensive
+  target_concentration=0.4,    # sets phi = -2 * kappa * c0
+)
+mc.run(batch, n_steps=2000)                  # equilibrate
+c_sum, n_samples = 0.0, 100
+for _ in range(n_samples):
+  mc.run(batch, n_steps=100)
+  c_sum = c_sum + mc.concentration(batch)    # per-graph instantaneous c
+cbar = c_sum / n_samples                     # the relation needs the ensemble mean
+delta_mu = mc.exchange_chemical_potential(cbar, batch)
+```
+
+Choose `kappa > -min f''(c) / 2`, where `f` is the free energy per atom:
+below that the composition distribution turns bimodal while `cbar` can still
+look right, so check that the sampled concentration is unimodal before using
+it. `kappa = 0` recovers `SGC` with `mu_B - mu_A = -phi`.
 Composition-conserving Kawasaki sampling will be added as a separate MC style;
 it is intentionally not exposed until its local proposal graph and detailed
 balance tests are complete.
