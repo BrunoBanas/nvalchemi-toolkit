@@ -50,3 +50,46 @@ def test_scheduler_alternates_sgc_and_md_on_the_same_batch() -> None:
     assert mc.step_count == 1
     assert md.step_count == 1
     assert batch.atomic_numbers.tolist() == [2]
+
+
+def test_energy_only_mc_blocks_narrow_outputs_and_restore_them_for_md() -> None:
+    """MC trials and their re-baseline see energy only; every MD call sees full outputs."""
+    model = DemoModelWrapper(DemoModel())
+    full = set(model.model_config.active_outputs)
+    data = AtomicData(
+        atomic_numbers=torch.tensor([1], dtype=torch.long),
+        positions=torch.zeros(1, 3),
+    )
+    batch = Batch.from_data_list([data])
+    batch.energy = torch.zeros(1, 1)
+    batch.forces = torch.zeros(1, 3)
+    mc = SGC(
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: 1.0e6},
+        random_seed=4,
+    )
+    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
+    seen: list[tuple[str, frozenset[str]]] = []
+
+    def spy(name: str, method):
+        def wrapped(*args, **kwargs):
+            seen.append((name, frozenset(model.model_config.active_outputs)))
+            return method(*args, **kwargs)
+
+        return wrapped
+
+    mc.refresh_energy = spy("mc.refresh", mc.refresh_energy)
+    mc.run = spy("mc.run", mc.run)
+    md.compute = spy("md.compute", md.compute)
+    md.run = spy("md.run", md.run)
+
+    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, mc_energy_only=True).run(batch, n_blocks=2)
+
+    energy_only = frozenset({"energy"})
+    assert [name for name, _ in seen if name.startswith("mc")] == ["mc.refresh", "mc.run"] * 2
+    assert all(outputs == energy_only for name, outputs in seen if name.startswith("mc"))
+    assert all(outputs == frozenset(full) for name, outputs in seen if name.startswith("md"))
+    assert set(model.model_config.active_outputs) == full
+    assert batch.atomic_numbers.tolist() == [2]  # the MC move still happened

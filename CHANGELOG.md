@@ -13,9 +13,12 @@
   Monte Carlo (Sadigh et al., Phys. Rev. B 85, 184203, 2012). It reuses `SGC`'s
   single-site transmutations with a quadratic concentration constraint, so a
   graph can be held at any composition, including inside a miscibility gap,
-  and returns the free-energy slope `mu_B - mu_A = -(phi + 2 kappa cbar)` from
+  and returns the free-energy slope `mu_B - mu_A = reference - phi - 2 kappa cbar` from
   the mean concentration. Parametrised by `phi` or `target_concentration`, with
-  an intensive `kappa` (eV); scalar or per-graph parameters.
+  an intensive `kappa` (eV); scalar or per-graph parameters. An optional
+  `reference_exchange_potential` centres the constraint on a calibrated
+  `mu_B - mu_A`; machine-learned potentials need it, because their eV-scale
+  per-element energy offsets otherwise drive the walker to one end member.
 - GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
   evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
   planning that emits serial overflow waves across requested GPUs. The existing
@@ -113,6 +116,21 @@
 
 ### Changed
 
+- **`UMAWrapper` computes only the derivatives `active_outputs` asks for.**
+  `model_config.active_outputs = {"energy"}` now switches off fairchem's
+  forces/stress autograd (the `regress_config` flags plus the matching entries
+  in both task tables), instead of computing them and discarding the result;
+  `{"energy", "forces"}` also skips the strain derivative. Changes apply on the
+  next forward and are reversible; checkpoints with direct forces or stress, or
+  an unrecognised fairchem layout, keep computing everything with a one-time
+  `UserWarning`. Measured on an A100 for Monte Carlo: 2.1x per step for
+  `Kawasaki` under `turbo`, ~1.4x for `SGC`.
+- **`HybridMCMD(mc_energy_only=True)`** narrows the shared model to energy-only
+  for each MC block and restores full outputs for MD. Each MC block re-evaluates
+  its baseline under the same outputs (new `BaseMonteCarlo.refresh_energy`), so
+  acceptance ratios never mix two evaluation paths -- one extra model call per
+  block. The per-block MC step is the new public `HybridMCMD.run_mc_block`;
+  loops that reimplement `run` must call it rather than `mc.run`.
 - **`Kawasaki` proposes only unlike-species pairs** (`unlike_pairs_only=True`,
   the new default). The species-blind draw spent a model evaluation on every
   same-species pick -- about half of all steps on an equiatomic fcc alloy --

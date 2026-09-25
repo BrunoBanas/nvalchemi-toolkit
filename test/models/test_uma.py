@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 
 import numpy as np
 import pytest
@@ -411,6 +412,73 @@ class TestForward:
         out = mock_omol(batch)
         assert out["energy"].shape == (2, 1)
         assert out["forces"].shape == (22, 3)
+
+
+class _MockTask:
+    def __init__(self, name: str, prop: str) -> None:
+        self.name, self.property = name, prop
+
+
+class _GateablePredictUnit(_MockPredictUnit):
+    """Mock with fairchem's derivative-gating surface: a ``regress_config`` the
+    head also holds, and the two task tables post-processing indexes by."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        inner = self.model.module
+        self.regress = type(
+            "RegressConfig",
+            (),
+            {"forces": True, "stress": True, "hessian": False, "direct_forces": False, "direct_stress": False},
+        )()
+        inner.backbone.regress_config = self.regress
+        inner.output_heads = {"efs": type("Head", (), {"regress_config": self.regress})()}
+        omat = [_MockTask(f"omat_{p}", p) for p in ("energy", "forces", "stress")]
+        inner._tasks = {t.name: t for t in omat}
+        inner._dataset_to_tasks = {name: [] for name in _UMA_TASKS}
+        inner._dataset_to_tasks["omat"] = omat
+        self.dataset_to_tasks = inner._dataset_to_tasks
+        self.seen: list[tuple[bool, bool, list[str]]] = []
+
+    def predict(self, data: FCAtomicData, undo_element_references: bool = True) -> dict:
+        tasks = self.model.module._tasks
+        self.seen.append((self.regress.forces, self.regress.stress, sorted(tasks)))
+        return super().predict(data, undo_element_references)
+
+
+class TestDerivativeGating:
+    """``active_outputs`` decides which autograd derivatives fairchem computes."""
+
+    def test_energy_only_skips_forces_and_stress_then_restores(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        batch = Batch.from_data_list([_make_periodic_cu()])
+
+        wrapper.model_config.active_outputs = {"energy"}
+        out = wrapper(batch)
+        assert "forces" not in out or out["forces"] is None
+        wrapper.model_config.active_outputs = {"energy", "forces", "stress"}
+        wrapper(batch)
+
+        assert pu.seen[0] == (False, False, ["omat_energy"])
+        assert pu.seen[1] == (True, True, ["omat_energy", "omat_forces", "omat_stress"])
+        assert pu.model.module._dataset_to_tasks["omat"] is pu.dataset_to_tasks["omat"]
+
+    def test_forces_without_stress_keeps_forces_only(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy", "forces"}
+        wrapper(Batch.from_data_list([_make_periodic_cu()]))
+        assert pu.seen[0] == (True, False, ["omat_energy", "omat_forces"])
+
+    def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
+        mock_omat.model_config.active_outputs = {"energy"}
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        with pytest.warns(UserWarning, match="cannot skip forces/stress"):
+            mock_omat(batch)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mock_omat(batch)  # second call must not warn again
 
 
 # ===========================================================================

@@ -166,7 +166,7 @@ move but replaces the linear reservoir with a quadratic constraint on the
 concentration `c` of one species, sampling `E + N (phi c + kappa c^2)`. Plain
 SGC cannot hold a composition inside a miscibility gap, because the
 concentration jumps to one side; `VCSGC` can, and the slope of the free energy
-at the sampled mean `cbar` is `mu_B - mu_A = -(phi + 2 kappa cbar)`.
+at the sampled mean `cbar` is `mu_B - mu_A = reference - phi - 2 kappa cbar`.
 Integrating that slope over a grid of target compositions gives `F(c)` for a
 common-tangent construction:
 
@@ -179,6 +179,7 @@ mc = VCSGC(
   species=[79, 78],            # c is the fraction of species[1] (Pt) by default
   kappa=1.0,                   # eV, intensive
   target_concentration=0.4,    # sets phi = -2 * kappa * c0
+  reference_exchange_potential=-2.87,  # calibrated mu_Pt - mu_Au at this T, eV
 )
 mc.run(batch, n_steps=2000)                  # equilibrate
 c_sum, n_samples = 0.0, 100
@@ -192,7 +193,13 @@ delta_mu = mc.exchange_chemical_potential(cbar, batch)
 Choose `kappa > -min f''(c) / 2`, where `f` is the free energy per atom:
 below that the composition distribution turns bimodal while `cbar` can still
 look right, so check that the sampled concentration is unimodal before using
-it. `kappa = 0` recovers `SGC` with `mu_B - mu_A = -phi`.
+it. `kappa = 0` recovers `SGC` with `mu_B - mu_A = reference - phi`.
+
+Always pass `reference_exchange_potential` for a machine-learned potential.
+Per-element energy offsets put the system's own `mu_B - mu_A` electronvolts
+away from zero, while the constraint can supply at most `2 kappa`, so without
+the calibrated reference (the same one an SGC scan is centred on) the walker
+runs to the favoured end member instead of sampling near the target.
 Composition-conserving Kawasaki sampling will be added as a separate MC style;
 it is intentionally not exposed until its local proposal graph and detailed
 balance tests are complete.

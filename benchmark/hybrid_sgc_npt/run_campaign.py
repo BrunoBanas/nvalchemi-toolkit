@@ -230,6 +230,10 @@ INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
 # whose steady-state run fits. Applied in main(), not at import, so modules
 # that import this one for its constants keep their own inductor config.
 INDUCTOR_SHAPE_PADDING = False
+# Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks
+# keep full outputs. Measured 2.1x per MC step for Kawasaki (turbo) and ~1.4x for
+# SGC on A100. Set from --mc-energy-only in main().
+MC_ENERGY_ONLY = False
 
 TEMPLATE_SYMBOL = "Au"
 CRYSTAL_STRUCTURE = "fcc"
@@ -431,7 +435,9 @@ def make_workload(
         pressure_coupling="isotropic",
         hooks=_npt_wrap_hooks(),
     )
-    hybrid = HybridMCMD(mc=sgc, md=npt, mc_steps=mc_steps, md_steps=md_steps_per_block)
+    hybrid = HybridMCMD(
+        mc=sgc, md=npt, mc_steps=mc_steps, md_steps=md_steps_per_block, mc_energy_only=MC_ENERGY_ONLY,
+    )
     batch = _make_batch(template, runs, parent_states, device)
     _wrap_batch_positions(batch)
     return hybrid, batch
@@ -1116,7 +1122,7 @@ def _run_hybrid_with_observables(
     doesn't expose (it returns only the final batch).
 
     Reimplements ``HybridMCMD.run``'s loop body locally, using only its
-    public ``mc``/``md``/``mc_steps``/``md_steps`` attributes, instead of
+    public ``mc``/``md``/``md_steps`` attributes and ``run_mc_block``, instead of
     calling ``hybrid.run(batch, n_blocks=1)`` in a Python loop: that would
     re-enter ``with self.md:`` (a CUDA-stream context, see BaseDynamics) and
     re-run ``md.compute``/``mc.synchronize`` once per recorded block instead
@@ -1146,7 +1152,7 @@ def _run_hybrid_with_observables(
         for block_index in range(n_blocks):
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
-            hybrid.mc.run(batch, n_steps=hybrid.mc_steps)
+            hybrid.run_mc_block(batch)  # not hybrid.mc.run: that would bypass mc_energy_only
             _refresh_masses_after_transmutation(batch)
             hybrid.md.compute(batch)
             hybrid.md.run(batch, n_steps=hybrid.md_steps)
@@ -1315,6 +1321,104 @@ def _run_campaign(
     )
 
 
+def _batch_means_se(series: list[float], n_batches: int = 5) -> float:
+    """SE of the mean of ``series`` from n_batches contiguous batch means (tolerates autocorrelation
+    that the gate's per-block standard error ignores)."""
+    n = len(series) // n_batches
+    if n < 2:
+        return float("nan")
+    means = [statistics.fmean(series[i * n:(i + 1) * n]) for i in range(n_batches)]
+    return statistics.stdev(means) / n_batches**0.5
+
+
+class NvalchemiTraceEngine:
+    """boundary_tracer engine: runs the two coexisting walkers as ONE width-2 batch at the same
+    (T, dmu), saves their final states, and reports x, E (per atom), their SEs, the composition
+    drift between the last two gate windows, and the gate verdict. States are checkpoint run_ids
+    in ``store`` (or, for the starting walkers, paths to .pt files)."""
+
+    def __init__(self, model, template, device, store, md_steps_per_block, mc_step_fraction, n_blocks, label, log_path):
+        self.model, self.template, self.device, self.store = model, template, device, store
+        self.md_steps, self.mc_fraction, self.n_blocks, self.label = md_steps_per_block, mc_step_fraction, n_blocks, label
+        self.log_path = log_path
+
+    def _load(self, state: str) -> AtomicData:
+        path = Path(state)
+        if path.suffix == ".pt" and path.is_file():
+            payload = torch.load(path, map_location=self.device, weights_only=True)
+            return AtomicData.model_validate(payload["state"] if "state" in payload else payload).to(self.device)
+        return self.store.load(state, device=self.device)
+
+    def run(self, T, mu, state_a, state_g, tag=""):
+        tag = f"{self.label}.{tag}".replace("+", "")
+        runs = tuple(
+            RunSpec(
+                run_id=f"{tag}.{phase}", temperature_k=float(T), pressure_ev_per_a3=PRESSURE_EV_PER_A3,
+                chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: float(mu)}, species=SPECIES,
+                batch_group="trace", metadata={"phase": phase},
+            )
+            for phase in ("alpha", "gamma")
+        )
+        parents = (self._load(state_a), self._load(state_g))
+        hybrid, batch = make_workload(self.model, self.template, runs, parents, self.device, self.md_steps, self.mc_fraction)
+        start = time.perf_counter()
+        result, x_series, e_series = _run_hybrid_with_observables(hybrid, batch, self.n_blocks, 2, SPECIES[1])
+        elapsed = time.perf_counter() - start
+        obs, new_states = [], []
+        for i, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
+            self.store.save(run.run_id, final_state)
+            xs = [block[i] for block in x_series]; es = [block[i] for block in e_series]
+            gx = _equilibration_gate(xs, EQUILIBRATION_WINDOW_BLOCKS)
+            ge = _equilibration_gate(es, EQUILIBRATION_WINDOW_BLOCKS)
+            tail_x, tail_e = xs[-2 * EQUILIBRATION_WINDOW_BLOCKS:], es[-2 * EQUILIBRATION_WINDOW_BLOCKS:]
+            obs.append(dict(
+                x=gx.get("mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])),
+                x_se=max(_batch_means_se(tail_x), (gx.get("combined_standard_error") or 0) / 2**0.5),
+                E=ge.get("mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])),
+                E_se=max(_batch_means_se(tail_e), (ge.get("combined_standard_error") or 0) / 2**0.5),
+                drift=gx.get("difference", 0.0),
+                resolved=bool(gx.get("resolved")) and bool(ge.get("resolved")),
+                acceptance=hybrid.mc.stats.acceptance, wall_seconds=elapsed,
+            ))
+            new_states.append(run.run_id)
+        # Each workload enters a fresh CUDA stream (BaseDynamics.__enter__), stranding the previous
+        # stream's cached blocks; release them so reserved memory stays at one run's footprint.
+        del hybrid, batch, result
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+            torch.cuda.empty_cache()
+        with self.log_path.open("a") as fh:
+            fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs[0], gamma=obs[1])) + "\n")
+        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={obs[0]['x']:.4f} x_g={obs[1]['x']:.4f} "
+              f"E_a={obs[0]['E']:.4f} E_g={obs[1]['E']:.4f} acc={obs[0]['acceptance']:.3f} {elapsed:.0f}s", flush=True)
+        return obs[0], obs[1], new_states[0], new_states[1]
+
+
+def _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir) -> None:
+    """--mode trace-boundary: integrate eq. (29) from one coexistence point (resumable)."""
+    from boundary_tracer import BoundaryTracer, TraceConfig
+
+    trace_dir = checkpoint_dir / f"trace_{args.trace_label}"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    store = FinalStateStore(trace_dir / "states")
+    cfg = TraceConfig(
+        t0=args.trace_t0, mu0=args.trace_mu0, mu0_se=args.trace_mu0_se, t_stop=args.trace_t_stop,
+        dt=args.trace_dt, dt_min=args.trace_dt_min, dt_max=args.trace_dt_max,
+        tol_mu=args.trace_tol_mu, min_gap=args.trace_min_gap,
+    )
+    engine = NvalchemiTraceEngine(
+        model, template, device, store, md_steps_per_block, args.mc_step_fraction, args.trace_n_blocks,
+        args.trace_label, trace_dir / "runs.jsonl",
+    )
+    print(f"[trace] {args.trace_label}: T {cfg.t0:g} -> {cfg.t_stop:g} K from dmu={cfg.mu0:.5f} eV, "
+          f"{args.trace_n_blocks} blocks/run, md_steps_per_block={md_steps_per_block}, "
+          f"mc_step_fraction={args.mc_step_fraction}; trace file {trace_dir / 'trace.json'}", flush=True)
+    result = BoundaryTracer(cfg, engine, trace_dir / "trace.json").run(
+        str(args.trace_alpha_state), str(args.trace_gamma_state)
+    )
+    print(f"[trace] {result['status']}: {result['stop_reason']} ({len(result['points'])} points)", flush=True)
+
+
 def main() -> None:
     """Entry point: run one system size's cooling campaign, or its
     two-branch delta_mu-scan schedule across one or more temperatures
@@ -1323,6 +1427,12 @@ def main() -> None:
     parser.add_argument("--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints"))
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--mc-energy-only", action="store_true",
+        help="Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks keep "
+        "full outputs. Exact: each MC block re-evaluates its baseline under the same outputs. "
+        "Sets MC_ENERGY_ONLY for every workload this run builds.",
+    )
     parser.add_argument(
         "--md-steps-per-block", type=int, default=None,
         help="MD steps per hybrid block for the actual campaign runs (both "
@@ -1368,7 +1478,7 @@ def main() -> None:
         "equilibration_gate.resolved != true. Off by default.",
     )
     parser.add_argument(
-        "--mode", choices=["cooling", "delta-mu-scan"], default="cooling",
+        "--mode", choices=["cooling", "delta-mu-scan", "trace-boundary"], default="cooling",
         help="'cooling' (default): the existing 3000->1600 K, fixed-delta_mu "
         "campaign. 'delta-mu-scan': a two-branch (A-rich/B-rich) "
         "delta_mu_excess continuation across one or more "
@@ -1439,6 +1549,27 @@ def main() -> None:
         help=f"Blocks per warm-started delta_mu step (default {N_BLOCKS_SCAN_STEP}). Raise when runs "
         "near the transition fail the equilibration gate.",
     )
+    trace = parser.add_argument_group(
+        "--mode trace-boundary",
+        "Integrate the coexistence line dmu_coex(T) from ONE known coexistence point with "
+        "van de Walle & Asta eq. (29) (boundary_tracer.py, vendored from the sgc-phase-boundary "
+        "skill). Two walkers -- one per phase -- run at the same (T, dmu) every step.",
+    )
+    trace.add_argument("--trace-t0", type=float, help="starting temperature (K), a known coexistence point")
+    trace.add_argument("--trace-mu0", type=float, help="coexistence dmu = mu_Pt - mu_Au at --trace-t0 (eV)")
+    trace.add_argument("--trace-mu0-se", type=float, default=0.0, help="uncertainty of --trace-mu0 (eV)")
+    trace.add_argument("--trace-t-stop", type=float, help="trace toward this temperature (K), up or down")
+    trace.add_argument("--trace-alpha-state", type=Path,
+                       help="checkpoint .pt of a walker equilibrated in the Au-rich (low-x) phase near --trace-mu0")
+    trace.add_argument("--trace-gamma-state", type=Path,
+                       help="checkpoint .pt of a walker equilibrated in the Pt-rich (high-x) phase near --trace-mu0")
+    trace.add_argument("--trace-label", default="trace", help="names the trace file and its checkpoints")
+    trace.add_argument("--trace-dt", type=float, default=50.0, help="initial |dT| (K)")
+    trace.add_argument("--trace-dt-min", type=float, default=5.0)
+    trace.add_argument("--trace-dt-max", type=float, default=100.0)
+    trace.add_argument("--trace-n-blocks", type=int, default=200, help="blocks per walker per (T, dmu) run")
+    trace.add_argument("--trace-tol-mu", type=float, default=0.002, help="corrector convergence (eV)")
+    trace.add_argument("--trace-min-gap", type=float, default=0.05, help="stop when x_gamma - x_alpha drops below")
     parser.add_argument(
         "--calibration-n-blocks", type=int, default=100,
         help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
@@ -1463,6 +1594,9 @@ def main() -> None:
     )
     args = parser.parse_args()
     torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
+    global MC_ENERGY_ONLY  # noqa: PLW0603 -- read by make_workload, which every run path calls
+    MC_ENERGY_ONLY = args.mc_energy_only
+    print(f"[hybrid] mc_energy_only={MC_ENERGY_ONLY}", flush=True)
 
     device = torch.device(args.device)
     n_atoms = args.n_atoms
@@ -1481,6 +1615,14 @@ def main() -> None:
         args.md_steps_per_block if args.md_steps_per_block is not None else MD_STEPS_PER_BLOCK
     )
     print(f"[hybrid] md_steps_per_block={md_steps_per_block}" + (" (pure SGC)" if md_steps_per_block == 0 else ""))
+
+    if args.mode == "trace-boundary":
+        missing = [f for f in ("trace_t0", "trace_mu0", "trace_t_stop", "trace_alpha_state", "trace_gamma_state")
+                   if getattr(args, f) is None]
+        if missing:
+            parser.error("--mode trace-boundary requires " + ", ".join("--" + m.replace("_", "-") for m in missing))
+        _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir)
+        return
 
     if args.mode == "delta-mu-scan":
         if not args.scan_temperatures_k:

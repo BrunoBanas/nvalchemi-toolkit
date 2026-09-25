@@ -191,6 +191,18 @@ class BaseMonteCarlo(BaseDynamics):
         self._energy = batch.energy.detach().reshape(batch.num_graphs).clone()
         self._energy_batch_id = id(batch)
 
+    def refresh_energy(self, batch: Batch) -> None:
+        """Re-evaluate the current configuration's energy and adopt it.
+
+        Use instead of :meth:`synchronize` when the energy already on ``batch``
+        came from a differently configured evaluation than the one the trials
+        will use -- e.g. an MD force evaluation, when MC runs with
+        ``active_outputs={"energy"}`` -- so the acceptance baseline and every
+        trial energy come from the same model call. Costs one evaluation.
+        """
+        self._ensure_observables(batch)
+        self._initialize_energy(batch)
+
     def reset_statistics(self) -> None:
         """Reset cumulative attempted and accepted move counters."""
         self._attempted = None

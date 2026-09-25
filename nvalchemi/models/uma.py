@@ -84,6 +84,8 @@ through :meth:`from_checkpoint`'s ``inference_settings`` argument:
 from __future__ import annotations
 
 import contextlib
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -123,6 +125,28 @@ _UMA_TASKS: frozenset[str] = frozenset(get_args(UMATask))
 
 # Tasks that declare PBC (stress supported). ``omol`` is molecular — no stress.
 _PBC_TASKS: frozenset[str] = frozenset({"omat", "oc20", "odac", "omc"})
+
+# Autograd-derived fairchem task properties that UMAWrapper can skip when
+# ``active_outputs`` does not ask for them (see ``_gate_derivative_heads``).
+_DERIVATIVE_PROPERTIES: frozenset[str] = frozenset({"forces", "stress", "hessian"})
+
+
+@dataclass(frozen=True)
+class _DerivativeTables:
+    """As-loaded snapshot of what fairchem needs changed to skip derivatives.
+
+    UMA's ``MLP_EFS_Head`` computes forces (and, with ``regress_config.stress``,
+    stress alongside them) by autograd through the energy, gated by
+    ``regress_config``. fairchem's post-processing then indexes the model output
+    by every entry of two task tables -- ``_tasks`` in ``_process_outputs`` and
+    ``_dataset_to_tasks`` in the ``collate_predictions`` wrapper around
+    ``predict`` -- so both must list exactly the properties the head produces.
+    """
+
+    tasks: dict[str, Any]
+    dataset_to_tasks: dict[str, list[Any]]
+    forces: bool
+    stress: bool
 
 
 # Fixed-shape caps for compiled MD. fairchem's compiled graph needs static
@@ -926,6 +950,15 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         self.task_name = task_name
         self._is_pbc_task = task_name in _PBC_TASKS
         self._cutoff = self._extract_cutoff()
+        # Snapshot before anything prunes the tables: fairchem builds them in
+        # MLIPPredictUnit.__init__, so this is the full as-loaded set.
+        self._derivative_tables = self._snapshot_derivative_tables()
+        self._applied_derivatives: tuple[bool, bool] | None = (
+            None
+            if self._derivative_tables is None
+            else (self._derivative_tables.forces, self._derivative_tables.stress)
+        )
+        self._warned_ungated = False
 
         # Task-dependent output set. Energy + forces are universal;
         # stress only makes sense for periodic tasks.
@@ -1531,6 +1564,108 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         return out
 
     # ------------------------------------------------------------------
+    # derivative gating
+    # ------------------------------------------------------------------
+
+    def _fairchem_model(self) -> Any:
+        """Return fairchem's inner hydra model (the ``.module`` of the unit's model)."""
+        return getattr(getattr(self.predict_unit, "model", None), "module", None)
+
+    def _regress_configs(self) -> list[Any]:
+        """Return every live ``regress_config`` object the heads read.
+
+        Each head keeps its own reference, and a MoLE merge on the first call can
+        swap in a new backbone, so flags are set on all of them, not one captured
+        at construction.
+        """
+        inner = self._fairchem_model()
+        candidates = [getattr(getattr(inner, "backbone", None), "regress_config", None)]
+        heads = getattr(inner, "output_heads", None)
+        if heads is not None:
+            candidates += [getattr(head, "regress_config", None) for head in heads.values()]
+        unique: dict[int, Any] = {}
+        for config in candidates:
+            if config is not None:
+                unique.setdefault(id(config), config)
+        return list(unique.values())
+
+    def _snapshot_derivative_tables(self) -> _DerivativeTables | None:
+        """Capture the as-loaded task tables, or ``None`` if gating is unsupported.
+
+        Unsupported means the fairchem layout is not the one gating was written
+        against, or the checkpoint predicts forces or stress directly (a separate
+        head ``regress_config`` does not switch off); the wrapper then computes
+        every derivative and filters on output, as before gating existed.
+        """
+        inner = self._fairchem_model()
+        tasks = getattr(inner, "_tasks", None)
+        dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
+        configs = self._regress_configs()
+        if not configs or not isinstance(tasks, dict) or not isinstance(dataset_to_tasks, dict):
+            return None
+        if any(
+            getattr(config, "direct_forces", False) or getattr(config, "direct_stress", False)
+            for config in configs
+        ):
+            return None
+        return _DerivativeTables(
+            tasks=dict(tasks),
+            dataset_to_tasks={name: list(task_list) for name, task_list in dataset_to_tasks.items()},
+            forces=any(bool(getattr(config, "forces", False)) for config in configs),
+            stress=any(bool(getattr(config, "stress", False)) for config in configs),
+        )
+
+    def _gate_derivative_heads(self) -> None:
+        """Make fairchem compute only the derivatives ``active_outputs`` asks for.
+
+        Dropping forces and stress removes the autograd backward pass entirely --
+        what a Monte Carlo step, which only reads energies, would otherwise pay
+        and discard. Stress is derived together with forces, so asking for
+        stress keeps forces on. A no-op when the request has not changed. Under
+        ``torch.compile`` each distinct setting compiles once and is then reused.
+        """
+        tables = self._derivative_tables
+        active = self.model_config.active_outputs
+        if tables is None:
+            if not {"forces", "stress"} <= set(active) and not self._warned_ungated:
+                warnings.warn(
+                    "UMAWrapper cannot skip forces/stress for this predict unit (unrecognized "
+                    "fairchem layout or direct-force checkpoint); they are computed and discarded.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                self._warned_ungated = True
+            return
+        want_stress = tables.stress and "stress" in active
+        want_forces = tables.forces and ("forces" in active or want_stress)
+        if (want_forces, want_stress) == self._applied_derivatives:
+            return
+
+        configs = self._regress_configs()
+        for config in configs:
+            config.forces = want_forces
+            config.stress = want_stress
+        produced = {"forces"} if want_forces else set()
+        if want_stress:
+            produced.add("stress")
+        if any(getattr(config, "hessian", False) for config in configs):
+            produced.add("hessian")  # hessians are not gated; keep their tasks
+
+        def keep(task: Any) -> bool:
+            prop = getattr(task, "property", None)
+            return prop not in _DERIVATIVE_PROPERTIES or prop in produced
+
+        # Rebuild both tables from the snapshot, in place: other fairchem objects
+        # hold references to these same dict/list objects.
+        inner = self._fairchem_model()
+        tasks, dataset_to_tasks = inner._tasks, inner._dataset_to_tasks
+        tasks.clear()
+        tasks.update({name: task for name, task in tables.tasks.items() if keep(task)})
+        for name, task_list in tables.dataset_to_tasks.items():
+            dataset_to_tasks.setdefault(name, [])[:] = [task for task in task_list if keep(task)]
+        self._applied_derivatives = (want_forces, want_stress)
+
+    # ------------------------------------------------------------------
     # forward
     # ------------------------------------------------------------------
 
@@ -1538,6 +1673,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         """Run the UMA predict unit on ``data``.
 
         Pipeline: ``adapt_input`` -> ``MLIPPredictUnit.predict`` -> ``adapt_output``.
+        Derivatives absent from ``model_config.active_outputs`` are not computed:
+        ``active_outputs={"energy"}`` skips the forces/stress autograd backward
+        (see ``_gate_derivative_heads``).
         The single distribution touchpoint is ``ctx.maybe_pad_graph``, which under
         compiled domain decomposition pads the fairchem graph to stable per-rank
         shapes (a no-op single-process). The two blocks below handle fairchem's own
@@ -1556,6 +1694,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             ``model_config.active_outputs``.
         """
         fc_data = current_dd_context().maybe_pad_graph(self.adapt_input(data, **kwargs))
+        self._gate_derivative_heads()
 
         settings = getattr(self.predict_unit, "inference_settings", None)
         first_call = not getattr(self.predict_unit, "lazy_model_intialized", True)
