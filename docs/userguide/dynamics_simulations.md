@@ -161,6 +161,76 @@ with SGC(
 One proposal is attempted independently for every active graph per step.
 Accepted moves are available as the graph-level boolean `batch.mc_accepted`.
 
+### UMA settings for SGC and SGC-NPT
+
+Use these settings for every SGC and hybrid SGC-NPT run with a UMA model:
+
+```python
+from fairchem.core.units.mlip_unit.api.inference import InferenceSettings
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.models.uma import UMAWrapper
+
+settings = InferenceSettings(
+  compile=False,                    # see below
+  merge_mole=False,                 # never for SGC: composition changes every step
+  tf32=True,
+  activation_checkpointing=False,
+)
+model = UMAWrapper.from_checkpoint("uma-s-1p2", task_name="omat", inference_settings=settings)
+
+# MC-only: evaluate energies without the forces/stress autograd backward.
+model.model_config.active_outputs = {"energy"}
+# Hybrid MC-MD: energy-only during MC blocks, full outputs for MD.
+scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20, mc_energy_only=True)
+```
+
+`from_checkpoint` also accepts the same settings as one string,
+`inference_settings="compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`.
+`benchmark/hybrid_sgc_npt/run_campaign.py` uses exactly this as its default,
+with energy-only MC on (`--inference-settings` and `--no-mc-energy-only`
+override them).
+
+None of the named presets is right for SGC: `"default"` and `"turbo"` merge the
+mixture-of-experts weights for one composition, and `"batch"` enables
+activation checkpointing, which recomputes activations during the backward pass.
+Measured on pure SGC, Au-Pt, 500 atoms, batch width 4, 100 MC steps per block,
+on one A100-SXM4-80GB unless noted:
+
+| Settings | s/block | Peak GiB | vs `"batch"` |
+|---|---|---|---|
+| `"batch"` | 67.3 | 9.2 | 1.00x |
+| custom above, full outputs | 35.2 | 23.6 | 1.91x |
+| **custom above, energy-only** | **24.5** | **5.0** | **2.75x** |
+| custom, `merge_mole=True`, energy-only requested | 35.3 | 23.6 | 1.91x |
+| custom, `compile=True`, energy-only (A100-PCIE-40GB) | 25.3 | 6.8 | not comparable |
+
+All five A100 runs produced the identical Markov chain (the same 987 of 8000
+moves accepted, identical final compositions), with mean final energies within
+12 ueV/atom (individual walkers within 23 ueV/atom), so none of these settings
+changes the sampling.
+
+- **`merge_mole`: off.** With fairchem 2.22 it does not fail for SGC; after the
+  first composition change it logs a fallback warning and continues on an
+  unmerged model, so it gains nothing. `UMAWrapper` re-applies energy-only after
+  that rebuild. fairchem 2.21 raises an `AssertionError` instead.
+- **`activation_checkpointing`: off.** Worth 1.9x per step. It costs memory
+  only when forces are computed, and energy-only MC removes that cost.
+- **`tf32`: on.** Indistinguishable in the sampled chain.
+- **Energy-only MC: on.** Another 1.44x on top, with 4.7x less memory. Hybrid
+  runs get it through `mc_energy_only=True`, which re-evaluates each MC block's
+  baseline energy so acceptance ratios never mix evaluation paths.
+- **`compile`: off by default.** SGC composition changes did not trigger
+  recompiles (block times stayed flat), and one compile cost about 5 s. The only
+  compiled run landed on a slower A100-PCIE-40GB, where it ran 5% faster than
+  uncompiled SXM at width 1 and 3% slower at width 4, with about 35% more
+  memory, so its per-step gain on matched hardware is unmeasured. In SGC-NPT,
+  MD changes the neighbor count and therefore the graph shape, which forces
+  recompiles under static-shape compilation, so leave `compile` off for hybrid
+  runs. For long fixed-geometry SGC, benchmark `compile=True` on your own
+  hardware first.
+- **Batch width: 2-4.** SGC saturates the GPU early: energy-only gains 20%
+  from width 1 to 4, and full outputs gain 7-10%.
+
 `VCSGC` (variance-constrained SGC, binary systems) uses the same transmutation
 move but replaces the linear reservoir with a quadratic constraint on the
 concentration `c` of one species, sampling `E + N (phi c + kappa c^2)`. Plain

@@ -54,7 +54,7 @@ from nvalchemi.data import AtomicData, Batch  # noqa: E402
 from nvalchemi.dynamics.hooks._utils import kinetic_energy_per_graph  # noqa: E402
 from nvalchemi.dynamics.integrators.nve import NVE  # noqa: E402
 from nvalchemi.models.base import NeighborListFormat  # noqa: E402
-from nvalchemi.models.uma import _UMA_TASKS, UMAWrapper  # noqa: E402
+from nvalchemi.models.uma import _UMA_TASKS, UMAWrapper, _resolve_inference_settings  # noqa: E402
 
 _CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p1")
 _DEVICE = os.environ.get(
@@ -414,6 +414,27 @@ class TestForward:
         assert out["forces"].shape == (22, 3)
 
 
+class TestInferenceSettingsSpec:
+    """``from_checkpoint`` accepts a key=value spec besides presets and instances."""
+
+    def test_spec_builds_inference_settings(self):
+        settings = _resolve_inference_settings(
+            "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
+        )
+        assert (settings.compile, settings.merge_mole, settings.tf32, settings.activation_checkpointing) == (
+            False, False, True, False,
+        )
+
+    def test_presets_and_instances_pass_through(self):
+        assert _resolve_inference_settings("batch") == "batch"
+        settings = _resolve_inference_settings("tf32=true")
+        assert _resolve_inference_settings(settings) is settings
+
+    def test_unknown_field_is_rejected_not_dropped(self):
+        with pytest.raises(ValueError, match="compyle"):
+            _resolve_inference_settings("compyle=false")
+
+
 class _MockTask:
     def __init__(self, name: str, prop: str) -> None:
         self.name, self.property = name, prop
@@ -470,6 +491,22 @@ class TestDerivativeGating:
         wrapper.model_config.active_outputs = {"energy", "forces"}
         wrapper(Batch.from_data_list([_make_periodic_cu()]))
         assert pu.seen[0] == (True, False, ["omat_energy", "omat_forces"])
+
+    def test_regates_after_fairchem_rebuilds_the_model_mid_run(self):
+        """fairchem 2.22's merge_mole fallback rebuilds an unmerged model after the
+        first composition change; energy-only must be re-applied on the next call."""
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        wrapper(batch)
+        # Simulate the rebuild: derivatives back on, full task table restored.
+        pu.regress.forces, pu.regress.stress = True, True
+        inner = pu.model.module
+        inner._tasks.update({t.name: t for t in inner._dataset_to_tasks["omat"] + [
+            _MockTask("omat_forces", "forces"), _MockTask("omat_stress", "stress")]})
+        wrapper(batch)
+        assert pu.seen[-1] == (False, False, ["omat_energy"])
 
     def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
         mock_omat.model_config.active_outputs = {"energy"}

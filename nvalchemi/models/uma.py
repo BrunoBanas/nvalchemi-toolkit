@@ -131,6 +131,52 @@ _PBC_TASKS: frozenset[str] = frozenset({"omat", "oc20", "odac", "omc"})
 _DERIVATIVE_PROPERTIES: frozenset[str] = frozenset({"forces", "stress", "hessian"})
 
 
+def _resolve_inference_settings(settings: Any) -> Any:
+    """Turn a ``key=value`` spec into ``InferenceSettings``; pass anything else through.
+
+    ``"compile=false,merge_mole=false,tf32=true"`` builds
+    ``InferenceSettings(compile=False, merge_mole=False, tf32=True)``, so one
+    string can name any combination -- the fairchem presets (``"default"``,
+    ``"turbo"``, ``"batch"``) cannot express, e.g., the recommended SGC settings.
+    Preset names and ``InferenceSettings`` instances are returned unchanged.
+
+    Raises
+    ------
+    ValueError
+        On an item that is not ``key=value`` or a field ``InferenceSettings``
+        does not have (a typo must not be silently dropped).
+    """
+    if not isinstance(settings, str) or "=" not in settings:
+        return settings
+    from fairchem.core.units.mlip_unit.api.inference import (  # noqa: PLC0415
+        InferenceSettings,
+    )
+
+    known = set(InferenceSettings.__dataclass_fields__)
+    fields: dict[str, Any] = {}
+    for item in settings.split(","):
+        if not item.strip():
+            continue
+        key, separator, raw = item.partition("=")
+        key, raw = key.strip(), raw.strip()
+        if not separator or key not in known:
+            raise ValueError(
+                f"inference_settings item {item.strip()!r} is not key=value with a field of "
+                f"InferenceSettings ({sorted(known)})"
+            )
+        lowered = raw.lower()
+        if lowered in {"true", "false"}:
+            fields[key] = lowered == "true"
+        elif lowered in {"none", "null"}:
+            fields[key] = None
+        else:
+            try:
+                fields[key] = int(raw)
+            except ValueError:
+                fields[key] = raw
+    return InferenceSettings(**fields)
+
+
 @dataclass(frozen=True)
 class _DerivativeTables:
     """As-loaded snapshot of what fairchem needs changed to skip derivatives.
@@ -1034,8 +1080,11 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         device : str | torch.device
             Target device for inference. Defaults to ``"cpu"``.
         inference_settings : InferenceSettings | str
-            fairchem inference configuration. Either a preset name
-            (``"default"`` or ``"turbo"``) or a
+            fairchem inference configuration: a preset name (``"default"``,
+            ``"turbo"``, ``"batch"``), a comma-separated ``key=value`` spec of
+            ``InferenceSettings`` fields (e.g.
+            ``"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"``,
+            the recommended SGC settings), or a
             ``fairchem.core.units.mlip_unit.api.inference.InferenceSettings``
             instance. ``torch.compile`` is reached through this argument
             — see the module docstring's *torch.compile* section.
@@ -1070,6 +1119,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         if isinstance(device, torch.device):
             device = device.type
+        inference_settings = _resolve_inference_settings(inference_settings)
 
         name_str = str(name_or_path)
         if name_str in pretrained_mlip.available_models:
@@ -1638,10 +1688,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             return
         want_stress = tables.stress and "stress" in active
         want_forces = tables.forces and ("forces" in active or want_stress)
-        if (want_forces, want_stress) == self._applied_derivatives:
-            return
-
         configs = self._regress_configs()
+        # Check the LIVE state, not just what was last applied: fairchem can
+        # swap model internals mid-run (fairchem 2.22's merge_mole fallback
+        # rebuilds an unmerged model after the first composition change), and
+        # the replacement comes back computing every derivative.
+        in_sync = (want_forces, want_stress) == self._applied_derivatives and all(
+            config.forces == want_forces and config.stress == want_stress for config in configs
+        )
+        if in_sync:
+            unwanted = {"forces", "stress"} - (  # hessians are never gated
+                {"forces"} if want_forces else set()
+            ) - ({"stress"} if want_stress else set())
+            inner = self._fairchem_model()
+            live_tasks = getattr(inner, "_tasks", {})
+            if not any(getattr(task, "property", None) in unwanted for task in live_tasks.values()):
+                return
+
         for config in configs:
             config.forces = want_forces
             config.stress = want_stress

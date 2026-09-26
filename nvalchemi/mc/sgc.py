@@ -36,6 +36,17 @@ class SGC(BaseMonteCarlo):
     The sampled potential is :math:`\Omega = E - \sum_i \mu_i N_i`. A
     proposal from species ``old`` to ``new`` therefore uses
     :math:`\Delta\Omega = \Delta E - (\mu_{new} - \mu_{old})`.
+
+    Notes
+    -----
+    With UMA, build the model with ``InferenceSettings(compile=False,
+    merge_mole=False, tf32=True, activation_checkpointing=False)`` and evaluate
+    energies only during MC (``model.model_config.active_outputs = {"energy"}``,
+    or ``HybridMCMD(..., mc_energy_only=True)`` in hybrid runs): 2.75x faster
+    per step than the ``"batch"`` preset with less memory, and the same sampled
+    chain. ``merge_mole`` assumes a fixed composition, which SGC changes every
+    step. See the "UMA settings for SGC and SGC-NPT" section of the dynamics
+    user guide for the measurements.
     """
 
     def __init__(

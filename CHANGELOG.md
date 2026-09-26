@@ -125,6 +125,13 @@
   an unrecognised fairchem layout, keep computing everything with a one-time
   `UserWarning`. Measured on an A100 for Monte Carlo: 2.1x per step for
   `Kawasaki` under `turbo`, ~1.4x for `SGC`.
+- **`UMAWrapper.from_checkpoint` accepts a `key=value` settings spec**, e.g.
+  `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`,
+  besides preset names and `InferenceSettings` instances; unknown fields raise.
+  That spec is now the recommended (and `benchmark/hybrid_sgc_npt/run_campaign.py`
+  default) setting for SGC and SGC-NPT, with energy-only MC on by default there
+  (`--no-mc-energy-only` to disable): 2.75x faster per MC-only SGC step than the
+  `"batch"` preset with the same sampled chain.
 - **`HybridMCMD(mc_energy_only=True)`** narrows the shared model to energy-only
   for each MC block and restores full outputs for MD. Each MC block re-evaluates
   its baseline under the same outputs (new `BaseMonteCarlo.refresh_energy`), so

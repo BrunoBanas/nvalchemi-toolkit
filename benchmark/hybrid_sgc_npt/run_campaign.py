@@ -223,7 +223,13 @@ from nvalchemi.scheduling import (
 
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
-INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
+# SGC changes atomic composition every step, so no MoLE merge (it assumes a
+# fixed composition) and no compile (MD's changing neighbor counts force
+# static-shape recompiles in SGC-NPT). Activation checkpointing off and tf32 on:
+# 1.9x faster per step than the old "batch" preset, same sampled chain -- see
+# "UMA settings for SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md.
+# A key=value spec, which UMAWrapper.from_checkpoint parses into InferenceSettings.
+INFERENCE_SETTINGS = "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
 # Inductor's pad_mm pass benchmarks real, padded copies of large batched
 # matmul operands while compiling (a ~20 GiB one-shot allocation at wide
 # batches), so a compiled model can OOM during compilation at a batch width
@@ -232,8 +238,9 @@ INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
 INDUCTOR_SHAPE_PADDING = False
 # Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks
 # keep full outputs. Measured 2.1x per MC step for Kawasaki (turbo) and ~1.4x for
-# SGC on A100. Set from --mc-energy-only in main().
-MC_ENERGY_ONLY = False
+# SGC on A100, same sampled chain. On by default; --no-mc-energy-only in main()
+# turns it off.
+MC_ENERGY_ONLY = True
 
 TEMPLATE_SYMBOL = "Au"
 CRYSTAL_STRUCTURE = "fcc"
@@ -1423,15 +1430,21 @@ def main() -> None:
     """Entry point: run one system size's cooling campaign, or its
     two-branch delta_mu-scan schedule across one or more temperatures
     (--mode delta-mu-scan), end-to-end."""
+    global MC_ENERGY_ONLY  # noqa: PLW0603 -- read by make_workload, which every run path calls
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS))
     parser.add_argument("--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
-        "--mc-energy-only", action="store_true",
+        "--mc-energy-only", action=argparse.BooleanOptionalAction, default=MC_ENERGY_ONLY,
         help="Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks keep "
         "full outputs. Exact: each MC block re-evaluates its baseline under the same outputs. "
-        "Sets MC_ENERGY_ONLY for every workload this run builds.",
+        "On by default; --no-mc-energy-only restores full outputs in every phase.",
+    )
+    parser.add_argument(
+        "--inference-settings", default=INFERENCE_SETTINGS,
+        help="UMA inference settings: a fairchem preset name or a key=value InferenceSettings "
+        "spec. Defaults to the SGC-safe spec in INFERENCE_SETTINGS.",
     )
     parser.add_argument(
         "--md-steps-per-block", type=int, default=None,
@@ -1594,9 +1607,8 @@ def main() -> None:
     )
     args = parser.parse_args()
     torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
-    global MC_ENERGY_ONLY  # noqa: PLW0603 -- read by make_workload, which every run path calls
     MC_ENERGY_ONLY = args.mc_energy_only
-    print(f"[hybrid] mc_energy_only={MC_ENERGY_ONLY}", flush=True)
+    print(f"[hybrid] mc_energy_only={MC_ENERGY_ONLY} inference_settings={args.inference_settings!r}", flush=True)
 
     device = torch.device(args.device)
     n_atoms = args.n_atoms
@@ -1609,7 +1621,7 @@ def main() -> None:
         raise ValueError(f"expected {n_atoms} atoms, repeats={repeats} built {len(template)}")
 
     model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
+        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=args.inference_settings
     )
     md_steps_per_block = (
         args.md_steps_per_block if args.md_steps_per_block is not None else MD_STEPS_PER_BLOCK
