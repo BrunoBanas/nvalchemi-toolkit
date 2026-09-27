@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from nvalchemi.data import Batch
+from nvalchemi.data.atomic_data import _default_mass_table
 from nvalchemi.dynamics.base import BaseDynamics, DynamicsStage
 from nvalchemi.dynamics.hooks._utils import KB_EV
 
@@ -54,11 +55,20 @@ class BaseMonteCarlo(BaseDynamics):
     proposals in :meth:`_restore_rejected`. The model evaluates the full trial
     batch once; all acceptance arithmetic and state restoration remain on the
     batch device.
+
+    Atomic masses always follow the species. Every accepted move that changes
+    an atom's type also sets that atom's ``atomic_masses`` entry to the mass of
+    its new species, so any dynamics run afterwards -- in ``HybridMCMD`` or a
+    hand-written MC/MD loop -- integrates each atom with the right mass. The
+    per-species masses are taken from the batch the first time the sampler sees
+    it (so custom masses, e.g. a deuterium mass for H, are kept and move with
+    the species); a species absent from that batch uses the periodic-table mass.
+    Masses are only touched where the species changed.
     """
 
     __needs_keys__: set[str] = {"energy"}
     __provides_keys__: set[str] = {"atomic_numbers", "mc_accepted"}
-    _mutable_fields = (*BaseDynamics._mutable_fields, "atomic_numbers")
+    _mutable_fields = (*BaseDynamics._mutable_fields, "atomic_numbers", "atomic_masses")
 
     def __init__(
         self,
@@ -109,6 +119,11 @@ class BaseMonteCarlo(BaseDynamics):
         self._active: torch.Tensor | None = None
         self._attempted: torch.Tensor | None = None
         self._accepted: torch.Tensor | None = None
+        # Per-species mass lookup and the species each atom's mass currently
+        # matches, both for the batch object last seen by _ensure_mass_table.
+        self._mass_table: torch.Tensor | None = None
+        self._mass_numbers: torch.Tensor | None = None
+        self._mass_batch_id: int | None = None
 
     def _temperature_for(self, batch: Batch) -> torch.Tensor:
         """Return one positive temperature in K for every graph."""
@@ -235,8 +250,50 @@ class BaseMonteCarlo(BaseDynamics):
     def _validate_batch(self, batch: Batch) -> None:
         """Validate sampler-specific assumptions for a newly seen batch."""
 
+    def _ensure_mass_table(self, batch: Batch) -> None:
+        """Record per-species masses from a newly seen batch, before any move.
+
+        Each species present takes its mass from the batch itself, so custom
+        per-species masses survive; absent species fall back to the
+        periodic-table mass. Rebuilt when the batch object or its size changes.
+        """
+        masses = getattr(batch, "atomic_masses", None)
+        if masses is None:
+            self._mass_table = None
+            return
+        numbers = batch.atomic_numbers.reshape(-1).long()
+        if (
+            self._mass_table is not None
+            and self._mass_batch_id == id(batch)
+            and self._mass_numbers is not None
+            and self._mass_numbers.shape == numbers.shape
+        ):
+            return
+        table = _default_mass_table().to(device=masses.device, dtype=masses.dtype).clone()
+        table[numbers] = masses.detach().reshape(-1)
+        self._mass_table = table
+        self._mass_numbers = numbers.clone()
+        self._mass_batch_id = id(batch)
+
+    def _sync_masses(self, batch: Batch) -> None:
+        """Give every atom whose species changed the mass of its new species.
+
+        Device-only (no host sync): atoms whose type is unchanged keep their
+        mass bit-for-bit.
+        """
+        masses = getattr(batch, "atomic_masses", None)
+        if masses is None or self._mass_table is None or self._mass_numbers is None:
+            return
+        numbers = batch.atomic_numbers.reshape(-1).long()
+        changed = numbers != self._mass_numbers
+        with torch.no_grad():
+            flat = masses.reshape(-1)
+            flat.copy_(torch.where(changed, self._mass_table[numbers], flat))
+        self._mass_numbers.copy_(numbers)
+
     def pre_update(self, batch: Batch) -> None:
         """Apply one trial proposal to every active graph."""
+        self._ensure_mass_table(batch)
         self._active = self._active_mask(batch)
         self._propose(batch, self._ensure_generator(batch), self._active)
 
@@ -263,6 +320,8 @@ class BaseMonteCarlo(BaseDynamics):
             else:
                 self._attempted += self._active.sum().detach()
                 self._accepted += accepted.sum().detach()
+        # Rejected trials are already restored, so only accepted moves differ.
+        self._sync_masses(batch)
 
     def step(self, batch: Batch) -> tuple[Batch, torch.Tensor | None]:
         """Run one complete, hook-aware MC proposal and acceptance step."""

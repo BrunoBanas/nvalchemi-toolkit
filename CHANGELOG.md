@@ -151,6 +151,20 @@
 
 ### Fixed
 
+- **MC moves left atomic masses on the old species.** `SGC`, `VCSGC` and
+  `Kawasaki` change `atomic_numbers` but never touched `atomic_masses`, so any
+  dynamics run after an accepted move -- `HybridMCMD.run` or a hand-written
+  MC/MD loop -- integrated a transmuted or swapped atom with its previous
+  species' mass (NPT/NVT read `atomic_masses` directly). `BaseMonteCarlo` now
+  sets the mass of every atom whose species changed to its new species' mass,
+  in `post_update`, so every driver path gets it. Per-species masses are taken
+  from the batch when the sampler first sees it (custom masses such as
+  deuterium are kept and move with the species); species absent from it use the
+  periodic-table mass; unchanged atoms are never touched. `atomic_masses` is now
+  one of the samplers' `_mutable_fields`, so masked graphs keep theirs.
+  `benchmark/hybrid_sgc_npt/run_campaign.py` no longer needs its
+  `_refresh_masses_after_transmutation` workaround.
+
 - **Ewald charge gradients and cell derivatives** — the reciprocal term was only
   ever differentiated with respect to positions and charges, so a non-hybrid
   Ewald returned a wrong `dE/dq`, and strain-autograd through the detached

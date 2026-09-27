@@ -1102,6 +1102,13 @@ def _equilibration_gate(series: list[float], window: int) -> dict:
 def _refresh_masses_after_transmutation(batch: Batch) -> None:
     """Resync ``batch.atomic_masses`` with the current ``atomic_numbers``.
 
+    REDUNDANT since 2026-09-27: ``BaseMonteCarlo`` now updates the mass of
+    every atom whose species an accepted move changes (see
+    ``nvalchemi/mc/base.py``), so no MC/MD loop needs this any more and the
+    campaign no longer calls it. Kept only so scripts that still import it keep
+    working; calling it is harmless for default-mass batches. The description
+    below is the bug it used to work around.
+
     ``_walker`` sets ``atomic_masses`` once, from the composition at
     construction time, via ``AtomicData.use_default_masses()``. Nothing
     else in the SGC/NPT stack ever refreshes it afterwards: ``SGC`` only
@@ -1160,7 +1167,6 @@ def _run_hybrid_with_observables(
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
             hybrid.run_mc_block(batch)  # not hybrid.mc.run: that would bypass mc_energy_only
-            _refresh_masses_after_transmutation(batch)
             hybrid.md.compute(batch)
             hybrid.md.run(batch, n_steps=hybrid.md_steps)
             hybrid.mc.synchronize(batch)

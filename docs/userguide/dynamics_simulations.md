@@ -296,7 +296,10 @@ result = scheduler.run(batch, n_blocks=1000)
 ```
 
 The supplied batch must contain a preallocated `forces` field, as required by
-the selected MD integrator. Do not combine the MC stage with `FusedStage`:
+the selected MD integrator. Masses need no handling: every MC sampler updates
+`atomic_masses` for each atom whose species an accepted move changes, so MD
+always integrates with the current species' mass, whether it runs under
+`HybridMCMD` or in your own loop. Do not combine the MC stage with `FusedStage`:
 alternating MC-MD needs a candidate-energy evaluation and an accepted-state
 force evaluation at different points in each block.
 
