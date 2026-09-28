@@ -195,6 +195,53 @@ class _DerivativeTables:
     stress: bool
 
 
+def _fold_into_cell(
+    pos: torch.Tensor,
+    cell: torch.Tensor,
+    pbc: torch.Tensor,
+    batch_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Return *pos* translated by whole lattice vectors into its periodic cell.
+
+    Each atom is moved by the integer lattice shift that brings its fractional
+    coordinate into ``[0, 1)`` along every periodic direction of its system
+    (a coordinate of exactly 1.0 maps to 0.0); non-periodic directions are left
+    untouched. The shift is computed under ``no_grad`` and applied as a
+    constant, so gradients through *pos* pass unchanged, and *pos* itself is
+    not modified. Batched, sync-free and free of data-dependent control flow,
+    so it traces under ``torch.compile``. Systems whose cell is singular (e.g.
+    a zero placeholder cell) get no shift.
+
+    Parameters
+    ----------
+    pos : torch.Tensor
+        Cartesian positions ``[N, 3]``.
+    cell : torch.Tensor
+        Row-vector lattice ``[B, 3, 3]`` (``[B, 1, 3, 3]`` is accepted).
+    pbc : torch.Tensor
+        Per-system periodic flags ``[B, 3]`` (``[B, 1, 3]`` is accepted).
+    batch_idx : torch.Tensor
+        System index of every atom ``[N]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Folded positions ``[N, 3]`` in ``pos.dtype``.
+    """
+    cell = cell.reshape(-1, 3, 3).to(pos.dtype)
+    pbc = pbc.reshape(-1, 3).to(torch.bool)
+    with torch.no_grad():
+        # inv_ex never raises (no host sync); a singular cell yields non-finite
+        # entries, which the ``isfinite`` mask below turns into a zero shift.
+        inv_cell, _ = torch.linalg.inv_ex(cell)
+        frac = torch.einsum("ni,nij->nj", pos.detach(), inv_cell[batch_idx])
+        n_images = torch.floor(frac)
+        keep = pbc[batch_idx] & torch.isfinite(n_images).all(dim=-1, keepdim=True)
+        n_images = torch.where(keep, n_images, torch.zeros_like(n_images))
+        shift = torch.einsum("ni,nij->nj", n_images, cell[batch_idx])
+    return pos - shift
+
+
 # Fixed-shape caps for compiled MD. fairchem's compiled graph needs static
 # shapes, but per-rank atom/edge counts drift across an MD trajectory, forcing
 # repeated recompiles. We pad inputs to fixed per-rank capacities: the atom dim
@@ -1441,9 +1488,10 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         ``data.positions.device``, preserving GPU residency and autograd.
         ``edge_index`` is left empty ``(2, 0)`` so fairchem's ``MLIPPredictUnit``
         rebuilds the graph internally, matching the default ``FAIRChemCalculator``
-        path (``r_edges=False``), so outputs are equivalent. [BUG: this
-        equivalence does not hold for unwrapped positions; see the BUG note at
-        ``pos = ...`` below.] Charge/spin default
+        path (``r_edges=False``), so outputs are equivalent. Positions are
+        folded into the periodic cell along periodic directions first, as
+        ``FAIRChemCalculator`` does; ``data.positions`` is not modified.
+        Charge/spin default
         per the ASE-calculator convention (per-system LongTensors; spin defaults
         to the closed-shell singlet for OMol, 0 for periodic tasks) unless the
         caller provides them on the batch.
@@ -1475,24 +1523,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         # Nothing is sharded: under DD every input arrives plain (owned+ghost) and
         # fairchem's GNN never sees a ShardTensor.
-        #
-        # BUG: positions are passed to fairchem UNWRAPPED. fairchem's own ASE path
-        # (fairchem.core.datasets.atomic_data.AtomicData.from_ase, used by
-        # FAIRChemCalculator) wraps them first -- ``pos = wrap_positions(pos, cell,
-        # pbc=pbc, eps=0)``, commented "wrap positions for CPU graph Generation" --
-        # because its periodic graph builder (core/graph/radius_graph_pbc.py) only
-        # scans image offsets +-ceil(radius * inverse plane spacing) around the RAW
-        # positions (+-1 for a 6 A cutoff in a ~21 A cell). Nothing in nvalchemi
-        # wraps either: NPT's position update never folds coordinates back, and
-        # WrapPeriodicHook is opt-in. Once atoms drift more than about one cell
-        # length apart in unwrapped coordinates (e.g. a diffusing liquid over a
-        # long MD run), a pair's minimum image is never generated. The model then
-        # silently misses that interaction, and atoms can fall onto each other.
-        # Observed: Au-Pt hybrid NPT+SGC, uma-s-1p2/omat, 500 atoms, 1200-1400 K;
-        # all 2143 collapsed (< 1.5 A) pairs needed an image offset beyond +-1.
-        # Suggested fix: fold ``pos`` into the cell here (a whole-lattice-vector
-        # translation per atom, so energy/forces/stress are unchanged and autograd
-        # through positions is preserved).
         pos = data.positions.to(target_dtype)
         atomic_numbers = data.atomic_numbers.to(torch.long)
         batch_idx = data.batch_idx.to(torch.long)
@@ -1516,6 +1546,20 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             )
         else:
             pbc = pbc.to(torch.bool)
+
+        # Fold positions into the cell before fairchem builds its periodic
+        # graph. Its builder (core/graph/radius_graph_pbc.py) scans only image
+        # offsets of +-ceil(cutoff * inverse plane spacing) around the positions
+        # it is given, so it relies on wrapped input -- fairchem's own
+        # AtomicData.from_ase wraps first. MD positions here are continuous
+        # (NPT and HybridMCMD never fold them back; WrapPeriodicHook is opt-in),
+        # and once two atoms drift about a cell length apart their minimum image
+        # is never generated: the interaction silently vanishes and atoms can
+        # collapse onto each other. Whole-lattice-vector shifts leave energy,
+        # forces and stress unchanged; ``data.positions`` keeps its continuous
+        # coordinates.
+        if getattr(data, "cell", None) is not None:
+            pos = _fold_into_cell(pos, cell, pbc, batch_idx)
 
         # charge/spin: the typed AtomicData fields are float (B, 1); fairchem
         # wants per-system long (B,), so flatten + cast (also handles raw (B,)).

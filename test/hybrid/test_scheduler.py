@@ -93,3 +93,91 @@ def test_energy_only_mc_blocks_narrow_outputs_and_restore_them_for_md() -> None:
     assert all(outputs == frozenset(full) for name, outputs in seen if name.startswith("md"))
     assert set(model.model_config.active_outputs) == full
     assert batch.atomic_numbers.tolist() == [2]  # the MC move still happened
+
+
+def _one_atom_batch() -> Batch:
+    data = AtomicData(
+        atomic_numbers=torch.tensor([1], dtype=torch.long),
+        positions=torch.zeros(1, 3),
+    )
+    batch = Batch.from_data_list([data])
+    batch.energy = torch.zeros(1, 1)
+    batch.forces = torch.zeros(1, 3)
+    return batch
+
+
+def test_separate_models_rebaseline_mc_with_its_own_model_every_block() -> None:
+    """With two models, MC never adopts an MD energy as its acceptance baseline."""
+    mc_model = DemoModelWrapper(DemoModel())
+    md_model = DemoModelWrapper(DemoModel())
+    batch = _one_atom_batch()
+    mc = SGC(
+        model=mc_model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: 1.0e6},
+        random_seed=4,
+    )
+    md = DemoDynamics(model=md_model, n_steps=None, dt=0.01)
+    refreshed: list[int] = []
+    refresh = mc.refresh_energy
+
+    def spy(b):
+        refreshed.append(1)
+        return refresh(b)
+
+    mc.refresh_energy = spy
+    hybrid = HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1)
+
+    assert hybrid.separate_models
+    hybrid.run(batch, n_blocks=3)
+    assert len(refreshed) == 3
+    assert mc.step_count == 3 and md.step_count == 3
+    assert batch.atomic_numbers.tolist() == [2]
+
+
+def test_shared_model_without_energy_only_keeps_adopting_md_energy() -> None:
+    model = DemoModelWrapper(DemoModel())
+    mc = SGC(model=model, temperature=1000.0, species=[1, 2],
+             chemical_potentials={1: 0.0, 2: 1.0e6}, random_seed=4)
+    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
+    calls: list[int] = []
+    mc.refresh_energy = lambda b: calls.append(1)
+
+    hybrid = HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1)
+    hybrid.run(_one_atom_batch(), n_blocks=2)
+
+    assert not hybrid.separate_models
+    assert calls == []
+
+
+def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
+    """The hook sees the post-MC species and precedes every block's first MD evaluation."""
+    mc_model = DemoModelWrapper(DemoModel())
+    md_model = DemoModelWrapper(DemoModel())
+    batch = _one_atom_batch()
+    mc = SGC(model=mc_model, temperature=1000.0, species=[1, 2],
+             chemical_potentials={1: 0.0, 2: 1.0e6}, random_seed=4)
+    md = DemoDynamics(model=md_model, n_steps=None, dt=0.01)
+    events: list[tuple[str, int]] = []
+
+    def hook(b):
+        events.append(("prepare", int(b.atomic_numbers[0])))
+
+    compute = md.compute
+
+    def spy_compute(b):
+        events.append(("md.compute", int(b.atomic_numbers[0])))
+        return compute(b)
+
+    md.compute = spy_compute
+    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, before_md_block=hook).run(batch, n_blocks=2)
+
+    names = [name for name, _ in events]
+    # initial prepare+compute, then per block: prepare, compute (md.run's own
+    # computes may follow and are not preceded by a prepare).
+    prepares = [i for i, n in enumerate(names) if n == "prepare"]
+    assert len(prepares) == 3
+    assert all(names[i + 1] == "md.compute" for i in prepares)
+    assert events[prepares[0]][1] == 1  # before any MC move
+    assert events[prepares[1]][1] == 2  # after the first MC block transmuted 1 -> 2

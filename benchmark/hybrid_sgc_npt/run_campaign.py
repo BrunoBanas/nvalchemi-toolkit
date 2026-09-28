@@ -252,12 +252,18 @@ PRESSURE_EV_PER_A3 = 1.01325 / 1.602176634e6  # 1 atmosphere
 SPECIES = (79, 78)  # Au, Pt
 
 SIZE_REPEATS: dict[int, tuple[int, int, int]] = {
+    # 108 and 256: small cells for batching benchmarks (the 108-atom cell is
+    # 12 A across, twice UMA's 6 A cutoff; the graph builder handles images).
+    108: (3, 3, 3),
+    256: (4, 4, 4),
     500: (5, 5, 5),
     1372: (7, 7, 7),
     2048: (8, 8, 8),
     4000: (10, 10, 10),
 }
 BATCH_WIDTH_CANDIDATES: dict[int, tuple[int, ...]] = {
+    108: (4, 8, 16, 24, 32, 48, 64),
+    256: (2, 4, 8, 12, 16, 24, 32),
     500: (2, 4, 6, 8, 10, 12, 14, 16),
     1372: (1, 2, 3, 4, 5, 6),
     2048: (1, 2, 3, 4),

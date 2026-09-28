@@ -231,6 +231,42 @@ changes the sampling.
 - **Batch width: 2-4.** SGC saturates the GPU early: energy-only gains 20%
   from width 1 to 4, and full outputs gain 7-10%.
 
+### UMA settings for fixed-composition runs (Kawasaki, Kawasaki-NPT, MD)
+
+When composition cannot change, `merge_mole=True` folds the mixture-of-experts
+weights into one plain model and is the largest single speed-up. Compile stays
+off whenever MD runs, because MD changes the graph's edge count almost every
+step and each new count recompiles (32 recompiles, ~20 min, then a fallback to
+uncompiled speed). Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median
+s/block (50 MD steps; Kawasaki-NPT adds 100 energy-only MC steps):
+
+| Run | Settings | width 1 | width 4 | Peak GiB, width 4 |
+|---|---|---|---|---|
+| pure NPT | **merge, no compile** | **2.65** | **7.55** | 16.0 |
+| pure NPT | no merge, no compile | 4.74 | 16.82 | 23.5 |
+| pure NPT | merge, no compile, checkpointing | 5.32 | 17.82 | 7.5 |
+| pure NPT | `"batch"` | 8.66 | 31.91 | 9.2 |
+| Kawasaki-NPT | **merge, no compile** | **5.95** | **14.57** | 16.0 |
+| Kawasaki-NPT | no merge, no compile | 12.35 | 41.30 | 23.5 |
+
+Use `inference_settings="compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"`
+for Kawasaki-NPT and MD, `"turbo"` (compile + merge) only for Kawasaki MC with
+no MD, and merge + `activation_checkpointing=true` when memory is short.
+
+**A merged model is valid for one composition only.** fairchem merges on the
+first structure the model evaluates and then requires every later structure,
+and every graph in a batch, to have the same reduced composition (fairchem 2.21
+raises an `AssertionError`; 2.22 silently falls back to the slower unmerged
+model). So:
+
+- batching walkers with merge is correct only when all of them have the same
+  composition, e.g. replicas of one structure under Kawasaki;
+- turn merge off (`merge_mole=false`) as soon as different systems share a batch
+  or a model: different compositions, structures or sizes, or a sweep that runs
+  several systems through one model one after another -- or load a new merged
+  model per system;
+- turn merge off for SGC and VC-SGC, whose composition changes every step.
+
 `VCSGC` (variance-constrained SGC, binary systems) uses the same transmutation
 move but replaces the linear reservoir with a quadratic constraint on the
 concentration `c` of one species, sampling `E + N (phi c + kappa c^2)`. Plain
@@ -277,7 +313,9 @@ balance tests are complete.
 ## Hybrid MC-MD blocks
 
 `HybridMCMD` owns the alternation between an MC sampler and a Toolkit MD
-integrator. Both stages must use the same model object. The scheduler keeps one
+integrator. The two stages usually share one model object; they may also use
+two models of the same potential that differ only in how it is evaluated (see
+below). The scheduler keeps one
 `Batch` on the active GPU, refreshes forces and stress after MC, then starts the
 MD block from the accepted configuration:
 
@@ -299,9 +337,23 @@ The supplied batch must contain a preallocated `forces` field, as required by
 the selected MD integrator. Masses need no handling: every MC sampler updates
 `atomic_masses` for each atom whose species an accepted move changes, so MD
 always integrates with the current species' mass, whether it runs under
-`HybridMCMD` or in your own loop. Do not combine the MC stage with `FusedStage`:
+`HybridMCMD` or in your own loop. Nor do positions: `UMAWrapper` folds them
+into the periodic cell before every evaluation, so UMA runs no longer need
+`WrapPeriodicHook` for correctness; the hook is still useful for tidy
+trajectories and for other models whose neighbour lists assume wrapped input.
+Do not combine the MC stage with `FusedStage`:
 alternating MC-MD needs a candidate-energy evaluation and an accepted-state
 force evaluation at different points in each block.
+
+With separate models (`HybridMCMD(mc=SGC(model=mc_model, ...), md=NPT(model=md_model, ...))`)
+each MC block re-evaluates its baseline energy with the MC model, so acceptance
+ratios only ever compare MC-model energies, at one extra model call per block.
+The models must represent the same energy surface -- same checkpoint and task,
+differing in inference settings -- or the chain samples no single ensemble.
+`before_md_block=fn` calls `fn(batch)` before each MD block's first force
+evaluation, after MC has updated the species: use it to prepare the MD model
+for the current composition. Custom loops call `scheduler.prepare_md_block(batch)`
+before `md.compute(batch)`, as they call `scheduler.run_mc_block(batch)` for MC.
 
 ### Simulation batch planning
 

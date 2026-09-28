@@ -138,6 +138,15 @@
   acceptance ratios never mix two evaluation paths -- one extra model call per
   block. The per-block MC step is the new public `HybridMCMD.run_mc_block`;
   loops that reimplement `run` must call it rather than `mc.run`.
+- **`HybridMCMD` accepts separate MC and MD models.** The shared-model
+  requirement is gone, so each phase can run its own inference path over the
+  same potential -- e.g. an unmerged UMA for SGC trials and a MoLE-merged UMA
+  for MD, which is 1.8-2.2x faster for NPT but valid only at a fixed
+  composition. With two models every MC block re-evaluates its baseline with
+  the MC model instead of adopting MD's energy. The new
+  `before_md_block(batch)` callback runs ahead of each MD block's first force
+  call (the place to re-merge an MD model on the current composition); loops
+  that reimplement `run` call it through `HybridMCMD.prepare_md_block`.
 - **`Kawasaki` proposes only unlike-species pairs** (`unlike_pairs_only=True`,
   the new default). The species-blind draw spent a model evaluation on every
   same-species pick -- about half of all steps on an equiatomic fcc alloy --
@@ -151,6 +160,21 @@
 
 ### Fixed
 
+- **`UMAWrapper` folds positions into the periodic cell before every
+  evaluation.** It passed raw positions to fairchem, whose periodic graph
+  builder scans only image offsets of +-ceil(cutoff x inverse plane spacing)
+  around the positions it is given and so relies on wrapped input (fairchem's
+  own `AtomicData.from_ase` wraps first). Neither NPT nor `HybridMCMD` folds
+  coordinates back, so in long MD runs without `WrapPeriodicHook` atoms that
+  drifted about a cell length apart in unwrapped coordinates lost their
+  minimum-image pair: UMA silently dropped those interactions and atoms could
+  collapse onto each other (seen in Au-Pt SGC-NPT at 1200-1400 K, where every
+  collapsed pair needed an image offset beyond +-1). `adapt_input` now shifts
+  each atom by whole lattice vectors along its system's periodic directions,
+  on a copy handed to fairchem only: `data.positions` keeps its continuous
+  coordinates, non-periodic (vacuum) directions are left alone, and gradients
+  pass through unchanged. Energies, forces and stress are unchanged for
+  correctly wrapped inputs.
 - **MC moves left atomic masses on the old species.** `SGC`, `VCSGC` and
   `Kawasaki` change `atomic_numbers` but never touched `atomic_masses`, so any
   dynamics run after an accepted move -- `HybridMCMD.run` or a hand-written
