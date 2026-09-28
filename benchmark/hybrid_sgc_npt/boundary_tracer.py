@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Vendored from the sgc-phase-boundary skill (scripts/boundary_tracer.py), version 1.0, sha256[:16]=dcb52dee8b7a7ff0.
+# Vendored from the sgc-phase-boundary skill (scripts/boundary_tracer.py), version 1.1, sha256[:16]=72c54428dfbebffd.
 # Do not edit here: change the skill's copy, rerun its tests, then re-vendor with
 #   python boundary_tracer.py vendor <this file> --header <license header>
 #!/usr/bin/env python3
@@ -34,8 +34,10 @@ simulation is supplied by an object with
     engine.run(T, mu, state_a, state_g, tag) -> (obs_a, obs_g, new_state_a, new_state_g)
 
 where obs_* are dicts with keys x, x_se, E, E_se, drift (late-minus-early window mean of x),
-resolved (bool), and states are JSON-serializable handles (e.g. checkpoint ids). Both
-walkers must be run at the same T and dmu. E is per atom and must be the energy the SGC
+resolved (bool), and states are JSON-serializable handles (e.g. checkpoint ids, or lists of
+them). Both walkers must be run at the same T and dmu. An engine that runs several independent
+replicas per phase reports their mean and may add ``replica_split=True`` when the replicas of one
+phase disagree beyond noise (one of them may have switched phase): the step is then rejected. E is per atom and must be the energy the SGC
 acceptance uses (potential energy for rigid-lattice SGC; potential energy + PV for NPT
 hybrid runs), in the same units and zero as dmu. x is the fraction of species B.
 
@@ -63,7 +65,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 KB_EV = 8.617333262e-5
-TRACER_VERSION = "1.0"
+TRACER_VERSION = "1.1"
 
 
 # ----------------------------------------------------------------------------- configuration
@@ -121,6 +123,9 @@ def check_phases(cfg: TraceConfig, hist: list[dict], T: float, a: dict, g: dict)
         if toward * drift > cfg.z * max(se, 1e-6) and abs(drift) > 0.5 * cfg.min_jump:
             problems.append(f"{'alpha' if key == 'a' else 'gamma'} still drifting toward the other phase "
                             f"(window drift {drift:+.4f})")
+        if obs.get("replica_split"):
+            problems.append(f"{'alpha' if key == 'a' else 'gamma'} replicas disagree "
+                            f"(x = {obs.get('x_replicas')}): one may have switched phase")
         pred = _predict_own(hist, key, T)
         if pred is not None:
             dev = obs["x"] - pred

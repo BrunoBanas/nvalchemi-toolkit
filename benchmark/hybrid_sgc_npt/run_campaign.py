@@ -185,6 +185,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 import time
 from datetime import datetime, timezone
@@ -1328,6 +1329,14 @@ def _run_campaign(
                         f"[equilibration] WARNING: unresolved after {n_blocks} blocks (see "
                         f"<run_id>.equilibration.json for diagnostics): {unresolved_run_ids}"
                     )
+                # Every workload enters a fresh CUDA stream (BaseDynamics.__enter__), so the caching
+                # allocator strands the previous run's blocks on a stream nothing uses again: reserved
+                # memory climbs by one run's working pool per batch while allocated stays flat. Release
+                # them here so reserved tracks one run (larger with activation_checkpointing=false).
+                del hybrid, batch, result
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
+                    torch.cuda.empty_cache()
     print(
         f"Campaign {campaign.name!r} complete: "
         f"{len(scheduler.completed_ids)} final states in {scheduler.state_store.root}"
@@ -1345,15 +1354,20 @@ def _batch_means_se(series: list[float], n_batches: int = 5) -> float:
 
 
 class NvalchemiTraceEngine:
-    """boundary_tracer engine: runs the two coexisting walkers as ONE width-2 batch at the same
-    (T, dmu), saves their final states, and reports x, E (per atom), their SEs, the composition
-    drift between the last two gate windows, and the gate verdict. States are checkpoint run_ids
-    in ``store`` (or, for the starting walkers, paths to .pt files)."""
+    """boundary_tracer engine: runs ``replicas`` independent walkers per phase -- all at the same
+    (T, dmu) in ONE batch of width 2 * replicas -- saves their final states, and reports per phase
+    the replica-mean x and E (per atom), their SEs, the composition drift between the last two
+    gate windows, and the gate verdict. Replicas of one phase start from the same state and
+    decorrelate through independent MC draws; their mean halves the variance fed to eq. (29) at
+    replicas=2, and a replica that disagrees with its partner beyond noise (``replica_split``)
+    makes the tracer reject the step. A phase's state is the list of its replicas' checkpoint
+    run_ids in ``store`` (or, for the starting walkers, one .pt path used by every replica)."""
 
-    def __init__(self, model, template, device, store, md_steps_per_block, mc_step_fraction, n_blocks, label, log_path):
+    def __init__(self, model, template, device, store, md_steps_per_block, mc_step_fraction, n_blocks, label,
+                 log_path, replicas=1, z=2.576, min_jump=0.03):
         self.model, self.template, self.device, self.store = model, template, device, store
         self.md_steps, self.mc_fraction, self.n_blocks, self.label = md_steps_per_block, mc_step_fraction, n_blocks, label
-        self.log_path = log_path
+        self.log_path, self.replicas, self.z, self.min_jump = log_path, replicas, z, min_jump
 
     def _load(self, state: str) -> AtomicData:
         path = Path(state)
@@ -1362,38 +1376,73 @@ class NvalchemiTraceEngine:
             return AtomicData.model_validate(payload["state"] if "state" in payload else payload).to(self.device)
         return self.store.load(state, device=self.device)
 
+    def _states(self, state) -> list[str]:
+        states = [state] if isinstance(state, str) else list(state)
+        if len(states) == 1:
+            states = states * self.replicas
+        if len(states) != self.replicas:
+            raise ValueError(f"expected {self.replicas} replica states, got {len(states)} (was --trace-replicas changed "
+                             "mid-trace? keep it fixed for one trace.json)")
+        return states
+
+    def _observe(self, xs: list[float], es: list[float]) -> dict:
+        gx = _equilibration_gate(xs, EQUILIBRATION_WINDOW_BLOCKS)
+        ge = _equilibration_gate(es, EQUILIBRATION_WINDOW_BLOCKS)
+        tail_x, tail_e = xs[-2 * EQUILIBRATION_WINDOW_BLOCKS:], es[-2 * EQUILIBRATION_WINDOW_BLOCKS:]
+        return dict(
+            x=gx.get("mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])),
+            x_se=max(_batch_means_se(tail_x), (gx.get("combined_standard_error") or 0) / 2**0.5),
+            E=ge.get("mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])),
+            E_se=max(_batch_means_se(tail_e), (ge.get("combined_standard_error") or 0) / 2**0.5),
+            drift=gx.get("difference", 0.0),
+            resolved=bool(gx.get("resolved")) and bool(ge.get("resolved")),
+        )
+
+    def _combine(self, reps: list[dict]) -> dict:
+        n = len(reps)
+        xs = [r["x"] for r in reps]
+        within = math.sqrt(sum(r["x_se"] ** 2 for r in reps)) / n
+        between = statistics.stdev(xs) / math.sqrt(n) if n > 1 else 0.0
+        e_within = math.sqrt(sum(r["E_se"] ** 2 for r in reps)) / n
+        e_between = statistics.stdev([r["E"] for r in reps]) / math.sqrt(n) if n > 1 else 0.0
+        spread = max(xs) - min(xs)
+        split_tol = max(self.z * math.sqrt(2) * max(r["x_se"] for r in reps), self.min_jump)
+        return dict(
+            x=statistics.fmean(xs), x_se=max(within, between),
+            E=statistics.fmean(r["E"] for r in reps), E_se=max(e_within, e_between),
+            drift=statistics.fmean(r["drift"] for r in reps),
+            resolved=all(r["resolved"] for r in reps),
+            x_replicas=[round(v, 5) for v in xs],
+            replica_split=bool(n > 1 and spread > split_tol),
+        )
+
     def run(self, T, mu, state_a, state_g, tag=""):
         tag = f"{self.label}.{tag}".replace("+", "")
+        phases = ("alpha", "gamma")
         runs = tuple(
             RunSpec(
-                run_id=f"{tag}.{phase}", temperature_k=float(T), pressure_ev_per_a3=PRESSURE_EV_PER_A3,
+                run_id=f"{tag}.{phase}.r{k}", temperature_k=float(T), pressure_ev_per_a3=PRESSURE_EV_PER_A3,
                 chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: float(mu)}, species=SPECIES,
-                batch_group="trace", metadata={"phase": phase},
+                batch_group="trace", metadata={"phase": phase, "replica": k},
             )
-            for phase in ("alpha", "gamma")
+            for phase in phases for k in range(self.replicas)
         )
-        parents = (self._load(state_a), self._load(state_g))
+        parents = tuple(self._load(st) for st in self._states(state_a) + self._states(state_g))
+        width = len(runs)
         hybrid, batch = make_workload(self.model, self.template, runs, parents, self.device, self.md_steps, self.mc_fraction)
         start = time.perf_counter()
-        result, x_series, e_series = _run_hybrid_with_observables(hybrid, batch, self.n_blocks, 2, SPECIES[1])
+        result, x_series, e_series = _run_hybrid_with_observables(hybrid, batch, self.n_blocks, width, SPECIES[1])
         elapsed = time.perf_counter() - start
-        obs, new_states = [], []
+        acceptance = hybrid.mc.stats.acceptance
+        per_run = []
         for i, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
             self.store.save(run.run_id, final_state)
-            xs = [block[i] for block in x_series]; es = [block[i] for block in e_series]
-            gx = _equilibration_gate(xs, EQUILIBRATION_WINDOW_BLOCKS)
-            ge = _equilibration_gate(es, EQUILIBRATION_WINDOW_BLOCKS)
-            tail_x, tail_e = xs[-2 * EQUILIBRATION_WINDOW_BLOCKS:], es[-2 * EQUILIBRATION_WINDOW_BLOCKS:]
-            obs.append(dict(
-                x=gx.get("mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])),
-                x_se=max(_batch_means_se(tail_x), (gx.get("combined_standard_error") or 0) / 2**0.5),
-                E=ge.get("mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])),
-                E_se=max(_batch_means_se(tail_e), (ge.get("combined_standard_error") or 0) / 2**0.5),
-                drift=gx.get("difference", 0.0),
-                resolved=bool(gx.get("resolved")) and bool(ge.get("resolved")),
-                acceptance=hybrid.mc.stats.acceptance, wall_seconds=elapsed,
-            ))
-            new_states.append(run.run_id)
+            per_run.append(self._observe([b[i] for b in x_series], [b[i] for b in e_series]))
+        obs, new_states = {}, {}
+        for j, phase in enumerate(phases):
+            sl = slice(j * self.replicas, (j + 1) * self.replicas)
+            obs[phase] = self._combine(per_run[sl]) | dict(acceptance=acceptance, wall_seconds=elapsed, width=width)
+            new_states[phase] = [r.run_id for r in runs[sl]]
         # Each workload enters a fresh CUDA stream (BaseDynamics.__enter__), stranding the previous
         # stream's cached blocks; release them so reserved memory stays at one run's footprint.
         del hybrid, batch, result
@@ -1401,10 +1450,11 @@ class NvalchemiTraceEngine:
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
         with self.log_path.open("a") as fh:
-            fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs[0], gamma=obs[1])) + "\n")
-        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={obs[0]['x']:.4f} x_g={obs[1]['x']:.4f} "
-              f"E_a={obs[0]['E']:.4f} E_g={obs[1]['E']:.4f} acc={obs[0]['acceptance']:.3f} {elapsed:.0f}s", flush=True)
-        return obs[0], obs[1], new_states[0], new_states[1]
+            fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])) + "\n")
+        a, g = obs["alpha"], obs["gamma"]
+        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
+              f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={acceptance:.3f} width={width} {elapsed:.0f}s", flush=True)
+        return a, g, new_states["alpha"], new_states["gamma"]
 
 
 def _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir) -> None:
@@ -1421,11 +1471,13 @@ def _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir
     )
     engine = NvalchemiTraceEngine(
         model, template, device, store, md_steps_per_block, args.mc_step_fraction, args.trace_n_blocks,
-        args.trace_label, trace_dir / "runs.jsonl",
+        args.trace_label, trace_dir / "runs.jsonl", replicas=args.trace_replicas,
     )
     print(f"[trace] {args.trace_label}: T {cfg.t0:g} -> {cfg.t_stop:g} K from dmu={cfg.mu0:.5f} eV, "
           f"{args.trace_n_blocks} blocks/run, md_steps_per_block={md_steps_per_block}, "
-          f"mc_step_fraction={args.mc_step_fraction}; trace file {trace_dir / 'trace.json'}", flush=True)
+          f"mc_step_fraction={args.mc_step_fraction}, replicas/phase={args.trace_replicas} "
+          f"(batch width {2 * args.trace_replicas}), inference_settings={args.inference_settings!r}, "
+          f"mc_energy_only={MC_ENERGY_ONLY}; trace file {trace_dir / 'trace.json'}", flush=True)
     result = BoundaryTracer(cfg, engine, trace_dir / "trace.json").run(
         str(args.trace_alpha_state), str(args.trace_gamma_state)
     )
@@ -1589,6 +1641,9 @@ def main() -> None:
     trace.add_argument("--trace-n-blocks", type=int, default=200, help="blocks per walker per (T, dmu) run")
     trace.add_argument("--trace-tol-mu", type=float, default=0.002, help="corrector convergence (eV)")
     trace.add_argument("--trace-min-gap", type=float, default=0.05, help="stop when x_gamma - x_alpha drops below")
+    trace.add_argument("--trace-replicas", type=int, default=1, choices=(1, 2),
+                       help="independent walkers per phase; batch width = 2 x replicas (GPU_MEMORY_GUIDE.md: 2-4 "
+                            "for the energy-only SGC spec). Keep fixed for one trace.json")
     parser.add_argument(
         "--calibration-n-blocks", type=int, default=100,
         help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
