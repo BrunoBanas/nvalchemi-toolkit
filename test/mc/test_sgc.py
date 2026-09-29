@@ -137,7 +137,9 @@ def test_species_and_potentials_are_copied_to_device_once() -> None:
     sampler.run(batch, n_steps=3)
 
     assert set(cached) == set(sampler._device_parameters)
-    assert all(sampler._device_parameters[key] is value for key, value in cached.items())
+    assert all(
+        sampler._device_parameters[key] is value for key, value in cached.items()
+    )
     torch.testing.assert_close(
         sampler._chemical_potentials_for(batch),
         torch.tensor([[0.0, 0.1], [0.0, -0.1]]),
@@ -149,7 +151,9 @@ def test_new_batch_gets_a_fresh_energy_baseline() -> None:
     sampler = _sampler({1: 0.0, 2: 0.0})
     sampler.run(_batch([[1, 2]]), n_steps=1)
 
-    with patch.object(sampler, "_initialize_energy", wraps=sampler._initialize_energy) as init:
+    with patch.object(
+        sampler, "_initialize_energy", wraps=sampler._initialize_energy
+    ) as init:
         sampler.run(_batch([[2, 2]]), n_steps=1)
 
     init.assert_called_once()

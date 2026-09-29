@@ -89,7 +89,9 @@ def _chain(numbers: list[int], *, separation: float = 1.0) -> AtomicData:
     """One open chain of atoms spaced `separation` apart along x."""
     return AtomicData(
         atomic_numbers=torch.tensor(numbers, dtype=torch.long),
-        positions=torch.tensor([[index * separation, 0.0, 0.0] for index in range(len(numbers))]),
+        positions=torch.tensor(
+            [[index * separation, 0.0, 0.0] for index in range(len(numbers))]
+        ),
     )
 
 
@@ -105,7 +107,9 @@ def test_every_proposal_swaps_an_unlike_pair() -> None:
         # evaluation that follows can change anything.
         assert bool(sampler._proposal_swapped.all())
 
-    assert Counter(batch.atomic_numbers.tolist()) == Counter([1, 1, 2, 2] + [1, 2, 1, 2])
+    assert Counter(batch.atomic_numbers.tolist()) == Counter(
+        [1, 1, 2, 2] + [1, 2, 1, 2]
+    )
 
 
 def test_proposal_correction_matches_the_unlike_pair_ratio() -> None:
@@ -126,9 +130,13 @@ def test_proposal_correction_matches_the_unlike_pair_ratio() -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="sync detection needs CUDA")
 def test_unlike_pair_counting_does_not_sync_the_device() -> None:
     """Counting runs twice per step; a device-to-host sync there stalls the next model call."""
-    batch = Batch.from_data_list([_chain([1, 1, 2, 2]), _chain([1, 2, 1, 2])]).to("cuda")
+    batch = Batch.from_data_list([_chain([1, 1, 2, 2]), _chain([1, 2, 1, 2])]).to(
+        "cuda"
+    )
     sampler = _sampler(cutoff=1.5)
-    sampler._ensure_proposal_graph(batch)  # the neighbour search may sync; not under test
+    sampler._ensure_proposal_graph(
+        batch
+    )  # the neighbour search may sync; not under test
     torch.cuda.synchronize()
 
     previous = torch.cuda.get_sync_debug_mode()
@@ -139,7 +147,9 @@ def test_unlike_pair_counting_does_not_sync_the_device() -> None:
         torch.cuda.set_sync_debug_mode(previous)
 
     assert counts.tolist() == [1, 3]
-    assert int(cumulative[-1]) == 4  # edge order is the neighbour search's; only the total is fixed
+    assert (
+        int(cumulative[-1]) == 4
+    )  # edge order is the neighbour search's; only the total is fixed
 
 
 def test_inactive_graph_is_not_mutated() -> None:

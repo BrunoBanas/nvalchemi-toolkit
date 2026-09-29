@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Standalone diagnostic: the REAL interleaved hybrid MC-MD workflow, run
 block by block with per-step trajectory dumps, per-step wall time, and
 true per-phase peak-memory accounting.
@@ -61,6 +75,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 from run_campaign import (  # noqa: E402
     BAROSTAT_TIME_FS,
     CHECKPOINT,
@@ -82,7 +97,6 @@ from run_campaign import (  # noqa: E402
     _refresh_masses_after_transmutation,
     build_ase_structure,
 )
-from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.integrators.npt import NPT
@@ -133,7 +147,9 @@ def _build_initial_state(
     generator = torch.Generator(device=device).manual_seed(seed)
     numbers = torch.full_like(data.atomic_numbers, SPECIES[0])
     pt_count = round(pt_fraction * n_atoms)
-    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = SPECIES[1]
+    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = (
+        SPECIES[1]
+    )
     data.atomic_numbers = numbers
     data.atomic_masses = None
     data.use_default_masses()
@@ -141,7 +157,8 @@ def _build_initial_state(
         torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
     )
     data.velocities = (
-        torch.randn((n_atoms, 3), device=device, generator=generator) * velocity_std[:, None]
+        torch.randn((n_atoms, 3), device=device, generator=generator)
+        * velocity_std[:, None]
     )
     data.velocities -= data.velocities.mean(dim=0, keepdim=True)
     data.forces = torch.zeros_like(data.positions)
@@ -163,22 +180,38 @@ def _save_and_check(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out-dir", type=Path, required=True, help="Root for checkpoints/ under this run")
+    """Run the hybrid MC-MD diagnostic and report per-block observables."""
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="Root for checkpoints/ under this run",
+    )
     parser.add_argument("--n-atoms", type=int, default=500)
-    parser.add_argument("--pt-fraction", type=float, default=0.50, help="Initial composition (\"50/50\")")
+    parser.add_argument(
+        "--pt-fraction", type=float, default=0.50, help='Initial composition ("50/50")'
+    )
     parser.add_argument("--temperature-k", type=float, default=1400.0)
     parser.add_argument(
-        "--n-blocks", type=int, default=10,
+        "--n-blocks",
+        type=int,
+        default=10,
         help="Hybrid MC/MD blocks to run (production uses 100-200; kept small here "
         "since every single step is saved -- see module docstring)",
     )
     parser.add_argument(
-        "--mc-steps-per-block", type=int, default=None,
+        "--mc-steps-per-block",
+        type=int,
+        default=None,
         help="Default: round(MC_STEP_FRACTION * n_atoms), matching run_campaign.py",
     )
     parser.add_argument(
-        "--md-steps-per-block", type=int, default=MD_STEPS_PER_BLOCK,
+        "--md-steps-per-block",
+        type=int,
+        default=MD_STEPS_PER_BLOCK,
         help=f"Default: MD_STEPS_PER_BLOCK ({MD_STEPS_PER_BLOCK}), matching run_campaign.py",
     )
     parser.add_argument("--delta-mu-ref-ev", type=float, default=-2.9662178325653072)
@@ -199,7 +232,11 @@ def main() -> None:
     store = FinalStateStore(checkpoint_dir)
 
     template = build_ase_structure(
-        TEMPLATE_SYMBOL, CRYSTAL_STRUCTURE, LATTICE_A_ANG, SIZE_REPEATS[args.n_atoms], cubic=CONVENTIONAL_CELL
+        TEMPLATE_SYMBOL,
+        CRYSTAL_STRUCTURE,
+        LATTICE_A_ANG,
+        SIZE_REPEATS[args.n_atoms],
+        cubic=CONVENTIONAL_CELL,
     )
     if len(template) != args.n_atoms:
         raise ValueError(f"expected {args.n_atoms} atoms, built {len(template)}")
@@ -212,10 +249,15 @@ def main() -> None:
     )
 
     model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=INFERENCE_SETTINGS,
     )
 
-    data = _build_initial_state(template, args.temperature_k, args.pt_fraction, args.seed, device)
+    data = _build_initial_state(
+        template, args.temperature_k, args.pt_fraction, args.seed, device
+    )
     batch = Batch.from_data_list([data])
     store.save("initial", batch.get_data(0))
 
@@ -251,7 +293,10 @@ def main() -> None:
         t0 = time.perf_counter()
         hybrid.md.compute(batch)
         hybrid.mc.synchronize(batch)
-        print(f"[setup] initial compute+synchronize: wall={time.perf_counter() - t0:.4f}s", flush=True)
+        print(
+            f"[setup] initial compute+synchronize: wall={time.perf_counter() - t0:.4f}s",
+            flush=True,
+        )
         _save_and_check(batch, store, "block0000_setup", pt_atomic_number)
 
         for block_index in range(1, args.n_blocks + 1):
@@ -266,7 +311,10 @@ def main() -> None:
                 run_id = f"block{block_index:04d}_mc{mc_step:04d}"
                 _save_and_check(batch, store, run_id, pt_atomic_number)
                 _log_step(run_id, step_wall_s, device)
-            _report_phase_memory(device, f"block {block_index}/{args.n_blocks} MC phase ({n_mc_steps} steps)")
+            _report_phase_memory(
+                device,
+                f"block {block_index}/{args.n_blocks} MC phase ({n_mc_steps} steps)",
+            )
 
             # --- force/energy refresh, exactly matching HybridMCMD.run():
             # prevents a rejected MC trial's candidate-state derivatives
@@ -276,7 +324,10 @@ def main() -> None:
             hybrid.md.compute(batch)
             refresh_wall_s = time.perf_counter() - t0
             total_wall_s += refresh_wall_s
-            print(f"[step] block{block_index:04d}_md_refresh: wall={refresh_wall_s:.4f}s", flush=True)
+            print(
+                f"[step] block{block_index:04d}_md_refresh: wall={refresh_wall_s:.4f}s",
+                flush=True,
+            )
 
             # --- MD sub-phase: n_md_steps individual NPT steps ---
             for md_step in range(1, n_md_steps + 1):
@@ -287,7 +338,10 @@ def main() -> None:
                 run_id = f"block{block_index:04d}_md{md_step:04d}"
                 _save_and_check(batch, store, run_id, pt_atomic_number)
                 _log_step(run_id, step_wall_s, device)
-            _report_phase_memory(device, f"block {block_index}/{args.n_blocks} MD phase ({n_md_steps} steps)")
+            _report_phase_memory(
+                device,
+                f"block {block_index}/{args.n_blocks} MD phase ({n_md_steps} steps)",
+            )
 
             # --- adopt the just-refreshed energy as MC's new baseline,
             # exactly matching HybridMCMD.run() ---

@@ -1,7 +1,7 @@
 # SGC phase-boundary analysis
 
 Turns semi-grand-canonical (SGC / VC-SGC / hybrid MC-MD) averages
-<x>(Δμ, T), and optionally <E>, into phase boundaries with diagnostics that say
+⟨x⟩(Δμ, T), and optionally ⟨E⟩, into phase boundaries with diagnostics that say
 whether the data can support one, and traces a whole T-x coexistence line from one
 known coexistence point. The method is A. van de Walle & M. Asta, "Self-driven
 lattice-model Monte Carlo simulations of alloy thermodynamic properties and phase

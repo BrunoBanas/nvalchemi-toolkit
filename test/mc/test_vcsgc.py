@@ -50,10 +50,16 @@ class _SiteEnergyModel(torch.nn.Module, BaseModelMixin):
     def forward(self, batch: Batch) -> dict[str, torch.Tensor]:
         """Sum per-species site energies over each graph."""
         numbers = batch.atomic_numbers.reshape(-1)
-        per_atom = torch.zeros(numbers.shape, dtype=batch.positions.dtype, device=numbers.device)
+        per_atom = torch.zeros(
+            numbers.shape, dtype=batch.positions.dtype, device=numbers.device
+        )
         for number, energy in self.site_energies.items():
-            per_atom = torch.where(numbers == number, torch.full_like(per_atom, energy), per_atom)
-        energy = torch.zeros(batch.num_graphs, dtype=per_atom.dtype, device=per_atom.device)
+            per_atom = torch.where(
+                numbers == number, torch.full_like(per_atom, energy), per_atom
+            )
+        energy = torch.zeros(
+            batch.num_graphs, dtype=per_atom.dtype, device=per_atom.device
+        )
         energy.index_add_(0, batch.batch_idx.to(torch.long), per_atom)
         return {"energy": energy.unsqueeze(-1)}
 
@@ -83,10 +89,20 @@ def test_zero_kappa_reproduces_sgc_trajectory() -> None:
     start = [[1, 2, 1, 1, 2, 1, 2, 2], [2, 2, 1, 1, 1, 2, 1, 1]]
     vc_batch, sgc_batch = _batch(start), _batch(start)
     phi = 0.05
-    vc = VCSGC(model=model, temperature=1000.0, species=[1, 2], kappa=0.0, phi=phi, random_seed=11)
+    vc = VCSGC(
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=0.0,
+        phi=phi,
+        random_seed=11,
+    )
     sgc = SGC(
-        model=model, temperature=1000.0, species=[1, 2],
-        chemical_potentials={1: 0.0, 2: -phi}, random_seed=11,
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: -phi},
+        random_seed=11,
     )
 
     vc.run(vc_batch, n_steps=40)
@@ -100,7 +116,14 @@ def test_zero_kappa_reproduces_sgc_trajectory() -> None:
 def test_constraint_term_is_the_exact_midpoint_form() -> None:
     """After a proposal, the term is dn * (phi + 2 kappa * (c_old + c_new) / 2)."""
     batch = _batch([[1, 1, 2, 2, 2]])
-    sampler = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=0.7, phi=-0.3, random_seed=3)
+    sampler = VCSGC(
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=0.7,
+        phi=-0.3,
+        random_seed=3,
+    )
 
     sampler.pre_update(batch)
 
@@ -127,8 +150,13 @@ def test_samples_the_exact_vcsgc_distribution(eps_b: float, reference: float) ->
     eps = {1: 0.0, 2: eps_b}
     batch = _batch([[1] * n_sites])
     sampler = VCSGC(
-        model=_SiteEnergyModel(eps), temperature=temperature, species=[1, 2],
-        kappa=kappa, phi=phi, reference_exchange_potential=reference, random_seed=5,
+        model=_SiteEnergyModel(eps),
+        temperature=temperature,
+        species=[1, 2],
+        kappa=kappa,
+        phi=phi,
+        reference_exchange_potential=reference,
+        random_seed=5,
     )
 
     beta = 1.0 / (KB_EV * temperature)
@@ -136,8 +164,14 @@ def test_samples_the_exact_vcsgc_distribution(eps_b: float, reference: float) ->
     for n in range(n_sites + 1):
         c = n / n_sites
         log_w.append(
-            math.lgamma(n_sites + 1) - math.lgamma(n + 1) - math.lgamma(n_sites - n + 1)
-            - beta * (n * (eps[2] - eps[1]) + n_sites * ((phi - reference) * c + kappa * c * c))
+            math.lgamma(n_sites + 1)
+            - math.lgamma(n + 1)
+            - math.lgamma(n_sites - n + 1)
+            - beta
+            * (
+                n * (eps[2] - eps[1])
+                + n_sites * ((phi - reference) * c + kappa * c * c)
+            )
         )
     top = max(log_w)
     exact = torch.tensor([math.exp(w - top) for w in log_w], dtype=torch.float64)
@@ -161,11 +195,17 @@ def test_without_a_reference_an_energy_offset_drives_the_walker_to_one_end() -> 
     """The trap the reference exists for: an eV-scale per-element offset beats the constraint."""
     batch = _batch([[1] * 10])
     sampler = VCSGC(
-        model=_SiteEnergyModel({1: 0.0, 2: -2.85}), temperature=700.0, species=[1, 2],
-        kappa=1.0, target_concentration=0.5, random_seed=5,
+        model=_SiteEnergyModel({1: 0.0, 2: -2.85}),
+        temperature=700.0,
+        species=[1, 2],
+        kappa=1.0,
+        target_concentration=0.5,
+        random_seed=5,
     )
 
-    sampler.run(batch, n_steps=300)  # every site is proposed at least once with overwhelming probability
+    sampler.run(
+        batch, n_steps=300
+    )  # every site is proposed at least once with overwhelming probability
 
     assert batch.atomic_numbers.tolist() == [2] * 10
 
@@ -174,8 +214,13 @@ def test_reference_enters_the_constraint_term() -> None:
     """With a reference the term is dn * (phi - ref + 2 kappa * c_mid)."""
     batch = _batch([[1, 1, 2, 2, 2]])
     sampler = VCSGC(
-        model=_demo(), temperature=1000.0, species=[1, 2], kappa=0.7, phi=-0.3,
-        reference_exchange_potential=-2.87, random_seed=3,
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=0.7,
+        phi=-0.3,
+        reference_exchange_potential=-2.87,
+        random_seed=3,
     )
 
     sampler.pre_update(batch)
@@ -193,12 +238,20 @@ def test_zero_kappa_with_reference_reproduces_sgc_trajectory() -> None:
     vc_batch, sgc_batch = _batch(start), _batch(start)
     phi, reference = 0.05, -0.3
     vc = VCSGC(
-        model=model, temperature=1000.0, species=[1, 2], kappa=0.0, phi=phi,
-        reference_exchange_potential=reference, random_seed=11,
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=0.0,
+        phi=phi,
+        reference_exchange_potential=reference,
+        random_seed=11,
     )
     sgc = SGC(
-        model=model, temperature=1000.0, species=[1, 2],
-        chemical_potentials={1: 0.0, 2: reference - phi}, random_seed=11,
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: reference - phi},
+        random_seed=11,
     )
 
     vc.run(vc_batch, n_steps=40)
@@ -211,38 +264,62 @@ def test_zero_kappa_with_reference_reproduces_sgc_trajectory() -> None:
 def test_reference_centres_the_exchange_potential() -> None:
     """In target mode mu_B - mu_A = ref + 2 kappa (c0 - cbar): the reference at the target."""
     sampler = VCSGC(
-        model=_demo(), temperature=700.0, species=[1, 2], kappa=2.0, target_concentration=0.25,
+        model=_demo(),
+        temperature=700.0,
+        species=[1, 2],
+        kappa=2.0,
+        target_concentration=0.25,
         reference_exchange_potential=-2.8727,
     )
 
     assert float(sampler.exchange_chemical_potential(0.25)) == pytest.approx(-2.8727)
-    assert float(sampler.exchange_chemical_potential(0.2)) == pytest.approx(-2.8727 + 2 * 2.0 * 0.05)
-    assert float(sampler.phi) == pytest.approx(-1.0)  # phi stays the excess over the reference
+    assert float(sampler.exchange_chemical_potential(0.2)) == pytest.approx(
+        -2.8727 + 2 * 2.0 * 0.05
+    )
+    assert float(sampler.phi) == pytest.approx(
+        -1.0
+    )  # phi stays the excess over the reference
 
 
 def test_mismatched_per_graph_parameter_lengths_are_rejected() -> None:
     """Per-graph phi and reference must describe the same graphs."""
     with pytest.raises(ValueError, match="equal lengths"):
         VCSGC(
-            model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0,
-            phi=torch.tensor([0.0, 0.1]), reference_exchange_potential=torch.tensor([-2.9, -2.9, -2.9]),
+            model=_demo(),
+            temperature=1000.0,
+            species=[1, 2],
+            kappa=1.0,
+            phi=torch.tensor([0.0, 0.1]),
+            reference_exchange_potential=torch.tensor([-2.9, -2.9, -2.9]),
         )
 
 
 def test_target_concentration_sets_phi_and_exchange_potential() -> None:
     """c0 sets phi = -2 kappa c0, and mu_B - mu_A = 2 kappa (c0 - cbar)."""
-    sampler = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=2.0, target_concentration=0.25)
+    sampler = VCSGC(
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=2.0,
+        target_concentration=0.25,
+    )
 
     assert float(sampler.phi) == pytest.approx(-1.0)
-    assert float(sampler.exchange_chemical_potential(0.2)) == pytest.approx(2 * 2.0 * (0.25 - 0.2))
+    assert float(sampler.exchange_chemical_potential(0.2)) == pytest.approx(
+        2 * 2.0 * (0.25 - 0.2)
+    )
 
 
 def test_per_graph_targets_drive_different_graphs() -> None:
     """A strong constraint pulls each single-site graph towards its own target."""
     batch = _batch([[1], [1]])
     sampler = VCSGC(
-        model=_demo(), temperature=1000.0, species=[1, 2],
-        kappa=1.0e6, target_concentration=torch.tensor([1.0, 0.0]), random_seed=7,
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=1.0e6,
+        target_concentration=torch.tensor([1.0, 0.0]),
+        random_seed=7,
     )
 
     sampler.run(batch, n_steps=1)
@@ -255,7 +332,13 @@ def test_inactive_graph_is_not_mutated() -> None:
     """A graduated graph is excluded from proposals and acceptance statistics."""
     batch = _batch([[1], [1]])
     batch.status = torch.tensor([[0], [1]], dtype=torch.long)
-    sampler = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0e6, target_concentration=1.0)
+    sampler = VCSGC(
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=1.0e6,
+        target_concentration=1.0,
+    )
 
     sampler.run(batch, n_steps=1)
 
@@ -266,9 +349,16 @@ def test_inactive_graph_is_not_mutated() -> None:
 def test_concentration_counts_the_configured_species() -> None:
     """concentration() is per graph and follows concentration_species."""
     batch = _batch([[1, 2, 2, 2], [1, 1, 1, 2]])
-    default = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0)
+    default = VCSGC(
+        model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0
+    )
     flipped = VCSGC(
-        model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0, concentration_species=1,
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=1.0,
+        phi=0.0,
+        concentration_species=1,
     )
 
     assert default.concentration(batch).tolist() == pytest.approx([0.75, 0.25])
@@ -280,11 +370,17 @@ def test_concentration_counts_the_configured_species() -> None:
     [
         ({"species": [1, 2, 3], "kappa": 1.0, "phi": 0.0}, "binary"),
         ({"species": [1, 2], "kappa": 1.0}, "exactly one"),
-        ({"species": [1, 2], "kappa": 1.0, "phi": 0.0, "target_concentration": 0.5}, "exactly one"),
+        (
+            {"species": [1, 2], "kappa": 1.0, "phi": 0.0, "target_concentration": 0.5},
+            "exactly one",
+        ),
         ({"species": [1, 2], "kappa": -1.0, "phi": 0.0}, "non-negative"),
         ({"species": [1, 2], "kappa": 0.0, "target_concentration": 0.5}, "positive"),
         ({"species": [1, 2], "kappa": 1.0, "target_concentration": 1.5}, r"\[0, 1\]"),
-        ({"species": [1, 2], "kappa": 1.0, "phi": 0.0, "concentration_species": 3}, "concentration_species"),
+        (
+            {"species": [1, 2], "kappa": 1.0, "phi": 0.0, "concentration_species": 3},
+            "concentration_species",
+        ),
     ],
 )
 def test_invalid_configuration_is_rejected(kwargs: dict, match: str) -> None:
@@ -296,7 +392,13 @@ def test_invalid_configuration_is_rejected(kwargs: dict, match: str) -> None:
 def test_per_graph_parameter_shape_is_checked() -> None:
     """A per-graph parameter must match the number of graphs exactly."""
     batch = _batch([[1], [1]])
-    sampler = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=torch.tensor([1.0]), phi=0.0)
+    sampler = VCSGC(
+        model=_demo(),
+        temperature=1000.0,
+        species=[1, 2],
+        kappa=torch.tensor([1.0]),
+        phi=0.0,
+    )
 
     with pytest.raises(ValueError, match="kappa tensors"):
         sampler.run(batch, n_steps=1)
@@ -306,7 +408,9 @@ def test_per_graph_parameter_shape_is_checked() -> None:
 def test_solute_counting_does_not_sync_the_device() -> None:
     """The constraint term runs every step; a device-to-host sync there stalls the next model call."""
     batch = _batch([[1, 2, 2, 1], [2, 2, 2, 1]]).to("cuda")
-    sampler = VCSGC(model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0)
+    sampler = VCSGC(
+        model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0
+    )
     torch.cuda.synchronize()
 
     previous = torch.cuda.get_sync_debug_mode()

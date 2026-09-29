@@ -89,6 +89,7 @@ def wrap_into_cells(batch: Batch) -> None:
 
 
 def main() -> None:
+    """Command-line entry point: build the batch, sampler or integrator and run it."""
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--kind",

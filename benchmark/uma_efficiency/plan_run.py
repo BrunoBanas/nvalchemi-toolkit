@@ -129,6 +129,7 @@ def neighbour_ratio(args) -> tuple[float, str, int | None]:
 
 
 def size_factor(n_atoms: int) -> float:
+    """Return the per-atom cost multiplier for large systems from the calibration ramp."""
     s = CAL["size_scaling"]
     if n_atoms <= s["ramp_from_atoms"]:
         return 1.0
@@ -158,6 +159,7 @@ def valid_classes(kind: str, merge_ok: bool) -> list[str]:
 
 
 def forced_class_notes(kind: str, cls: str, merge_ok: bool) -> list[str]:
+    """Return warnings for a forced settings class that the run kind cannot use well."""
     _, _, _, geom_fixed, _, _ = KINDS[kind]
     notes = []
     if cls == "compiled_merged" and not geom_fixed:
@@ -182,10 +184,12 @@ def _lookup(table: dict, cls: str) -> tuple[dict, str] | None:
 
 
 def phase_coeffs(table: str, cls: str) -> dict:
+    """Return time-model coefficients of *cls* from calibration table *table*."""
     return _lookup(CAL["time_model"][table], cls)[0]
 
 
 def memory_coeffs(family: str, cls: str) -> tuple[dict, str]:
+    """Return memory-model coefficients of *cls* for *family*, with a fallback note."""
     fam = CAL["memory_model"][family]
     hit = _lookup(fam, cls)
     if hit:
@@ -198,11 +202,13 @@ def memory_coeffs(family: str, cls: str) -> tuple[dict, str]:
 def step_ms(
     coef: dict, width: int, n_eff: float, compiled: bool, n_atoms: int
 ) -> float:
+    """Return the modelled milliseconds of one step at *width* walkers."""
     per_atom = coef["c1_ms_per_atom"] * (size_factor(n_atoms) if compiled else 1.0)
     return coef["c1_ms_per_atom"] * coef["n0_atoms"] + per_atom * width * n_eff
 
 
 def gpu_spec(name: str) -> dict:
+    """Return capacity and speed of GPU *name*, or the worst case for ``any``."""
     if name == "any":
         return {
             "capacity_gib": min(g["capacity_gib"] for g in CAL["gpus"].values()),
@@ -297,6 +303,7 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
 
 
 def plan(args) -> dict:
+    """Plan settings, batch width, memory and wall time for the requested run."""
     ratio, ratio_note, struct_n = neighbour_ratio(args)
     n_atoms = args.n_atoms or struct_n
     if not n_atoms:
@@ -468,6 +475,7 @@ def plan(args) -> dict:
 
 
 def report(p: dict) -> str:
+    """Format a plan as a human-readable report."""
     out = [
         f"kind={p['kind']}  n_atoms={p['n_atoms']}  effective={p['n_atoms_effective']:.0f} ({p['neighbour_note']})",
         f"regime: {p['regime']}  (walkers: {p['walkers'] or 'not given'})",
@@ -526,6 +534,7 @@ def report(p: dict) -> str:
 
 
 def main() -> None:
+    """Command-line entry point: print or save the plan for one run."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

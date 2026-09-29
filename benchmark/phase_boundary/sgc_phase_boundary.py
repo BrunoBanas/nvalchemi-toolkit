@@ -74,6 +74,7 @@ def _b(v, default=True):
 
 
 def load_csv(path):
+    """Read a tidy CSV of SGC observables into row dictionaries."""
     rows = []
     with open(path) as fh:
         for r in csv.DictReader(fh):
@@ -156,6 +157,7 @@ class Series:
 
     @classmethod
     def from_rows(cls, rows, label=""):
+        """Build a series from row dictionaries, sorted by chemical potential."""
         rows = sorted(rows, key=lambda r: r["mu"])
         E = np.array([r["E"] if r["E"] is not None else np.nan for r in rows])
         return cls(
@@ -170,6 +172,8 @@ class Series:
 
 @dataclass
 class Phase:
+    """One phase branch of an isotherm, with its integrated grand potential and anchor."""
+
     name: str  # "low" (A-rich side) or "high" (B-rich side)
     s: Series
     phi: np.ndarray | None = None  # phi at s.mu
@@ -896,10 +900,12 @@ def boundary_from_bracket(out, phases, diag):
 
 # ----------------------------------------------------------------------------- G(x), hull, stability
 def g_of_x(ph: Phase):
+    """Return the Gibbs energy G(x) = phi + mu x along a phase branch."""
     return ph.phi + ph.s.mu * ph.s.x
 
 
 def hull_excess(xs, Gs):
+    """Return the largest height of (xs, Gs) above its lower convex hull, and the hull."""
     order = np.argsort(xs)
     xs, Gs = xs[order], Gs[order]
     hull = []
@@ -950,6 +956,7 @@ def clausius_clapeyron_check(results):
 
 # ----------------------------------------------------------------------------- plotting
 def make_figure(results, boots, opts, path):
+    """Draw the six-panel summary figure of isotherms, potentials and boundaries."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -1138,6 +1145,7 @@ def make_figure(results, boots, opts, path):
 
 # ----------------------------------------------------------------------------- main
 def main(argv=None):
+    """Command-line entry point: analyse isotherms and write the report, JSON and figure."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1393,6 +1401,7 @@ def _erfinv(y):
 
 
 def write_report(s, path):
+    """Write the Markdown summary table of boundaries per temperature."""
     A, B = s["species"]["A"], s["species"]["B"]
     L = [
         f"# SGC phase-boundary analysis ({A}–{B}, x = x_{B}, Δμ = μ_{B} − μ_{A})",

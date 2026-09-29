@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Generic capacity planning and queue construction for simulation campaigns."""
 
 from __future__ import annotations
@@ -36,7 +48,9 @@ def _is_out_of_memory(error: BaseException | None) -> bool:
             return True
         seen.add(id(error))
         error = (
-            getattr(error, "inner_exception", None) or error.__cause__ or error.__context__
+            getattr(error, "inner_exception", None)
+            or error.__cause__
+            or error.__context__
         )
     return False
 
@@ -143,10 +157,14 @@ class SimulationBatchPlanner:
         if not widths or any(width < 1 for width in widths):
             raise ValueError("widths must contain positive batch widths")
         if warmup_blocks < 0 or measured_blocks < 1:
-            raise ValueError("warmup_blocks must be non-negative and measured_blocks positive")
+            raise ValueError(
+                "warmup_blocks must be non-negative and measured_blocks positive"
+            )
         resolved_device = torch.device(device)
         if resolved_device.type != "cuda" or not torch.cuda.is_available():
-            raise RuntimeError("simulation batch profiling requires an available CUDA GPU")
+            raise RuntimeError(
+                "simulation batch profiling requires an available CUDA GPU"
+            )
 
         measurements: list[BatchMeasurement] = []
         for width in widths:
@@ -168,7 +186,9 @@ class SimulationBatchPlanner:
                         batch_width=width,
                         status="ok",
                         walker_blocks_per_second=width * measured_blocks / wall_seconds,
-                        peak_reserved_bytes=torch.cuda.max_memory_reserved(resolved_device),
+                        peak_reserved_bytes=torch.cuda.max_memory_reserved(
+                            resolved_device
+                        ),
                         atoms_per_walker=batch.num_nodes // width,
                     )
                 )
@@ -202,7 +222,9 @@ class SimulationBatchPlanner:
             and measurement.walker_blocks_per_second is not None
         ]
         if not eligible:
-            raise RuntimeError("no measured batch width satisfies the configured memory limit")
+            raise RuntimeError(
+                "no measured batch width satisfies the configured memory limit"
+            )
         threshold = self.throughput_fraction * max(
             measurement.walker_blocks_per_second for measurement in eligible
         )
@@ -221,7 +243,8 @@ class SimulationBatchPlanner:
             (
                 (measurement.batch_width, measurement.peak_reserved_bytes)
                 for measurement in measurements
-                if measurement.status == "ok" and measurement.peak_reserved_bytes is not None
+                if measurement.status == "ok"
+                and measurement.peak_reserved_bytes is not None
             ),
         )
         if len(points) < 2:
@@ -231,7 +254,9 @@ class SimulationBatchPlanner:
 
         incremental_bytes = max(
             (right_memory - left_memory) / (right_width - left_width)
-            for (left_width, left_memory), (right_width, right_memory) in zip(points, points[1:])
+            for (left_width, left_memory), (right_width, right_memory) in zip(
+                points, points[1:]
+            )
         )
         incremental_bytes = max(1, int(incremental_bytes + 0.999999))
         resident_bytes = max(

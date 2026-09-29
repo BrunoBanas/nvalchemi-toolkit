@@ -60,7 +60,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import sys
 import time
 from pathlib import Path
@@ -153,8 +152,13 @@ def _data_from_arrays(
     data.use_default_masses()
     if velocities is None:
         generator = torch.Generator(device=device).manual_seed(seed)
-        std = torch.sqrt(torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses)
-        v = torch.randn((len(numbers), 3), device=device, generator=generator) * std[:, None]
+        std = torch.sqrt(
+            torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
+        )
+        v = (
+            torch.randn((len(numbers), 3), device=device, generator=generator)
+            * std[:, None]
+        )
     else:
         v = torch.as_tensor(velocities, dtype=data.positions.dtype, device=device)
     data.velocities = v - v.mean(dim=0, keepdim=True)
@@ -177,10 +181,15 @@ def _snapshot(batch: Batch) -> dict[str, np.ndarray]:
 
 
 def _temperature(s: dict[str, np.ndarray]) -> float:
-    return float((s["masses"][:, None] * s["velocities"] ** 2).sum() / (3 * len(s["masses"]) * KB_EV))
+    return float(
+        (s["masses"][:, None] * s["velocities"] ** 2).sum()
+        / (3 * len(s["masses"]) * KB_EV)
+    )
 
 
-def _npt(model: UMAWrapper, temperature_k: float, dt_fs: float, device: torch.device) -> NPT:
+def _npt(
+    model: UMAWrapper, temperature_k: float, dt_fs: float, device: torch.device
+) -> NPT:
     return NPT(
         model=model,
         dt=dt_fs,
@@ -194,7 +203,11 @@ def _npt(model: UMAWrapper, temperature_k: float, dt_fs: float, device: torch.de
 
 
 def _nvt(
-    model: UMAWrapper, temperature_k: float, dt_fs: float, seed: int, device: torch.device,
+    model: UMAWrapper,
+    temperature_k: float,
+    dt_fs: float,
+    seed: int,
+    device: torch.device,
     max_force: float | None = None,
 ) -> NVTLangevin:
     hooks: list = list(_npt_wrap_hooks())
@@ -231,21 +244,41 @@ def _steps(ps: float, dt_fs: float) -> int:
 
 # ----------------------------------------------------------------------------- main
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    """Run one solid-liquid coexistence simulation and record its solid fraction."""
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--element", choices=sorted(EXPERIMENTAL_TM_K), required=True)
     ap.add_argument("--temperature-k", type=float, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
-    ap.add_argument("--nx", type=int, default=5, help="conventional cells along x and y (default 5)")
-    ap.add_argument("--nz", type=int, default=5, help="conventional cells along z PER PHASE (default 5 -> 1000 atoms)")
+    ap.add_argument(
+        "--nx", type=int, default=5, help="conventional cells along x and y (default 5)"
+    )
+    ap.add_argument(
+        "--nz",
+        type=int,
+        default=5,
+        help="conventional cells along z PER PHASE (default 5 -> 1000 atoms)",
+    )
     ap.add_argument("--dt-fs", type=float, default=2.0)
     ap.add_argument("--solid-eq-ps", type=float, default=5.0)
     ap.add_argument("--melt-temperature-k", type=float, default=None)
     ap.add_argument("--melt-ps", type=float, default=5.0)
     ap.add_argument("--liquid-eq-ps", type=float, default=3.0)
-    ap.add_argument("--liquid-z-strain", type=float, default=0.05, help="z stretch of the liquid slab (liquid is less dense)")
+    ap.add_argument(
+        "--liquid-z-strain",
+        type=float,
+        default=0.05,
+        help="z stretch of the liquid slab (liquid is less dense)",
+    )
     ap.add_argument("--gap-ang", type=float, default=1.0)
     ap.add_argument("--clamp-ps", type=float, default=1.0)
-    ap.add_argument("--clamp-max-force", type=float, default=5.0, help="eV/A, interface relaxation only")
+    ap.add_argument(
+        "--clamp-max-force",
+        type=float,
+        default=5.0,
+        help="eV/A, interface relaxation only",
+    )
     ap.add_argument("--production-ps", type=float, default=50.0)
     ap.add_argument("--snapshot-ps", type=float, default=0.5)
     ap.add_argument("--log-every-steps", type=int, default=50)
@@ -259,15 +292,31 @@ def main() -> None:
     out = args.out_dir / el / f"T{T:g}"
     out.mkdir(parents=True, exist_ok=True)
     t_wall = time.perf_counter()
-    print(f"[setup] {el} T={T:g} K (exp. T_m {EXPERIMENTAL_TM_K[el]:g} K) nx={args.nx} nz/phase={args.nz} "
-          f"dt={dt} fs melt_T={melt_T:g} K checkpoint={CHECKPOINT} task={TASK} device={device} "
-          f"(single-graph batch, no multi-walker batching)", flush=True)
+    print(
+        f"[setup] {el} T={T:g} K (exp. T_m {EXPERIMENTAL_TM_K[el]:g} K) nx={args.nx} nz/phase={args.nz} "
+        f"dt={dt} fs melt_T={melt_T:g} K checkpoint={CHECKPOINT} task={TASK} device={device} "
+        f"(single-graph batch, no multi-walker batching)",
+        flush=True,
+    )
 
-    model = UMAWrapper.from_checkpoint(CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS)
+    model = UMAWrapper.from_checkpoint(
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=INFERENCE_SETTINGS,
+    )
 
     # --- 1. solid NPT
     solid0 = bulk(el, "fcc", cubic=True) * (args.nx, args.nx, args.nz)
-    data = _data_from_arrays(solid0.numbers, solid0.positions, np.array(solid0.cell), None, T, args.seed, device)
+    data = _data_from_arrays(
+        solid0.numbers,
+        solid0.positions,
+        np.array(solid0.cell),
+        None,
+        T,
+        args.seed,
+        device,
+    )
     batch = Batch.from_data_list([data])
     cells: list[np.ndarray] = []
 
@@ -276,19 +325,34 @@ def main() -> None:
         cells.append(np.diag(s["cell"]).copy())
         if done % (10 * args.log_every_steps) == 0:
             L = np.diag(s["cell"])
-            print(f"[solid] {done * dt / 1000:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  "
-                  f"T={_temperature(s):6.0f}  L=({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})", flush=True)
+            print(
+                f"[solid] {done * dt / 1000:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  "
+                f"T={_temperature(s):6.0f}  L=({L[0]:.3f},{L[1]:.3f},{L[2]:.3f})",
+                flush=True,
+            )
         return False
 
-    _integrate(_npt(model, T, dt, device), batch, _steps(args.solid_eq_ps, dt), args.log_every_steps, _solid_log)
-    L_avg = np.mean(cells[len(cells) // 2:], axis=0)
+    _integrate(
+        _npt(model, T, dt, device),
+        batch,
+        _steps(args.solid_eq_ps, dt),
+        args.log_every_steps,
+        _solid_log,
+    )
+    L_avg = np.mean(cells[len(cells) // 2 :], axis=0)
     solid = _snapshot(batch)
     a_lat = float(L_avg[:2].mean() / args.nx)
     f_solid = float(solid_like_mask(solid["positions"], solid["cell"]).mean())
-    print(f"[solid] equilibrated: a={a_lat:.4f} A (x/y), Lz/nz={L_avg[2] / args.nz:.4f} A, solid-like={f_solid:.2f}", flush=True)
+    print(
+        f"[solid] equilibrated: a={a_lat:.4f} A (x/y), Lz/nz={L_avg[2] / args.nz:.4f} A, solid-like={f_solid:.2f}",
+        flush=True,
+    )
     if f_solid < 0.5:
-        print(f"[solid] WARNING: the pure crystal is only {f_solid:.0%} solid-like after {args.solid_eq_ps} ps -- "
-              f"it melted without an interface, so T={T:g} K is above the superheating limit.", flush=True)
+        print(
+            f"[solid] WARNING: the pure crystal is only {f_solid:.0%} solid-like after {args.solid_eq_ps} ps -- "
+            f"it melted without an interface, so T={T:g} K is above the superheating limit.",
+            flush=True,
+        )
 
     # Put the solid on the averaged box (affine), so both slabs share exact x/y.
     solid_cell = np.diag(L_avg)
@@ -297,23 +361,42 @@ def main() -> None:
     # --- 2. liquid at fixed lateral box
     liq_cell = np.diag([L_avg[0], L_avg[1], L_avg[2] * (1.0 + args.liquid_z_strain)])
     liq_pos = solid_pos @ np.linalg.inv(solid_cell) @ liq_cell
-    data = _data_from_arrays(solid["numbers"], liq_pos, liq_cell, None, melt_T, args.seed + 1, device)
+    data = _data_from_arrays(
+        solid["numbers"], liq_pos, liq_cell, None, melt_T, args.seed + 1, device
+    )
     batch = Batch.from_data_list([data])
     melt_dt = min(dt, 1.0)
     for attempt in range(3):
-        _integrate(_nvt(model, melt_T, melt_dt, args.seed + 2 + attempt, device), batch,
-                   _steps(args.melt_ps, melt_dt), args.log_every_steps)
+        _integrate(
+            _nvt(model, melt_T, melt_dt, args.seed + 2 + attempt, device),
+            batch,
+            _steps(args.melt_ps, melt_dt),
+            args.log_every_steps,
+        )
         s = _snapshot(batch)
         f_liq = float(solid_like_mask(s["positions"], s["cell"]).mean())
-        print(f"[liquid] melt attempt {attempt + 1} at {melt_T:g} K: solid-like={f_liq:.3f}", flush=True)
+        print(
+            f"[liquid] melt attempt {attempt + 1} at {melt_T:g} K: solid-like={f_liq:.3f}",
+            flush=True,
+        )
         if f_liq < 0.05:
             break
     else:
-        raise RuntimeError(f"liquid slab still {f_liq:.0%} solid-like after 3 melts at {melt_T:g} K")
-    _integrate(_nvt(model, T, dt, args.seed + 10, device), batch, _steps(args.liquid_eq_ps, dt), args.log_every_steps)
+        raise RuntimeError(
+            f"liquid slab still {f_liq:.0%} solid-like after 3 melts at {melt_T:g} K"
+        )
+    _integrate(
+        _nvt(model, T, dt, args.seed + 10, device),
+        batch,
+        _steps(args.liquid_eq_ps, dt),
+        args.log_every_steps,
+    )
     liquid = _snapshot(batch)
     f_liq = float(solid_like_mask(liquid["positions"], liquid["cell"]).mean())
-    print(f"[liquid] quenched to {T:g} K: solid-like={f_liq:.3f}, T={_temperature(liquid):.0f} K", flush=True)
+    print(
+        f"[liquid] quenched to {T:g} K: solid-like={f_liq:.3f}, T={_temperature(liquid):.0f} K",
+        flush=True,
+    )
 
     # --- 3. stitch solid | liquid along z
     def _wrapped(pos: np.ndarray, cell: np.ndarray) -> np.ndarray:
@@ -328,27 +411,51 @@ def main() -> None:
     sp = _wrapped(solid_pos + np.array([0.0, 0.0, layer / 2.0]), solid_cell)
     lp = _wrapped(liquid["positions"], liquid["cell"])
     lp[:, 2] += solid_cell[2, 2] + args.gap_ang
-    box = np.diag([L_avg[0], L_avg[1], solid_cell[2, 2] + liquid["cell"][2, 2] + 2 * args.gap_ang])
+    box = np.diag(
+        [L_avg[0], L_avg[1], solid_cell[2, 2] + liquid["cell"][2, 2] + 2 * args.gap_ang]
+    )
     numbers = np.concatenate([solid["numbers"], liquid["numbers"]])
     positions = np.concatenate([sp, lp])
     velocities = np.concatenate([solid["velocities"], liquid["velocities"]])
     n_solid0 = len(sp)
-    data = _data_from_arrays(numbers, positions, box, velocities, T, args.seed + 20, device)
+    data = _data_from_arrays(
+        numbers, positions, box, velocities, T, args.seed + 20, device
+    )
     batch = Batch.from_data_list([data])
-    _integrate(_nvt(model, T, dt / 2, args.seed + 21, device, max_force=args.clamp_max_force), batch,
-               _steps(args.clamp_ps, dt / 2), args.log_every_steps)
+    _integrate(
+        _nvt(model, T, dt / 2, args.seed + 21, device, max_force=args.clamp_max_force),
+        batch,
+        _steps(args.clamp_ps, dt / 2),
+        args.log_every_steps,
+    )
     s = _snapshot(batch)
     mask = solid_like_mask(s["positions"], s["cell"])
-    print(f"[stitch] {len(numbers)} atoms, box=({box[0, 0]:.2f},{box[1, 1]:.2f},{box[2, 2]:.2f}) A, "
-          f"solid-like after relaxation={mask.mean():.3f} (solid slab alone {n_solid0 / len(numbers):.3f})", flush=True)
+    print(
+        f"[stitch] {len(numbers)} atoms, box=({box[0, 0]:.2f},{box[1, 1]:.2f},{box[2, 2]:.2f}) A, "
+        f"solid-like after relaxation={mask.mean():.3f} (solid slab alone {n_solid0 / len(numbers):.3f})",
+        flush=True,
+    )
 
     # --- 4. production NPT
     series_path, traj_path = out / "series.csv", out / "trajectory.extxyz"
     traj_path.unlink(missing_ok=True)
     rows: list[list[float]] = []
-    snaps: dict[str, list] = {"time_ps": [], "positions": [], "cell": [], "solid_mask": []}
-    snap_every = max(args.log_every_steps, int(round(_steps(args.snapshot_ps, dt) / args.log_every_steps)) * args.log_every_steps)
-    state = {"f_s": float(mask.mean()), "streak": 0, "verdict": "coexisting (undecided at end of run)"}
+    snaps: dict[str, list] = {
+        "time_ps": [],
+        "positions": [],
+        "cell": [],
+        "solid_mask": [],
+    }
+    snap_every = max(
+        args.log_every_steps,
+        int(round(_steps(args.snapshot_ps, dt) / args.log_every_steps))
+        * args.log_every_steps,
+    )
+    state = {
+        "f_s": float(mask.mean()),
+        "streak": 0,
+        "verdict": "coexisting (undecided at end of run)",
+    }
 
     def _prod_log(done: int) -> bool:
         s = _snapshot(batch)
@@ -357,43 +464,100 @@ def main() -> None:
         if done % snap_every == 0:
             m = solid_like_mask(s["positions"], s["cell"])
             state["f_s"] = float(m.mean())
-            snaps["time_ps"].append(t_ps); snaps["positions"].append(s["positions"].astype(np.float32))
-            snaps["cell"].append(s["cell"]); snaps["solid_mask"].append(m)
-            frame = Atoms(numbers=s["numbers"], positions=s["positions"], cell=s["cell"], pbc=True)
+            snaps["time_ps"].append(t_ps)
+            snaps["positions"].append(s["positions"].astype(np.float32))
+            snaps["cell"].append(s["cell"])
+            snaps["solid_mask"].append(m)
+            frame = Atoms(
+                numbers=s["numbers"], positions=s["positions"], cell=s["cell"], pbc=True
+            )
             frame.arrays["solid_like"] = m.astype(int)
             ase_write(traj_path, frame, format="extxyz", append=True)
-            np.savez_compressed(out / "snapshots.npz", **{k: np.asarray(v) for k, v in snaps.items()})
+            np.savez_compressed(
+                out / "snapshots.npz", **{k: np.asarray(v) for k, v in snaps.items()}
+            )
             lo, hi = SOLID_FRACTION_DONE
-            done_state = "melted" if state["f_s"] < lo else "frozen" if state["f_s"] > hi else None
-            state["streak"] = state["streak"] + 1 if done_state and done_state == state.get("last") else (1 if done_state else 0)
+            done_state = (
+                "melted"
+                if state["f_s"] < lo
+                else "frozen"
+                if state["f_s"] > hi
+                else None
+            )
+            state["streak"] = (
+                state["streak"] + 1
+                if done_state and done_state == state.get("last")
+                else (1 if done_state else 0)
+            )
             state["last"] = done_state
-            print(f"[prod] {t_ps:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  T={_temperature(s):6.0f}  "
-                  f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}", flush=True)
+            print(
+                f"[prod] {t_ps:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  T={_temperature(s):6.0f}  "
+                f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}",
+                flush=True,
+            )
             if state["streak"] >= 3:
                 state["verdict"] = f"fully {done_state} (stopped early)"
-        rows.append([t_ps, s["energy"] / len(s["masses"]), _temperature(s), *L, state["f_s"]])
+        rows.append(
+            [t_ps, s["energy"] / len(s["masses"]), _temperature(s), *L, state["f_s"]]
+        )
         return state["streak"] >= 3
 
-    _integrate(_npt(model, T, dt, device), batch, _steps(args.production_ps, dt), args.log_every_steps, _prod_log)
+    _integrate(
+        _npt(model, T, dt, device),
+        batch,
+        _steps(args.production_ps, dt),
+        args.log_every_steps,
+        _prod_log,
+    )
     with series_path.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["time_ps", "epot_per_atom_ev", "temperature_k", "lx_ang", "ly_ang", "lz_ang", "solid_fraction"])
+        w.writerow(
+            [
+                "time_ps",
+                "epot_per_atom_ev",
+                "temperature_k",
+                "lx_ang",
+                "ly_ang",
+                "lz_ang",
+                "solid_fraction",
+            ]
+        )
         w.writerows(rows)
 
-    t = np.asarray(snaps["time_ps"]); f = np.array([m.mean() for m in snaps["solid_mask"]])
+    t = np.asarray(snaps["time_ps"])
+    f = np.array([m.mean() for m in snaps["solid_mask"]])
     early = t <= min(10.0, t.max()) if len(t) else t
-    rate = float(np.polyfit(t[early], f[early], 1)[0]) if early.sum() >= 3 else float("nan")
+    rate = (
+        float(np.polyfit(t[early], f[early], 1)[0])
+        if early.sum() >= 3
+        else float("nan")
+    )
     final = snaps["solid_mask"][-1].mean() if snaps["solid_mask"] else float("nan")
     verdict = state["verdict"]
     if verdict.startswith("coexisting"):
-        verdict = "solid growing" if rate > 0 else "solid shrinking" if rate < 0 else verdict
+        verdict = (
+            "solid growing" if rate > 0 else "solid shrinking" if rate < 0 else verdict
+        )
     summary = dict(
-        element=el, temperature_k=T, experimental_tm_k=EXPERIMENTAL_TM_K[el], checkpoint=CHECKPOINT, task=TASK,
-        inference_settings=INFERENCE_SETTINGS, n_atoms=int(len(numbers)), nx=args.nx, nz_per_phase=args.nz, dt_fs=dt,
-        solid_lattice_a_ang=a_lat, solid_eq_solid_fraction=f_solid, liquid_solid_fraction=f_liq,
-        solid_fraction_initial=float(mask.mean()), solid_fraction_final=float(final),
-        solid_fraction_rate_per_ps_first_10ps=rate, production_ps_run=float(t.max()) if len(t) else 0.0,
-        verdict=verdict, wall_minutes=(time.perf_counter() - t_wall) / 60,
+        element=el,
+        temperature_k=T,
+        experimental_tm_k=EXPERIMENTAL_TM_K[el],
+        checkpoint=CHECKPOINT,
+        task=TASK,
+        inference_settings=INFERENCE_SETTINGS,
+        n_atoms=int(len(numbers)),
+        nx=args.nx,
+        nz_per_phase=args.nz,
+        dt_fs=dt,
+        solid_lattice_a_ang=a_lat,
+        solid_eq_solid_fraction=f_solid,
+        liquid_solid_fraction=f_liq,
+        solid_fraction_initial=float(mask.mean()),
+        solid_fraction_final=float(final),
+        solid_fraction_rate_per_ps_first_10ps=rate,
+        production_ps_run=float(t.max()) if len(t) else 0.0,
+        verdict=verdict,
+        wall_minutes=(time.perf_counter() - t_wall) / 60,
     )
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(f"[done] {json.dumps(summary)}", flush=True)

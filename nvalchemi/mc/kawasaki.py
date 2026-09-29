@@ -36,7 +36,9 @@ if TYPE_CHECKING:
 __all__ = ["Kawasaki"]
 
 
-def _nearest_neighbor_edges(batch: Batch, cutoff: float) -> tuple[torch.Tensor, torch.Tensor]:
+def _nearest_neighbor_edges(
+    batch: Batch, cutoff: float
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Build a deduplicated, undirected nearest-neighbour pair list.
 
     Uses the same GPU cutoff neighbor-search kernel as
@@ -258,7 +260,9 @@ class Kawasaki(BaseMonteCarlo):
             # Rank of the drawn unlike edge among all unlike edges, then the
             # row holding it: the first row whose running total reaches it.
             exclusive = torch.cat((cumulative.new_zeros(1), cumulative[:-1]))
-            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(torch.long)
+            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(
+                torch.long
+            )
             rows = torch.searchsorted(cumulative, ranks + 1)
             # Inactive graphs draw no edge; keep their row in range anyway.
             rows = torch.where(active, rows, starts)

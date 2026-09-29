@@ -111,6 +111,7 @@ def _build_state_matching_fcc_random_box(
 
 
 def main() -> None:
+    """Command-line entry point: time NPT MD alone at one state point."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

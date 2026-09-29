@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Export equilibrated final-state checkpoints from a delta-mu scan campaign
 to viewable structure trajectories.
 
@@ -136,10 +150,28 @@ def _check_min_distance(atoms: Atoms, run_id: str, threshold_ang: float = 1.5) -
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint-root", type=Path, required=True, help="Directory of <run_id>.pt checkpoints")
-    parser.add_argument("--out", type=Path, default=None, help="Output directory (default: <checkpoint-root>/structures)")
-    parser.add_argument("--pt-atomic-number", type=int, default=78, help="Atomic number used for the Pt-fraction column")
+    """Export checkpointed campaign states as structure files."""
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--checkpoint-root",
+        type=Path,
+        required=True,
+        help="Directory of <run_id>.pt checkpoints",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output directory (default: <checkpoint-root>/structures)",
+    )
+    parser.add_argument(
+        "--pt-atomic-number",
+        type=int,
+        default=78,
+        help="Atomic number used for the Pt-fraction column",
+    )
     args = parser.parse_args()
 
     out_dir = args.out or (args.checkpoint_root / "structures")
@@ -161,7 +193,9 @@ def main() -> None:
         _check_min_distance(atoms, run_id)
         temperature = match["temperature"]
         branch = match["branch"]
-        dmu_index = int(match["dmu_index"]) if match["dmu_index"] is not None else 0  # seed sorts first
+        dmu_index = (
+            int(match["dmu_index"]) if match["dmu_index"] is not None else 0
+        )  # seed sorts first
         branches.setdefault((temperature, branch), []).append((dmu_index, atoms))
         rows.append(
             {
@@ -183,11 +217,24 @@ def main() -> None:
         print(f"wrote {len(frames)} frames -> {traj_path}")
 
     summary_path = out_dir / "structures_summary.csv"
-    fieldnames = ["run_id", "temperature_K", "branch", "dmu_index", "mu_eV", "n_atoms", "pt_fraction", "energy_eV_per_atom"]
+    fieldnames = [
+        "run_id",
+        "temperature_K",
+        "branch",
+        "dmu_index",
+        "mu_eV",
+        "n_atoms",
+        "pt_fraction",
+        "energy_eV_per_atom",
+    ]
     with summary_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(sorted(rows, key=lambda r: (r["temperature_K"], r["branch"], r["dmu_index"])))
+        writer.writerows(
+            sorted(
+                rows, key=lambda r: (r["temperature_K"], r["branch"], r["dmu_index"])
+            )
+        )
     print(f"wrote summary -> {summary_path} ({len(rows)} structures)")
 
 

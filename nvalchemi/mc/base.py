@@ -118,7 +118,9 @@ class BaseMonteCarlo(BaseDynamics):
         )
         initial_temperature = torch.as_tensor(temperature)
         if initial_temperature.ndim > 1 or torch.any(initial_temperature <= 0):
-            raise ValueError("temperature must be positive and scalar or one-dimensional")
+            raise ValueError(
+                "temperature must be positive and scalar or one-dimensional"
+            )
         self._temperature = temperature
         self._random_seed = random_seed
         self._generator: torch.Generator | None = None
@@ -255,7 +257,9 @@ class BaseMonteCarlo(BaseDynamics):
 
     def _chemical_delta(self, batch: Batch) -> torch.Tensor:
         """Return the per-graph chemical contribution to the trial potential."""
-        return torch.zeros(batch.num_graphs, dtype=batch.positions.dtype, device=batch.device)
+        return torch.zeros(
+            batch.num_graphs, dtype=batch.positions.dtype, device=batch.device
+        )
 
     def _validate_batch(self, batch: Batch) -> None:
         """Validate sampler-specific assumptions for a newly seen batch."""
@@ -279,7 +283,9 @@ class BaseMonteCarlo(BaseDynamics):
             and self._mass_numbers.shape == numbers.shape
         ):
             return
-        table = _default_mass_table().to(device=masses.device, dtype=masses.dtype).clone()
+        table = (
+            _default_mass_table().to(device=masses.device, dtype=masses.dtype).clone()
+        )
         table[numbers] = masses.detach().reshape(-1)
         self._mass_table = table
         self._mass_numbers = numbers.clone()
@@ -313,9 +319,15 @@ class BaseMonteCarlo(BaseDynamics):
             raise RuntimeError("Monte Carlo proposal state was not initialized")
         trial_energy = batch.energy.detach().reshape(batch.num_graphs)
         delta = trial_energy - self._energy + self._chemical_delta(batch)
-        log_probability = (-delta / (KB_EV * self._temperature_for(batch))).clamp(max=0.0)
+        log_probability = (-delta / (KB_EV * self._temperature_for(batch))).clamp(
+            max=0.0
+        )
         log_uniform = torch.log(
-            torch.rand(batch.num_graphs, device=batch.device, generator=self._ensure_generator(batch))
+            torch.rand(
+                batch.num_graphs,
+                device=batch.device,
+                generator=self._ensure_generator(batch),
+            )
         )
         accepted = self._active & (log_uniform < log_probability)
         rejected = self._active & ~accepted
@@ -325,7 +337,9 @@ class BaseMonteCarlo(BaseDynamics):
             # Only rejected graphs go back to their baseline: in a FusedStage the
             # other graphs' energies belong to the other sub-stages.
             batch.energy.copy_(
-                torch.where(rejected, self._energy, trial_energy).reshape_as(batch.energy)
+                torch.where(rejected, self._energy, trial_energy).reshape_as(
+                    batch.energy
+                )
             )
             batch.mc_accepted.copy_(accepted.reshape_as(batch.mc_accepted))
             if self._attempted is None:

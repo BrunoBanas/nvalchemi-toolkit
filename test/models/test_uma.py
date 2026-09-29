@@ -53,8 +53,8 @@ from fairchem.core.datasets.atomic_data import AtomicData as FCAtomicData  # noq
 from nvalchemi.data import AtomicData, Batch  # noqa: E402
 from nvalchemi.dynamics.hooks._utils import kinetic_energy_per_graph  # noqa: E402
 from nvalchemi.dynamics.integrators.nve import NVE  # noqa: E402
-from nvalchemi.models.base import NeighborListFormat  # noqa: E402
 from nvalchemi.models import uma as uma_module  # noqa: E402
+from nvalchemi.models.base import NeighborListFormat  # noqa: E402
 from nvalchemi.models.uma import (  # noqa: E402
     _UMA_TASKS,
     UMAWrapper,

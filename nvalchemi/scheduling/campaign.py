@@ -1,5 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Dependency-aware simulation campaigns and persistent final-state storage."""
 
 from __future__ import annotations
@@ -59,14 +71,19 @@ class RunSpec:
             raise ValueError("temperature_k must be positive")
         if not self.model_key or not self.method_key or not self.batch_group:
             raise ValueError("model_key, method_key, and batch_group must be non-empty")
-        potentials = {int(number): float(value) for number, value in self.chemical_potentials_ev.items()}
+        potentials = {
+            int(number): float(value)
+            for number, value in self.chemical_potentials_ev.items()
+        }
         if not potentials:
             raise ValueError("chemical_potentials_ev must contain at least one species")
         species = tuple(int(number) for number in (self.species or tuple(potentials)))
         if len(species) != len(set(species)):
             raise ValueError("species must not contain duplicates")
         if set(species) != set(potentials):
-            raise ValueError("species and chemical_potentials_ev must contain the same atomic numbers")
+            raise ValueError(
+                "species and chemical_potentials_ev must contain the same atomic numbers"
+            )
         if self.parent_id is not None and not _RUN_ID.fullmatch(self.parent_id):
             raise ValueError("parent_id has invalid characters")
         dependencies = tuple(self.depends_on)
@@ -89,7 +106,9 @@ class RunSpec:
     @property
     def dependency_ids(self) -> tuple[str, ...]:
         """Return completion dependencies, including the continuation parent."""
-        return ((self.parent_id,) if self.parent_id is not None else ()) + self.depends_on
+        return (
+            (self.parent_id,) if self.parent_id is not None else ()
+        ) + self.depends_on
 
 
 @dataclass(frozen=True)
@@ -110,7 +129,9 @@ class CampaignSpec:
         for run in self.runs:
             unknown = set(run.dependency_ids) - run_ids
             if unknown:
-                raise ValueError(f"run {run.run_id!r} has unknown dependency {sorted(unknown)!r}")
+                raise ValueError(
+                    f"run {run.run_id!r} has unknown dependency {sorted(unknown)!r}"
+                )
             if run.parent_id == run.run_id:
                 raise ValueError(f"run {run.run_id!r} cannot be its own parent")
         self.topological_runs()
@@ -171,9 +192,13 @@ class CampaignSpec:
             raise ValueError("at least one high-temperature reference run is required")
         temperatures = tuple(float(value) for value in temperatures_k)
         if len(temperatures) < 2:
-            raise ValueError("cooling requires the reference temperature and at least one lower temperature")
+            raise ValueError(
+                "cooling requires the reference temperature and at least one lower temperature"
+            )
         if any(left <= right for left, right in zip(temperatures, temperatures[1:])):
-            raise ValueError("temperatures_k must decrease strictly after the reference point")
+            raise ValueError(
+                "temperatures_k must decrease strictly after the reference point"
+            )
         if any(run.temperature_k != temperatures[0] for run in reference_runs):
             raise ValueError("every reference run must be at temperatures_k[0]")
         barrier = tuple(start_after)
@@ -242,7 +267,9 @@ class CampaignSpec:
         coarse-screen job to finish first.
         """
         seeds = tuple(branch_seeds)
-        ladders = tuple(tuple(float(value) for value in ladder) for ladder in branch_ladders)
+        ladders = tuple(
+            tuple(float(value) for value in ladder) for ladder in branch_ladders
+        )
         if len(seeds) < 2:
             raise ValueError("a delta_mu scan requires at least two branch seeds")
         if len(seeds) != len(ladders):
@@ -259,7 +286,9 @@ class CampaignSpec:
                     f"branch ladder for {seed.run_id!r} must contain at least the seed's own value"
                 )
             if species not in seed.chemical_potentials_ev:
-                raise ValueError(f"seed run {seed.run_id!r} has no chemical potential for species {species}")
+                raise ValueError(
+                    f"seed run {seed.run_id!r} has no chemical potential for species {species}"
+                )
             if seed.chemical_potentials_ev[species] != ladder[0]:
                 raise ValueError(
                     f"branch ladder for {seed.run_id!r} must start at its seed's own "
@@ -268,7 +297,9 @@ class CampaignSpec:
                 )
         barrier = tuple(start_after)
         if set(barrier) & set(ids):
-            raise ValueError("start_after must not reference the branch seeds themselves")
+            raise ValueError(
+                "start_after must not reference the branch seeds themselves"
+            )
 
         runs = list(seeds)
         for seed, ladder in zip(seeds, ladders):
@@ -308,7 +339,9 @@ class CampaignSpec:
         representable here; use :meth:`delta_mu_scan_runs` directly and defer
         validation to a combined, multi-temperature ``CampaignSpec`` instead.
         """
-        runs = cls.delta_mu_scan_runs(branch_seeds, branch_ladders, species, start_after=start_after)
+        runs = cls.delta_mu_scan_runs(
+            branch_seeds, branch_ladders, species, start_after=start_after
+        )
         return cls(runs=runs, name=name)
 
 
@@ -362,7 +395,9 @@ class FinalStateStore:
         """Load one final atomic state onto the requested device."""
         from nvalchemi.data import AtomicData
 
-        payload = torch.load(self.path_for(run_id), map_location=device, weights_only=True)
+        payload = torch.load(
+            self.path_for(run_id), map_location=device, weights_only=True
+        )
         if payload.get("run_id") != run_id:
             raise RuntimeError(f"checkpoint identity mismatch for {run_id!r}")
         return AtomicData.model_validate(payload["state"])
@@ -424,9 +459,13 @@ class CampaignScheduler:
             batch_width=1,
             gpu_ids=gpu_ids,
         )
-        return tuple((assignment, batches[assignment.start]) for assignment in assignments)
+        return tuple(
+            (assignment, batches[assignment.start]) for assignment in assignments
+        )
 
-    def parent_state(self, run: RunSpec, *, device: torch.device | str = "cpu") -> AtomicData | None:
+    def parent_state(
+        self, run: RunSpec, *, device: torch.device | str = "cpu"
+    ) -> AtomicData | None:
         """Load the final parent configuration required for continuation."""
         if run.parent_id is None:
             return None

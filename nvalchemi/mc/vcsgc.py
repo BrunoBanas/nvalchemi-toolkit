@@ -180,12 +180,16 @@ class VCSGC(SGC):
             **kwargs,
         )
         if len(self.species) != 2:
-            raise ValueError("VC-SGC is implemented for binary systems: species must contain two atomic numbers")
+            raise ValueError(
+                "VC-SGC is implemented for binary systems: species must contain two atomic numbers"
+            )
         self.concentration_species = int(
             self.species[1] if concentration_species is None else concentration_species
         )
         if self.concentration_species not in self.species:
-            raise ValueError("concentration_species must be one of the configured species")
+            raise ValueError(
+                "concentration_species must be one of the configured species"
+            )
         if (phi is None) == (target_concentration is None):
             raise ValueError("pass exactly one of phi and target_concentration")
 
@@ -197,7 +201,9 @@ class VCSGC(SGC):
             if torch.any((target < 0) | (target > 1)):
                 raise ValueError("target_concentration must lie in [0, 1]")
             if torch.any(self.kappa <= 0):
-                raise ValueError("kappa must be positive when target_concentration is given")
+                raise ValueError(
+                    "kappa must be positive when target_concentration is given"
+                )
             self.phi = -2.0 * self.kappa * target
         else:
             self.phi = self._parameter(phi, "phi")
@@ -208,7 +214,9 @@ class VCSGC(SGC):
             # The coefficient of N*c actually sampled: phi is an excess over the reference.
             self._linear = self.phi - self.reference_exchange_potential
         except RuntimeError as exc:
-            raise ValueError("per-graph phi, kappa and reference_exchange_potential must have equal lengths") from exc
+            raise ValueError(
+                "per-graph phi, kappa and reference_exchange_potential must have equal lengths"
+            ) from exc
 
     @staticmethod
     def _parameter(value: float | torch.Tensor, name: str) -> torch.Tensor:
@@ -232,8 +240,12 @@ class VCSGC(SGC):
 
     def _solute_counts(self, batch: Batch) -> torch.Tensor:
         """Per-graph count of ``concentration_species`` (no device-to-host sync)."""
-        is_solute = (batch.atomic_numbers.reshape(-1) == self.concentration_species).to(batch.positions.dtype)
-        counts = torch.zeros(batch.num_graphs, dtype=batch.positions.dtype, device=batch.device)
+        is_solute = (batch.atomic_numbers.reshape(-1) == self.concentration_species).to(
+            batch.positions.dtype
+        )
+        counts = torch.zeros(
+            batch.num_graphs, dtype=batch.positions.dtype, device=batch.device
+        )
         counts.index_add_(0, batch.batch_idx.to(torch.long), is_solute)
         return counts
 
@@ -250,7 +262,9 @@ class VCSGC(SGC):
         torch.Tensor
             Concentration per graph, shape ``[num_graphs]``.
         """
-        return self._solute_counts(batch) / batch.num_nodes_per_graph.to(batch.positions.dtype)
+        return self._solute_counts(batch) / batch.num_nodes_per_graph.to(
+            batch.positions.dtype
+        )
 
     def exchange_chemical_potential(
         self, mean_concentration: torch.Tensor, batch: Batch | None = None
@@ -274,7 +288,9 @@ class VCSGC(SGC):
         if batch is not None:
             linear = self._per_graph(self._linear, batch, "phi")
             kappa = self._per_graph(self.kappa, batch, "kappa")
-            mean = torch.as_tensor(mean_concentration, dtype=linear.dtype, device=linear.device)
+            mean = torch.as_tensor(
+                mean_concentration, dtype=linear.dtype, device=linear.device
+            )
         else:
             mean = torch.as_tensor(mean_concentration, dtype=self._linear.dtype)
             linear, kappa = self._linear.to(mean.device), self.kappa.to(mean.device)
@@ -286,11 +302,17 @@ class VCSGC(SGC):
         Called after :meth:`_propose` has applied the trial transmutation, so
         the counted atom types are the trial state for active graphs.
         """
-        if self._proposal_old is None or self._proposal_new is None or self._active is None:
+        if (
+            self._proposal_old is None
+            or self._proposal_new is None
+            or self._active is None
+        ):
             raise RuntimeError("VC-SGC constraint term requested without a proposal")
         dtype = batch.positions.dtype
         solute = self.concentration_species
-        delta_n = (self._proposal_new == solute).to(dtype) - (self._proposal_old == solute).to(dtype)
+        delta_n = (self._proposal_new == solute).to(dtype) - (
+            self._proposal_old == solute
+        ).to(dtype)
         n_atoms = batch.num_nodes_per_graph.to(dtype)
         # Midpoint of old and trial concentrations; exact for a quadratic weight.
         c_mid = (self._solute_counts(batch) - 0.5 * delta_n) / n_atoms

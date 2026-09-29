@@ -1725,7 +1725,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         candidates = [getattr(getattr(inner, "backbone", None), "regress_config", None)]
         heads = getattr(inner, "output_heads", None)
         if heads is not None:
-            candidates += [getattr(head, "regress_config", None) for head in heads.values()]
+            candidates += [
+                getattr(head, "regress_config", None) for head in heads.values()
+            ]
         unique: dict[int, Any] = {}
         for config in candidates:
             if config is not None:
@@ -1752,16 +1754,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks = getattr(inner, "_tasks", None)
         dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
         configs = self._regress_configs()
-        if not configs or not isinstance(tasks, dict) or not isinstance(dataset_to_tasks, dict):
+        if (
+            not configs
+            or not isinstance(tasks, dict)
+            or not isinstance(dataset_to_tasks, dict)
+        ):
             return None
         if any(
-            getattr(config, "direct_forces", False) or getattr(config, "direct_stress", False)
+            getattr(config, "direct_forces", False)
+            or getattr(config, "direct_stress", False)
             for config in configs
         ):
             return None
         tables = _DerivativeTables(
             tasks=dict(tasks),
-            dataset_to_tasks={name: list(task_list) for name, task_list in dataset_to_tasks.items()},
+            dataset_to_tasks={
+                name: list(task_list) for name, task_list in dataset_to_tasks.items()
+            },
             forces=any(bool(getattr(config, "forces", False)) for config in configs),
             stress=any(bool(getattr(config, "stress", False)) for config in configs),
         )
@@ -1797,15 +1806,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # rebuilds an unmerged model after the first composition change), and
         # the replacement comes back computing every derivative.
         in_sync = (want_forces, want_stress) == self._applied_derivatives and all(
-            config.forces == want_forces and config.stress == want_stress for config in configs
+            config.forces == want_forces and config.stress == want_stress
+            for config in configs
         )
         if in_sync:
-            unwanted = {"forces", "stress"} - (  # hessians are never gated
-                {"forces"} if want_forces else set()
-            ) - ({"stress"} if want_stress else set())
+            unwanted = (
+                {"forces", "stress"}
+                - (  # hessians are never gated
+                    {"forces"} if want_forces else set()
+                )
+                - ({"stress"} if want_stress else set())
+            )
             inner = self._fairchem_model()
             live_tasks = getattr(inner, "_tasks", {})
-            if not any(getattr(task, "property", None) in unwanted for task in live_tasks.values()):
+            if not any(
+                getattr(task, "property", None) in unwanted
+                for task in live_tasks.values()
+            ):
                 return
 
         for config in configs:
@@ -1828,7 +1845,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks.clear()
         tasks.update({name: task for name, task in tables.tasks.items() if keep(task)})
         for name, task_list in tables.dataset_to_tasks.items():
-            dataset_to_tasks.setdefault(name, [])[:] = [task for task in task_list if keep(task)]
+            dataset_to_tasks.setdefault(name, [])[:] = [
+                task for task in task_list if keep(task)
+            ]
         self._applied_derivatives = (want_forces, want_stress)
 
     # ------------------------------------------------------------------

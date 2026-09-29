@@ -37,6 +37,7 @@ KB = 8.617333262e-5
 
 
 def model(L0, L1, eB, T, x):
+    """Return excess energy, free energy and exchange potential of the sub-regular model at *x*."""
     Ex = x * (1 - x) * (L0 + L1 * (1 - 2 * x)) + eB * x
     G = Ex + KB * T * (x * np.log(x) + (1 - x) * np.log(1 - x))
     dEx = (1 - 2 * x) * (L0 + L1 * (1 - 2 * x)) - 2 * L1 * x * (1 - x) + eB
@@ -45,6 +46,7 @@ def model(L0, L1, eB, T, x):
 
 
 def truth(L0, L1, eB, T):
+    """Return the exact binodal at *T* from the convex hull of G(x), or ``None`` above T_c."""
     x = np.linspace(1e-6, 1 - 1e-6, 200001)
     _, G, mu = model(L0, L1, eB, T, x)
     hull = [0]
@@ -70,6 +72,7 @@ def truth(L0, L1, eB, T):
 
 
 def branch_x(L0, L1, eB, T, mus, start_low):
+    """Follow one metastable branch across the *mus* ladder, jumping only past its spinodal."""
     x = np.linspace(1e-7, 1 - 1e-7, 400001)
     _, _, mu = model(L0, L1, eB, T, x)
     dmu = np.diff(mu)
@@ -94,6 +97,7 @@ def branch_x(L0, L1, eB, T, mus, start_low):
 
 
 def main():
+    """Write synthetic SGC isotherms with known boundaries to the output directory."""
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument(
