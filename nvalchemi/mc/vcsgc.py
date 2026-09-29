@@ -209,8 +209,6 @@ class VCSGC(SGC):
             self._linear = self.phi - self.reference_exchange_potential
         except RuntimeError as exc:
             raise ValueError("per-graph phi, kappa and reference_exchange_potential must have equal lengths") from exc
-        # Device copies of the parameters, made once instead of every MC step.
-        self._device_parameters: dict[tuple[str, torch.device, torch.dtype], torch.Tensor] = {}
 
     @staticmethod
     def _parameter(value: float | torch.Tensor, name: str) -> torch.Tensor:
@@ -222,12 +220,7 @@ class VCSGC(SGC):
 
     def _per_graph(self, value: torch.Tensor, batch: Batch, name: str) -> torch.Tensor:
         """Broadcast a VC-SGC parameter to one value per graph on the batch device."""
-        key = (name, batch.device, batch.positions.dtype)
-        cached = self._device_parameters.get(key)
-        if cached is None:
-            cached = value.to(dtype=batch.positions.dtype, device=batch.device)
-            self._device_parameters[key] = cached
-        value = cached
+        value = self._on_device(name, value, batch.device, batch.positions.dtype)
         if value.ndim == 0:
             return value.expand(batch.num_graphs)
         if value.shape != (batch.num_graphs,):

@@ -119,6 +119,29 @@ def test_per_graph_chemical_potential_shape_is_checked() -> None:
         sampler.run(batch, n_steps=1)
 
 
+def test_unequal_per_graph_chemical_potentials_rejected_at_construction() -> None:
+    """Per-graph reservoirs of different lengths cannot describe one batch."""
+    with pytest.raises(ValueError, match="equal lengths"):
+        _sampler({1: torch.tensor([0.0, 0.1]), 2: torch.tensor([0.0, 0.1, 0.2])})
+
+
+def test_species_and_potentials_are_copied_to_device_once() -> None:
+    """Repeated steps reuse the cached device tensors instead of re-uploading."""
+    batch = _batch([[1, 2], [2, 1]])
+    sampler = _sampler({1: 0.0, 2: torch.tensor([0.1, -0.1])})
+
+    sampler.run(batch, n_steps=1)
+    cached = dict(sampler._device_parameters)
+    sampler.run(batch, n_steps=3)
+
+    assert set(cached) == set(sampler._device_parameters)
+    assert all(sampler._device_parameters[key] is value for key, value in cached.items())
+    torch.testing.assert_close(
+        sampler._chemical_potentials_for(batch),
+        torch.tensor([[0.0, 0.1], [0.0, -0.1]]),
+    )
+
+
 def test_rejects_missing_reservoir_species() -> None:
     """The starting composition must be representable by the reservoir."""
     batch = _batch([[3]])
