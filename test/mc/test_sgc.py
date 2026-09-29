@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -140,6 +142,17 @@ def test_species_and_potentials_are_copied_to_device_once() -> None:
         sampler._chemical_potentials_for(batch),
         torch.tensor([[0.0, 0.1], [0.0, -0.1]]),
     )
+
+
+def test_new_batch_gets_a_fresh_energy_baseline() -> None:
+    """A batch replacing a freed one (possibly at the same id) is re-initialised."""
+    sampler = _sampler({1: 0.0, 2: 0.0})
+    sampler.run(_batch([[1, 2]]), n_steps=1)
+
+    with patch.object(sampler, "_initialize_energy", wraps=sampler._initialize_energy) as init:
+        sampler.run(_batch([[2, 2]]), n_steps=1)
+
+    init.assert_called_once()
 
 
 def test_rejects_missing_reservoir_species() -> None:

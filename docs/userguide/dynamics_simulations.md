@@ -341,9 +341,14 @@ always integrates with the current species' mass, whether it runs under
 into the periodic cell before every evaluation, so UMA runs no longer need
 `WrapPeriodicHook` for correctness; the hook is still useful for tidy
 trajectories and for other models whose neighbour lists assume wrapped input.
-Do not combine the MC stage with `FusedStage`:
-alternating MC-MD needs a candidate-energy evaluation and an accepted-state
-force evaluation at different points in each block.
+`FusedStage` (`mc + md`) is not a substitute: it runs MC on some graphs and
+MD on others, selected by `status`, sharing one forward pass per step, whereas
+alternating MC-MD on the same graph needs a candidate-energy evaluation and an
+accepted-state force evaluation at different points in each block. In a fused
+stage, MC takes its acceptance baseline from the energy on the batch, so a
+graph that migrates into the MC stage needs no extra call; one migrating out
+of it carries the forces of its last (possibly rejected) trial into its first
+MD step.
 
 With separate models (`HybridMCMD(mc=SGC(model=mc_model, ...), md=NPT(model=md_model, ...))`)
 each MC block re-evaluates its baseline energy with the MC model, so acceptance
