@@ -411,10 +411,9 @@ production capacity claim after changing the model or physics configuration.
 
 For heterogeneous system sizes, use `SizeAwareSampler` to pack each active GPU
 batch subject to calibrated `max_atoms`, `max_edges`, and `max_batch_size`
-budgets. Its default `estimated_bytes_per_atom=300` and
-`model_memory_fraction=0.2` remain available as a conservative starting
-heuristic. They are explicit parameters: validate them for the selected model
-with a representative profile, then override them if needed. A completed
+budgets. Pass these budgets explicitly from a representative profile rather
+than relying on the sampler's built-in GPU-memory estimate, which is a fixed,
+model-agnostic heuristic. A completed
 independent run may be replaced from the queue; an active run must retain its
 own configuration and simulation state until it reaches its declared stopping
 condition.
