@@ -39,10 +39,9 @@ included) -- unlike memory_reserved(), which is a floor that only grows
 across the whole process and carries forward from one phase into the next
 (see the debug_npt_then_sgc.py conversation this diagnostic followed from).
 
-Run on Quest:
-    source hpc/quest/env.sh
-    "$QUEST_ENV/bin/python" benchmark/hybrid_sgc_npt/hybrid_diagnostic.py \\
-        --out-dir "$RUN_ROOT/hybrid_sgc_npt/hybrid_diagnostic"
+Run on a GPU node:
+    python benchmark/hybrid_sgc_npt/hybrid_diagnostic.py \\
+        --out-dir <output_root>/hybrid_sgc_npt/hybrid_diagnostic
 
 --n-blocks defaults to a small diagnostic-scale count (10), not
 production's 100-200 (N_BLOCKS_SCAN_STEP / N_BLOCKS_REFERENCE) -- at

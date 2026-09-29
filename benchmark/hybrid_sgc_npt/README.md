@@ -29,14 +29,12 @@ and Pt are equally favorable," it means "whatever this checkpoint's own raw
 energy convention already encodes, uncorrected." That raw offset is 1-3
 eV/atom on this UMA checkpoint, large enough to swamp the +-1.0 eV
 `DELTA_MU_EV` sweep and drive every run to one pure phase regardless of
-`delta_mu` (the sibling repo's `scout_sgc_temperature_composition_drift.py`
-job 5484379 is a documented example of exactly this failure, at
-`delta_mu=0.0`).
+`delta_mu` (a scouting run at `delta_mu=0.0` showed exactly this
+failure).
 
 Pass `--reference-energies-json <reference_energy_calibration.py output>`
-(recommended; run that script first — see the companion
-`nvalchemi-toolkit-quest-deploy` repo's `phase_diagram_guide.md` section 3
-and `hpc/quest/tests/reference_energy_calibration.py`) to fix this: every
+(recommended; `--mode delta-mu-scan` can also calibrate the reference
+in-process, see `compute_reference_energies` in `run_campaign.py`) to fix this: every
 run's `chemical_potentials_ev` is rebuilt as `{Au: 0.0, Pt:
 reference[T]["delta_mu_ref_eV"] + delta_mu_excess}` at that run's own
 temperature, with `DELTA_MU_EV`'s per-column value reinterpreted as

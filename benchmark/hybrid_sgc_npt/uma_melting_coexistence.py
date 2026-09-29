@@ -50,9 +50,9 @@ Outputs in ``--out-dir/<element>/T<temperature>/``: ``series.csv`` (time,
 potential energy/atom, temperature, box lengths, solid fraction),
 ``trajectory.extxyz``, ``snapshots.npz``, ``summary.json``.
 
-Run on Quest (see nvalchemi-toolkit-quest-deploy/hpc/quest/submit_uma_melting.sbatch):
-    "$QUEST_ENV/bin/python" benchmark/hybrid_sgc_npt/uma_melting_coexistence.py \\
-        --element Au --temperature-k 1300 --out-dir "$RUN_ROOT/uma_melting"
+Run on a GPU node:
+    python benchmark/hybrid_sgc_npt/uma_melting_coexistence.py \\
+        --element Au --temperature-k 1300 --out-dir <output_root>/uma_melting
 """
 
 from __future__ import annotations

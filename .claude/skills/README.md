@@ -22,6 +22,8 @@ copy the skill folders into your project's or home skills directory.
 | Add per-step callbacks (neighbor lists, convergence, logging) | `nvalchemi-dynamics-hooks` |
 | Implement a new integrator, optimizer, or sampler class | `nvalchemi-dynamics-implementation` |
 | Add progress dashboards, TensorBoard, or CSV observability | `nvalchemi-reporting` |
+| Choose UMA inference settings, batch width, memory and jobs for MC / MD / hybrid runs | `nvalchemi-uma-submission` |
+| Turn SGC Monte Carlo isotherms into phase boundaries; trace a T-x coexistence line | `nvalchemi-sgc-phase-boundary` |
 
 Each skill lives at `.claude/skills/<name>/SKILL.md`.
 
@@ -35,6 +37,7 @@ data-structures -> data-storage -> zarr-perf
 model-wrapping + loss-api -> training-api -> fine-tuning
 dynamics-hooks -> dynamics-api | dynamics-implementation
 reporting (orthogonal: attaches to training and dynamics)
+dynamics-api -> uma-submission -> sgc-phase-boundary
 ```
 
 ## Authoring conventions

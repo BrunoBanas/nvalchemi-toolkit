@@ -18,10 +18,9 @@ Reuses run_campaign.py's own constants and _refresh_masses_after_transmutation
 via plain sibling-script imports -- run this from the same directory as those
 two files (matches how run_campaign.py itself is invoked).
 
-Run on Quest:
-    source hpc/quest/env.sh
-    "$QUEST_ENV/bin/python" benchmark/hybrid_sgc_npt/debug_npt_then_sgc.py \\
-        --out-dir "$RUN_ROOT/hybrid_sgc_npt/debug_npt_then_sgc"
+Run on a GPU node:
+    python benchmark/hybrid_sgc_npt/debug_npt_then_sgc.py \\
+        --out-dir <output_root>/hybrid_sgc_npt/debug_npt_then_sgc
 
 Then convert/inspect the resulting checkpoints/*.pt the same way as any
 other campaign checkpoint directory, e.g. with export_structures.py against

@@ -40,10 +40,9 @@ run_campaign.py / export_structures.py exactly as the UMA script does,
 which is the point: nvalchemi's BaseModelMixin interface makes the dynamics
 code model-agnostic (see docs/userguide/models.md).
 
-Run on Quest:
-    source hpc/quest/env.sh
-    "$QUEST_ENV_MACE/bin/python" benchmark/hybrid_sgc_npt/debug_npt_then_sgc_mace.py \\
-        --out-dir "$RUN_ROOT/hybrid_sgc_npt/debug_npt_then_sgc_mace" \\
+Run on a GPU node, in an environment with MACE installed:
+    python benchmark/hybrid_sgc_npt/debug_npt_then_sgc_mace.py \\
+        --out-dir <output_root>/hybrid_sgc_npt/debug_npt_then_sgc_mace \\
         --delta-mu-ref-ev <value from reference_energy_calibration_mace.py at T=1400 K>
 
 Then convert/inspect the resulting checkpoints/*.pt the same way as any
@@ -89,8 +88,8 @@ from nvalchemi.scheduling.campaign import FinalStateStore
 
 # MACE-MP checkpoint download cache: honor XDG_CACHE_HOME (see mace.tools.utils
 # .get_cache_dir) the same way run_campaign.py's UMA path honors HF_HOME --
-# both point at $RUN_ROOT/cache via hpc/quest/env.sh so neither fills $HOME's
-# default quota on Quest. No-op off Quest.
+# point both at one shared cache directory so large checkpoints are not
+# downloaded into a small home-directory quota. No-op when unset.
 
 _DTYPES = {"float32": torch.float32, "float64": torch.float64}
 

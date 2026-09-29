@@ -1690,7 +1690,15 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         against, or the checkpoint predicts forces or stress directly (a separate
         head ``regress_config`` does not switch off); the wrapper then computes
         every derivative and filters on output, as before gating existed.
+
+        The snapshot is stored on the predict unit and reused: gating prunes the
+        unit's live tables in place, so a second wrapper built on a unit an
+        earlier wrapper already gated would otherwise snapshot the pruned set
+        and never restore the missing derivatives.
         """
+        cached = getattr(self.predict_unit, "_nvalchemi_derivative_tables", None)
+        if cached is not None:
+            return cached
         inner = self._fairchem_model()
         tasks = getattr(inner, "_tasks", None)
         dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
@@ -1702,12 +1710,14 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             for config in configs
         ):
             return None
-        return _DerivativeTables(
+        tables = _DerivativeTables(
             tasks=dict(tasks),
             dataset_to_tasks={name: list(task_list) for name, task_list in dataset_to_tasks.items()},
             forces=any(bool(getattr(config, "forces", False)) for config in configs),
             stress=any(bool(getattr(config, "stress", False)) for config in configs),
         )
+        self.predict_unit._nvalchemi_derivative_tables = tables
+        return tables
 
     def _gate_derivative_heads(self) -> None:
         """Make fairchem compute only the derivatives ``active_outputs`` asks for.

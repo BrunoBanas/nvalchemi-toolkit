@@ -14,13 +14,12 @@ checkpoint's payload is ``{"run_id": ..., "state": AtomicData.model_dump(),
 plain dicts -- so the raw positions/atomic_numbers/cell/pbc/energy fields can
 be read with ``torch.load(..., weights_only=True)`` without importing the
 AtomicData class itself. That keeps this script runnable anywhere the
-campaign's own environment (``$QUEST_ENV``) is available, with no extra
-install.
+campaign's own environment is available, with no extra install.
 
-Usage (from a Quest shell, after ``source hpc/quest/env.sh``):
+Usage (in the campaign's environment):
 
-    "$QUEST_ENV/bin/python" benchmark/hybrid_sgc_npt/export_structures.py \\
-        --checkpoint-root "$RUN_ROOT/hybrid_sgc_npt/checkpoints/scan_1200_1400_hybrid/atoms500"
+    python benchmark/hybrid_sgc_npt/export_structures.py \\
+        --checkpoint-root <output_root>/hybrid_sgc_npt/checkpoints/<scan>/atoms500
 
 Then copy the resulting ``structures/`` folder back alongside the checkpoints
 (the same way you already copy Results) and open the ``.extxyz`` files in

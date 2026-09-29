@@ -4,6 +4,14 @@
 
 ### Added
 
+- Agent skills `nvalchemi-uma-submission` (UMA inference settings, batch width,
+  memory and Slurm jobs for MC / MD / hybrid runs) and `nvalchemi-sgc-phase-boundary`
+  (phase boundaries and T-x boundary tracing from SGC data), with their tools:
+  `benchmark/uma_efficiency/` (planner, measured calibration, driver and job
+  templates, efficiency-matrix runner, MC / MD / hybrid / memory / MoLE
+  benchmarks) and `benchmark/phase_boundary/` (isotherm analysis, synthetic
+  data, tracer self-test). `benchmark/hybrid_sgc_npt/boundary_tracer.py` is now
+  the canonical tracer copy.
 - GPU-resident canonical (`Kawasaki`) Monte Carlo with fixed-composition
   nearest-neighbour site-swap moves. The proposal graph is a short-range
   cutoff neighbor search independent of the energy model's own interaction

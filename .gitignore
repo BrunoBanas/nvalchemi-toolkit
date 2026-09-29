@@ -114,10 +114,8 @@ wandb/
 slurm-*.out
 benchmark/*/logs/
 
-# hpc/ holds Quest-account-specific deployment scripts (NetID, SLURM
-# allocation account) and lives in the private sibling repo
-# nvalchemi-toolkit-quest-deploy. Locally it's a symlink into that repo;
-# never track it here. See nvalchemi-toolkit-quest-deploy/hpc/quest/README.md.
+# hpc/ is reserved for local, site-specific cluster deployment scripts
+# (accounts, allocations, environment paths); never track it here.
 /hpc
 
 # testmon files

@@ -12,9 +12,9 @@ directly, with no manual column mapping.
 
 Deliberately depends on torch + ase only, not on nvalchemi itself (same
 reasoning as export_structures.py): `pip install torch ase` on a laptop is
-enough -- no CUDA, no HPC environment, no need to be on Quest. scp/rsync a
-single checkpoint down from $RUN_ROOT and convert it here instead of
-waiting on the Quest queue for an export job.
+enough -- no CUDA, no HPC environment, no cluster access. scp/rsync a
+single checkpoint down from the cluster and convert it here instead of
+waiting in the queue for an export job.
 
 Usage:
     python local_export_structure.py atoms500.T1400.SGCtrial0042.pt

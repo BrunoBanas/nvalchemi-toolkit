@@ -39,13 +39,12 @@ Pt are equally favorable," it means "whatever this checkpoint's own raw
 energy convention already encodes between the two species, uncorrected."
 That raw offset is 1-3 eV/atom on this UMA checkpoint -- large enough to
 swamp the +-1.0 eV DELTA_MU_EV sweep above and drive every run to one pure
-phase regardless of delta_mu (nvalchemi-toolkit-quest-deploy's
-scout_sgc_temperature_composition_drift.py job 5484379 is a documented
-example of exactly this failure mode, at delta_mu=0.0).
+phase regardless of delta_mu (a scouting run at delta_mu=0.0 showed exactly
+this failure mode).
 
 --reference-energies-json <reference_energy_calibration.py output>
-(recommended; see nvalchemi-toolkit-quest-deploy/phase_diagram_guide.md
-section 3) fixes this: every run's chemical_potentials_ev is rebuilt as
+(recommended; ``--mode delta-mu-scan`` can also calibrate it in-process, see
+compute_reference_energies) fixes this: every run's chemical_potentials_ev is rebuilt as
 {Au: 0.0, Pt: reference[T]["delta_mu_ref_eV"] + delta_mu_excess}, looked up
 at THAT RUN'S OWN temperature_k -- not just the 3000 K reference row's --
 since delta_mu_ref(T) genuinely varies with T. delta_mu_excess is
@@ -676,12 +675,9 @@ def _build_pure_element_template(symbol: str, n_atoms: int) -> Atoms:
     equilibrium volume -- reusing the shared lattice constant would just
     reintroduce the volume-relaxation skew this calibration removes. NPT's
     barostat does the actual equilibration; this only sets a physically
-    reasonable starting point. Adapted from nvalchemi-toolkit-quest-deploy's
-    reference_energy_calibration.py (different repo, no shared import path;
-    duplicated here, rather than imported, so ``--mode delta-mu-scan`` can
-    auto-calibrate in-process with the model already loaded for the alloy
-    runs -- see that script's module docstring for the full physical
-    rationale, and ``compute_reference_energies`` below).
+    reasonable starting point. Lets ``--mode delta-mu-scan`` auto-calibrate
+    in-process with the model already loaded for the alloy runs; see
+    ``compute_reference_energies`` below for the physical rationale.
     """
     repeats = SIZE_REPEATS[n_atoms]
     unit_cell = bulk(symbol, crystalstructure=CRYSTAL_STRUCTURE, cubic=CONVENTIONAL_CELL)
@@ -734,18 +730,14 @@ def compute_reference_energies(
     automatically on a single GPU: no second checkpoint load, no separate
     script invocation, no manually-prepared ``reference_energies.json``.
 
-    Ported from nvalchemi-toolkit-quest-deploy's
-    reference_energy_calibration.py (different repo, no shared import path;
-    kept here, rather than imported, precisely so this project's toolkit-side
-    entry point stays self-sufficient -- see that script's module docstring
-    for the full physical rationale: each pure element is equilibrated
-    independently, from its own ASE reference lattice constant, through a
-    real NPT trajectory at the target temperature and the alloy's own
-    pressure/thermostat/barostat settings, one graph per (element,
-    temperature) in a single batch).
+    Kept in this script so the campaign entry point is self-sufficient. Each
+    pure element is equilibrated independently, from its own ASE reference
+    lattice constant, through a real NPT trajectory at the target temperature
+    and the alloy's own pressure/thermostat/barostat settings, one graph per
+    (element, temperature) in a single batch.
 
-    Returns the same ``reference_energies.json``-shaped dict that script
-    writes (``reference[T][symbol]`` plus, for the 2-species case,
+    Returns a ``reference_energies.json``-shaped dict
+    (``reference[T][symbol]`` plus, for the 2-species case,
     ``delta_mu_ref_eV`` per temperature) -- the caller decides whether/where
     to persist it and whether its ``equilibration_gate`` is trustworthy
     enough to use.
@@ -906,10 +898,7 @@ def _load_delta_mu_ref(
     needs). Raises on a missing temperature, a species mismatch, or an
     unresolved equilibration_gate (unless allow_unresolved) -- silently
     proceeding on any of those would reproduce exactly the uncalibrated-
-    delta_mu problem this loader exists to fix. Ported from
-    nvalchemi-toolkit-quest-deploy's
-    tests/scout_sgc_temperature_composition_drift.py (different repo, no
-    shared import path).
+    delta_mu problem this loader exists to fix.
     """
     reference_data = json.loads(reference_path.read_text())
     reference = reference_data["reference"]
@@ -1001,7 +990,7 @@ def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> 
     otherwise select a batch width that OOMs once a long unattended
     production run reaches a worst-case composition). Downgraded to a
     warning: the linear-in-n_atoms floor itself doesn't hold at larger
-    sizes -- job 5764404's own dedicated memory_profile_matrix run (far more
+    sizes -- a dedicated benchmark/uma_efficiency/memory_profile_matrix.py run (far more
     samples than this profiler's PROFILE_MEASURED_BLOCKS=2) measured
     real per-walker costs of 3.96 GB/500 atoms, 8.59 GB/1372, but only
     1.71 GB/2048 -- resident cost dominates and marginal per-walker cost
@@ -1066,10 +1055,7 @@ def select_batch_width(
 
 
 def _pt_fraction_per_graph(batch: Batch, pt_number: int, n_graphs: int) -> list[float]:
-    """Per-graph Pt atomic fraction, one GPU->CPU sync. Ported from
-    nvalchemi-toolkit-quest-deploy's scout_sgc_temperature_composition_drift.py
-    (different repo, no shared import path).
-    """
+    """Per-graph Pt atomic fraction, one GPU->CPU sync."""
     dtype = batch.positions.dtype
     pt_mask = (batch.atomic_numbers == pt_number).to(dtype)
     n_pt = torch.bincount(batch.batch_idx, weights=pt_mask, minlength=n_graphs)

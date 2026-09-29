@@ -620,6 +620,16 @@ class TestDerivativeGating:
         wrapper(batch)
         assert pu.seen[-1] == (False, False, ["omat_energy"])
 
+    def test_wrapper_built_after_another_gated_the_unit_restores_derivatives(self):
+        """A second wrapper on an already-pruned unit still sees the as-loaded tables."""
+        pu = _GateablePredictUnit()
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        energy_only = UMAWrapper(pu, task_name="omat")
+        energy_only.model_config.active_outputs = {"energy"}
+        energy_only(batch)
+        UMAWrapper(pu, task_name="omat")(batch)
+        assert pu.seen[-1] == (True, True, ["omat_energy", "omat_forces", "omat_stress"])
+
     def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
         mock_omat.model_config.active_outputs = {"energy"}
         batch = Batch.from_data_list([_make_periodic_cu()])
@@ -708,12 +718,8 @@ class TestMLIPSpec:
 # ===========================================================================
 
 
-@pytest.fixture(scope="module")
-def predict_unit():
-    """Load the UMA predict unit once for the module.
-
-    Skips the dependent tests if HF access or download fails.
-    """
+def _load_predict_unit():
+    """Load a fresh UMA predict unit; skip if HF access or download fails."""
     from fairchem.core.calculate import pretrained_mlip
     from huggingface_hub.errors import GatedRepoError
 
@@ -726,17 +732,35 @@ def predict_unit():
 
 
 @pytest.fixture(scope="module")
-def calc_omol(predict_unit):
-    from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
+def predict_unit():
+    """UMA predict unit shared by the wrappers, loaded once for the module.
 
-    return FAIRChemCalculator(predict_unit=predict_unit, task_name="omol")
+    ``UMAWrapper`` gates derivatives by mutating the unit (``regress_config``
+    and the task tables): the omol wrapper drops stress. Each wrapper re-gates
+    on every forward, so sharing is safe among wrappers -- but not with
+    ``FAIRChemCalculator``, which does not, hence ``reference_predict_unit``.
+    """
+    return _load_predict_unit()
 
 
 @pytest.fixture(scope="module")
-def calc_omat(predict_unit):
+def reference_predict_unit():
+    """Untouched UMA predict unit backing the reference calculators only."""
+    return _load_predict_unit()
+
+
+@pytest.fixture(scope="module")
+def calc_omol(reference_predict_unit):
     from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
 
-    return FAIRChemCalculator(predict_unit=predict_unit, task_name="omat")
+    return FAIRChemCalculator(predict_unit=reference_predict_unit, task_name="omol")
+
+
+@pytest.fixture(scope="module")
+def calc_omat(reference_predict_unit):
+    from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
+
+    return FAIRChemCalculator(predict_unit=reference_predict_unit, task_name="omat")
 
 
 @pytest.fixture(scope="module")
@@ -1012,26 +1036,6 @@ def _assert_same_outputs(ours: dict, ref: dict) -> None:
     torch.testing.assert_close(ours["stress"], ref["stress"], atol=1e-5, rtol=1e-4)
 
 
-@pytest.fixture(scope="module")
-def wrapper_omat_own() -> UMAWrapper:
-    """An omat wrapper on its own predict unit.
-
-    The shared ``predict_unit`` fixture also backs the omol wrapper and both
-    calculators, which reconfigure its tasks (e.g. drop stress) as they run, so
-    tests that compare stress must not depend on test order.
-    """
-    from fairchem.core.calculate import pretrained_mlip
-    from huggingface_hub.errors import GatedRepoError
-
-    try:
-        pu = pretrained_mlip.get_predict_unit(_CKPT, device=_DEVICE)
-    except GatedRepoError as e:
-        pytest.skip(f"no HF access to UMA checkpoint {_CKPT}: {e}")
-    except Exception as e:  # noqa: BLE001 — top-level guard for CI portability
-        pytest.skip(f"could not load UMA checkpoint {_CKPT}: {e}")
-    return UMAWrapper(pu, task_name="omat")
-
-
 class TestUnwrappedPositions:
     """Energy/forces/stress are invariant to per-atom lattice translations."""
 
@@ -1045,30 +1049,30 @@ class TestUnwrappedPositions:
         41: (2, -1, -3),
     }
 
-    def test_forces_and_stress_active(self, wrapper_omat_own):
-        active = set(wrapper_omat_own.model_config.active_outputs)
+    def test_forces_and_stress_active(self, wrapper_omat):
+        active = set(wrapper_omat.model_config.active_outputs)
         assert {"energy", "forces", "stress"} <= active
 
-    def test_lattice_vector_invariance(self, wrapper_omat_own):
+    def test_lattice_vector_invariance(self, wrapper_omat):
         ref_data = _rattled_fe_333()
-        ref = _evaluate(wrapper_omat_own, ref_data)
+        ref = _evaluate(wrapper_omat, ref_data)
         assert ref["forces"].abs().max() > 1e-2  # rattled: non-trivial forces
-        ours = _evaluate(wrapper_omat_own, _shift_atoms(ref_data, self._SHIFTS))
+        ours = _evaluate(wrapper_omat, _shift_atoms(ref_data, self._SHIFTS))
         _assert_same_outputs(ours, ref)
 
-    def test_far_atom_regression(self, wrapper_omat_own, monkeypatch):
+    def test_far_atom_regression(self, wrapper_omat, monkeypatch):
         """An atom two cells out lost its neighbours before the fold; now matches."""
         ref_data = _rattled_fe_333()
         far = _shift_atoms(ref_data, {0: (2, 0, 0), 1: (0, -2, 1)})
-        ref = _evaluate(wrapper_omat_own, ref_data)
-        _assert_same_outputs(_evaluate(wrapper_omat_own, far), ref)
+        ref = _evaluate(wrapper_omat, ref_data)
+        _assert_same_outputs(_evaluate(wrapper_omat, far), ref)
 
         # Without the fold, fairchem's +-1 image scan misses pairs.
         monkeypatch.setattr(uma_module, "_fold_into_cell", lambda pos, *_: pos)
-        broken = _evaluate(wrapper_omat_own, far)
+        broken = _evaluate(wrapper_omat, far)
         assert (broken["energy"] - ref["energy"]).abs().max() > 1e-2
 
-    def test_mixed_pbc_slab_matches_wrapped(self, wrapper_omat_own):
+    def test_mixed_pbc_slab_matches_wrapped(self, wrapper_omat):
         """pbc=(T, T, F): in-plane translations are folded, z is not touched."""
         atoms = bulk("Fe", "bcc", a=2.87, cubic=True) * (3, 3, 3)
         atoms.rattle(stdev=0.05, seed=3)
@@ -1076,9 +1080,9 @@ class TestUnwrappedPositions:
         atoms.pbc = (True, True, False)
         atoms.wrap()
         ref_data = _atomicdata_from_ase(atoms)
-        ref = _evaluate(wrapper_omat_own, ref_data)
+        ref = _evaluate(wrapper_omat, ref_data)
         shifted = _shift_atoms(ref_data, {0: (2, 0, 0), 7: (-1, 3, 0)})
-        _assert_same_outputs(_evaluate(wrapper_omat_own, shifted), ref)
+        _assert_same_outputs(_evaluate(wrapper_omat, shifted), ref)
 
 
 # ---------------------------------------------------------------------------
