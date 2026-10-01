@@ -163,6 +163,7 @@ def moledgl_forward(self, x):
 
 
 def set_sizes(self, nsystems, batch_full, edge_index):
+    """Profiled, optionally cached replacement for fairchem's MoLE size computation."""
     with record_function("mole.sizes"):
         key = ("sizes", id(self), nsystems, edge_index.shape[1])
         if "sizes" in ACTIVE and key in STORE:
@@ -175,6 +176,7 @@ def set_sizes(self, nsystems, batch_full, edge_index):
 
 
 def set_coefficients(self, atomic_numbers_full, batch_full, csd_mixed_emb):
+    """Profiled, optionally cached replacement for fairchem's MoLE coefficient computation."""
     with record_function("mole.coefficients"):
         key = (
             "coefficients",
@@ -224,6 +226,7 @@ def instrumented(flags: set[str]):
 def make_batch(
     template, pt_fractions: list[float], seed: int, device: torch.device
 ) -> Batch:
+    """Build a batch of walkers with the given Pt fractions on *template*."""
     walkers = []
     for index, fraction in enumerate(pt_fractions):
         data = AtomicData.from_atoms(template, device=device)
@@ -243,6 +246,7 @@ def make_batch(
 
 
 def call(model: UMAWrapper, batch: Batch, device: torch.device) -> dict:
+    """Evaluate *model* on *batch*, synchronising CUDA for timing."""
     out = model(batch)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -250,6 +254,7 @@ def call(model: UMAWrapper, batch: Batch, device: torch.device) -> dict:
 
 
 def max_error(ref: dict, out: dict, n_atoms: int) -> dict:
+    """Return the largest energy-per-atom and force differences between two outputs."""
     errors = {
         "energy_eV_per_atom": float((ref["energy"] - out["energy"]).abs().max())
         / n_atoms
@@ -260,6 +265,7 @@ def max_error(ref: dict, out: dict, n_atoms: int) -> dict:
 
 
 def device_time_us(event) -> float:
+    """Return a profiler event's device time in microseconds across torch versions."""
     for name in ("device_time_total", "cuda_time_total"):
         value = getattr(event, name, None)
         if value is not None:
@@ -270,6 +276,7 @@ def device_time_us(event) -> float:
 def run_case(
     model, label, variant, op, composition, width, template, args, device
 ) -> dict:
+    """Time one (variant, op, composition, width) case and check it against the reference."""
     fractions = (
         [campaign.PT_FRACTION] * width
         if composition == "same"
@@ -365,6 +372,7 @@ def run_case(
 
 
 def mole_layer_counts(model: UMAWrapper) -> dict:
+    """Count the MoLE layers of each implementation in *model*."""
     counts: dict[str, int] = {}
     for module in model.modules():
         name = type(module).__name__
@@ -374,6 +382,7 @@ def mole_layer_counts(model: UMAWrapper) -> dict:
 
 
 def load(spec: str, device: torch.device, template) -> tuple[UMAWrapper, dict]:
+    """Load *spec* and time the load and the first (merging) call."""
     t0 = time.perf_counter()
     model = UMAWrapper.from_checkpoint(
         campaign.CHECKPOINT,
@@ -407,6 +416,7 @@ def load(spec: str, device: torch.device, template) -> tuple[UMAWrapper, dict]:
 
 
 def write_summary(path: Path, results: dict) -> None:
+    """Write the Markdown summary of the MoLE overhead cases."""
     rows = results["cases"]
     merged = {
         (r["op"], r["width"]): r["ms_per_call_median"]
@@ -465,6 +475,7 @@ def write_summary(path: Path, results: dict) -> None:
 
 
 def main() -> None:
+    """Command-line entry point: profile MoLE overhead over settings, ops and widths."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

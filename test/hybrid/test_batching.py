@@ -16,7 +16,11 @@
 
 from __future__ import annotations
 
-from nvalchemi.hybrid import BatchMeasurement, HybridBatchPlanner, SimulationBatchPlanner
+from nvalchemi.hybrid import (
+    BatchMeasurement,
+    HybridBatchPlanner,
+    SimulationBatchPlanner,
+)
 
 
 def test_estimate_width_uses_model_and_per_walker_memory() -> None:
@@ -66,9 +70,13 @@ def test_infer_memory_model_can_port_a_profile_to_another_gpu() -> None:
 
 def test_assign_walkers_forms_serial_waves_per_gpu() -> None:
     """Excess walkers are queued after one full batch per requested GPU."""
-    assignments = HybridBatchPlanner.assign_runs(total_runs=19, batch_width=4, gpu_ids=[2, 5])
+    assignments = HybridBatchPlanner.assign_runs(
+        total_runs=19, batch_width=4, gpu_ids=[2, 5]
+    )
 
-    assert [(item.gpu_id, item.wave, item.start, item.stop) for item in assignments] == [
+    assert [
+        (item.gpu_id, item.wave, item.start, item.stop) for item in assignments
+    ] == [
         (2, 0, 0, 4),
         (5, 0, 4, 8),
         (2, 1, 8, 12),
@@ -103,7 +111,9 @@ def test_compile_wrapped_oom_is_classified_as_oom() -> None:
             super().__init__(f"backend='inductor' raised:\n{inner}")
             self.inner_exception = inner
 
-    oom = torch.cuda.OutOfMemoryError("CUDA out of memory. Tried to allocate 19.78 GiB.")
+    oom = torch.cuda.OutOfMemoryError(
+        "CUDA out of memory. Tried to allocate 19.78 GiB."
+    )
     assert _is_out_of_memory(oom)
     assert _is_out_of_memory(BackendCompilerFailed(oom))
     try:

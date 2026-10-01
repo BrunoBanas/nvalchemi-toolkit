@@ -47,7 +47,7 @@ Find out, from the files or by asking:
   equilibration flag.
 - The ensemble: rigid lattice, or relaxed / hybrid MD+MC. This decides which φ
   anchors are legitimate.
-- Whether the simulations are physically sane. The analysis trusts <x> and cannot
+- Whether the simulations are physically sane. The analysis trusts ⟨x⟩ and cannot
   tell a broken simulation from real thermodynamics. Check that each branch sits
   near its own end at the extreme Δμ, that trends agree with sibling scans, that
   the closest atom pair in final structures is not far below a bond length
@@ -66,9 +66,9 @@ A tidy CSV, one row per SGC run:
 | `x` | yes | <x_B> |
 | `branch` | recommended | sweep label; branches are ranked by mean x |
 | `order` | recommended | step along the branch (default: Δμ order in the sweep direction) |
-| `x_se` | recommended | standard error of <x> (default 0.005) |
+| `x_se` | recommended | standard error of ⟨x⟩ (default 0.005) |
 | `x_drift` | optional | late-minus-early window mean; inflates unresolved runs' error bars |
-| `E`, `E_se` | optional | <E> per atom (eV); needed for eq. 29 and `--anchor energy` |
+| `E`, `E_se` | optional | ⟨E⟩ per atom (eV); needed for eq. 29 and `--anchor energy` |
 | `resolved` | optional | equilibration gate passed |
 
 nvalchemi campaigns write `*.equilibration.json` files (for example from

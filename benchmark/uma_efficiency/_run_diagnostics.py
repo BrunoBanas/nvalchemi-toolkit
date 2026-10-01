@@ -123,15 +123,18 @@ class RunDiagnostics:
     # -- public API ---------------------------------------------------------
 
     def elapsed(self) -> float:
+        """Return seconds since the diagnostics started."""
         return time.perf_counter() - self.start
 
     def set_phase(self, phase: str, **fields: Any) -> None:
+        """Record the start of a named run phase."""
         with self._lock:
             self.state["phase"] = phase
             self.state["phase_started_elapsed_s"] = self.elapsed()
         self.event("phase", phase=phase, **fields)
 
     def update(self, **fields: Any) -> None:
+        """Merge *fields* into the live state and rewrite the partial-results file."""
         with self._lock:
             self.state.update(fields)
         self._write_partial()
@@ -143,6 +146,7 @@ class RunDiagnostics:
         self.event(key, **record)
 
     def event(self, kind: str, **fields: Any) -> None:
+        """Append a timestamped event to the progress log and echo it."""
         line = {
             "event": kind,
             "elapsed_s": round(self.elapsed(), 3),
@@ -156,6 +160,7 @@ class RunDiagnostics:
         self._write_partial()
 
     def cuda_memory(self) -> dict[str, float]:
+        """Return current, reserved and peak reserved CUDA memory in GiB."""
         return {
             "cuda_allocated_GiB": torch.cuda.memory_allocated(self.device) / _GIB,
             "cuda_reserved_GiB": torch.cuda.memory_reserved(self.device) / _GIB,
@@ -163,6 +168,7 @@ class RunDiagnostics:
         }
 
     def close(self, status: str) -> None:
+        """Record the final status and stop the watchdog."""
         self.update(status=status)
         self.event("finish", status=status)
         self._stop.set()
@@ -256,6 +262,7 @@ class MCBlockRunner:
         self._last_stats = (0, 0)
 
     def run(self, batch: Any, n_blocks: int) -> Any:
+        """Run *n_blocks* timed MC blocks, labelled by the current call."""
         stage = (
             self.call_labels[self._calls]
             if self._calls < len(self.call_labels)
@@ -267,6 +274,7 @@ class MCBlockRunner:
         return batch
 
     def run_block(self, batch: Any, **labels: Any) -> Any:
+        """Run and time one MC block, recording throughput, observables and memory."""
         torch.cuda.synchronize(batch.device)
         start = time.perf_counter()
         batch = self.sampler.run(batch, n_steps=self.mc_steps_per_block)

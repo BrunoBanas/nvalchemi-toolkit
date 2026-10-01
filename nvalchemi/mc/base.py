@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import weakref
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,15 @@ if TYPE_CHECKING:
     from nvalchemi.models.base import BaseModelMixin
 
 __all__ = ["BaseMonteCarlo", "MonteCarloStats"]
+
+
+def _is_batch(ref: weakref.ref[Batch] | None, batch: Batch) -> bool:
+    """Whether *ref* still points at *batch*.
+
+    A weak reference rather than ``id(batch)``: CPython reuses the id of a
+    freed batch, so a new batch could otherwise inherit the old one's state.
+    """
+    return ref is not None and ref() is batch
 
 
 @dataclass(frozen=True)
@@ -108,14 +118,16 @@ class BaseMonteCarlo(BaseDynamics):
         )
         initial_temperature = torch.as_tensor(temperature)
         if initial_temperature.ndim > 1 or torch.any(initial_temperature <= 0):
-            raise ValueError("temperature must be positive and scalar or one-dimensional")
+            raise ValueError(
+                "temperature must be positive and scalar or one-dimensional"
+            )
         self._temperature = temperature
         self._random_seed = random_seed
         self._generator: torch.Generator | None = None
         self._generator_device: torch.device | None = None
         self._energy: torch.Tensor | None = None
-        self._energy_batch_id: int | None = None
-        self._validated_batch_id: int | None = None
+        self._energy_batch: weakref.ref[Batch] | None = None
+        self._validated_batch: weakref.ref[Batch] | None = None
         self._active: torch.Tensor | None = None
         self._attempted: torch.Tensor | None = None
         self._accepted: torch.Tensor | None = None
@@ -123,7 +135,7 @@ class BaseMonteCarlo(BaseDynamics):
         # matches, both for the batch object last seen by _ensure_mass_table.
         self._mass_table: torch.Tensor | None = None
         self._mass_numbers: torch.Tensor | None = None
-        self._mass_batch_id: int | None = None
+        self._mass_batch: weakref.ref[Batch] | None = None
 
     def _temperature_for(self, batch: Batch) -> torch.Tensor:
         """Return one positive temperature in K for every graph."""
@@ -185,13 +197,13 @@ class BaseMonteCarlo(BaseDynamics):
 
     def _initialize_energy(self, batch: Batch) -> None:
         """Evaluate the accepted starting configuration once."""
-        if self._validated_batch_id != id(batch):
+        if not _is_batch(self._validated_batch, batch):
             self._validate_batch(batch)
-            self._validated_batch_id = id(batch)
+            self._validated_batch = weakref.ref(batch)
         self._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch)
         self._energy = self._model_energy(batch)
         self._call_hooks(DynamicsStage.AFTER_COMPUTE, batch)
-        self._energy_batch_id = id(batch)
+        self._energy_batch = weakref.ref(batch)
 
     def synchronize(self, batch: Batch) -> None:
         """Adopt a trusted current energy after an external state update.
@@ -200,11 +212,11 @@ class BaseMonteCarlo(BaseDynamics):
         energy must already describe the current atom types and coordinates.
         """
         self._ensure_observables(batch)
-        if self._validated_batch_id != id(batch):
+        if not _is_batch(self._validated_batch, batch):
             self._validate_batch(batch)
-            self._validated_batch_id = id(batch)
+            self._validated_batch = weakref.ref(batch)
         self._energy = batch.energy.detach().reshape(batch.num_graphs).clone()
-        self._energy_batch_id = id(batch)
+        self._energy_batch = weakref.ref(batch)
 
     def refresh_energy(self, batch: Batch) -> None:
         """Re-evaluate the current configuration's energy and adopt it.
@@ -245,7 +257,9 @@ class BaseMonteCarlo(BaseDynamics):
 
     def _chemical_delta(self, batch: Batch) -> torch.Tensor:
         """Return the per-graph chemical contribution to the trial potential."""
-        return torch.zeros(batch.num_graphs, dtype=batch.positions.dtype, device=batch.device)
+        return torch.zeros(
+            batch.num_graphs, dtype=batch.positions.dtype, device=batch.device
+        )
 
     def _validate_batch(self, batch: Batch) -> None:
         """Validate sampler-specific assumptions for a newly seen batch."""
@@ -264,16 +278,18 @@ class BaseMonteCarlo(BaseDynamics):
         numbers = batch.atomic_numbers.reshape(-1).long()
         if (
             self._mass_table is not None
-            and self._mass_batch_id == id(batch)
+            and _is_batch(self._mass_batch, batch)
             and self._mass_numbers is not None
             and self._mass_numbers.shape == numbers.shape
         ):
             return
-        table = _default_mass_table().to(device=masses.device, dtype=masses.dtype).clone()
+        table = (
+            _default_mass_table().to(device=masses.device, dtype=masses.dtype).clone()
+        )
         table[numbers] = masses.detach().reshape(-1)
         self._mass_table = table
         self._mass_numbers = numbers.clone()
-        self._mass_batch_id = id(batch)
+        self._mass_batch = weakref.ref(batch)
 
     def _sync_masses(self, batch: Batch) -> None:
         """Give every atom whose species changed the mass of its new species.
@@ -303,16 +319,28 @@ class BaseMonteCarlo(BaseDynamics):
             raise RuntimeError("Monte Carlo proposal state was not initialized")
         trial_energy = batch.energy.detach().reshape(batch.num_graphs)
         delta = trial_energy - self._energy + self._chemical_delta(batch)
-        log_probability = (-delta / (KB_EV * self._temperature_for(batch))).clamp(max=0.0)
+        log_probability = (-delta / (KB_EV * self._temperature_for(batch))).clamp(
+            max=0.0
+        )
         log_uniform = torch.log(
-            torch.rand(batch.num_graphs, device=batch.device, generator=self._ensure_generator(batch))
+            torch.rand(
+                batch.num_graphs,
+                device=batch.device,
+                generator=self._ensure_generator(batch),
+            )
         )
         accepted = self._active & (log_uniform < log_probability)
         rejected = self._active & ~accepted
         with torch.no_grad():
             self._restore_rejected(batch, rejected)
             self._energy = torch.where(accepted, trial_energy, self._energy)
-            batch.energy.copy_(self._energy.reshape_as(batch.energy))
+            # Only rejected graphs go back to their baseline: in a FusedStage the
+            # other graphs' energies belong to the other sub-stages.
+            batch.energy.copy_(
+                torch.where(rejected, self._energy, trial_energy).reshape_as(
+                    batch.energy
+                )
+            )
             batch.mc_accepted.copy_(accepted.reshape_as(batch.mc_accepted))
             if self._attempted is None:
                 self._attempted = self._active.sum().detach()
@@ -323,13 +351,44 @@ class BaseMonteCarlo(BaseDynamics):
         # Rejected trials are already restored, so only accepted moves differ.
         self._sync_masses(batch)
 
+    def _masked_pre_update(self, batch: Batch, mask: torch.Tensor) -> None:
+        """Propose on the graphs in *mask* ahead of a :class:`FusedStage` compute.
+
+        The shared forward pass that follows evaluates the trials. The
+        acceptance baseline is the energy already on ``batch``: the previous
+        fused compute plus this sampler's own restores leave every graph's
+        current energy there, including graphs that just migrated into this
+        stage. Only the first fused step on a batch evaluates the model here.
+        Atom types are the only state changed, and only in masked graphs, so
+        no save/restore of the other graphs is needed.
+        """
+        self._ensure_state_initialized(batch)
+        self._ensure_observables(batch)
+        if self._energy is None or not _is_batch(self._energy_batch, batch):
+            self._initialize_energy(batch)
+        else:
+            self._energy = batch.energy.detach().reshape(batch.num_graphs).clone()
+        self._ensure_mass_table(batch)
+        self._active = mask.reshape(batch.num_graphs)
+        with torch.no_grad():
+            self._propose(batch, self._ensure_generator(batch), self._active)
+
+    def _masked_post_update(self, batch: Batch, mask: torch.Tensor) -> None:
+        """Accept or restore the :meth:`_masked_pre_update` proposals.
+
+        *mask* was already applied when proposing; unmasked graphs are
+        inactive and keep the trial energy the shared compute wrote.
+        """
+        with torch.no_grad():
+            self.post_update(batch)
+
     def step(self, batch: Batch) -> tuple[Batch, torch.Tensor | None]:
         """Run one complete, hook-aware MC proposal and acceptance step."""
         self._ensure_state_initialized(batch)
         self._ensure_observables(batch)
         self._call_hooks(DynamicsStage.BEFORE_STEP, batch)
         with self._stream_scope(batch.device):
-            if self._energy is None or self._energy_batch_id != id(batch):
+            if self._energy is None or not _is_batch(self._energy_batch, batch):
                 self._initialize_energy(batch)
             self._call_hooks(DynamicsStage.BEFORE_PRE_UPDATE, batch)
             self.pre_update(batch)

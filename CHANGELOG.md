@@ -29,9 +29,7 @@
   per-element energy offsets otherwise drive the walker to one end member.
 - GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
   evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
-  planning that emits serial overflow waves across requested GPUs. The existing
-  `SizeAwareSampler` GPU heuristic is now configurable through explicit
-  per-atom and model-overhead parameters.
+  planning that emits serial overflow waves across requested GPUs.
 - `RunSpec` / `CampaignSpec` dependency graphs with cooling-branch generation,
   checkpointed final atomic states, ready-batch GPU-wave planning, and
   per-graph SGC chemical-potential reservoirs.

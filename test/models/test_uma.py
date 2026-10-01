@@ -58,6 +58,7 @@ from nvalchemi.models.base import NeighborListFormat  # noqa: E402
 from nvalchemi.models.uma import (  # noqa: E402
     _UMA_TASKS,
     UMAWrapper,
+    _complete_cell,
     _fold_into_cell,
     _resolve_inference_settings,
 )
@@ -358,6 +359,45 @@ class TestAdaptInput:
         assert fc.tags.tolist() == [0] * 11
 
 
+class TestCompleteCell:
+    """``_complete_cell`` — the zero-vector completion ``adapt_input`` applies."""
+
+    @pytest.mark.parametrize(
+        "cell",
+        [
+            torch.diag(torch.tensor([3.0, 4.0, 0.0])),  # 2D
+            torch.tensor([[0.0] * 3, [1.0, 2.0, 0.5], [0.0] * 3]),  # 1D, tilted
+            torch.diag(torch.tensor([0.0, 0.0, 7.0])),  # 1D along z
+            torch.zeros(3, 3),  # molecule
+        ],
+    )
+    def test_matches_ase_up_to_orientation(self, cell):
+        """Same kept vectors, orthonormal right-handed fill-ins, like ASE."""
+        from ase.geometry import complete_cell
+
+        out = _complete_cell(cell[None])[0]
+        ref = torch.tensor(complete_cell(cell.numpy()), dtype=cell.dtype)
+        kept = cell.any(dim=-1)
+        torch.testing.assert_close(out[kept], cell[kept])
+        # The added vectors span the same subspace as ASE's (orthogonal
+        # complement of the kept ones) and are unit length.
+        added = out[~kept]
+        torch.testing.assert_close(added.norm(dim=-1), torch.ones(len(added)))
+        proj = added @ ref[~kept].T
+        torch.testing.assert_close(
+            proj @ proj.T, torch.eye(len(added)), atol=1e-6, rtol=0
+        )
+        assert torch.linalg.det(out) > 0
+
+    def test_full_cell_unchanged_and_batched(self):
+        cells = torch.stack(
+            [TestFoldIntoCell._CELL, torch.diag(torch.tensor([3.0, 4.0, 0.0]))]
+        )
+        out = _complete_cell(cells)
+        torch.testing.assert_close(out[0], cells[0])
+        torch.testing.assert_close(out[1], torch.diag(torch.tensor([3.0, 4.0, 1.0])))
+
+
 class TestFoldIntoCell:
     """``_fold_into_cell`` — the lattice fold ``adapt_input`` applies."""
 
@@ -415,6 +455,46 @@ class TestFoldIntoCell:
         out = _fold_into_cell(pos, cells, pbc, torch.tensor([0, 1]))
         expected = torch.tensor([[1.0, 3.0, 0.0], [13.0, 3.0, 9.0]])
         torch.testing.assert_close(out, expected)
+
+    @pytest.mark.parametrize(
+        ("cell", "pbc", "pos", "expected"),
+        [
+            # 2D slab, zero c: folds in-plane, z untouched.
+            (
+                torch.diag(torch.tensor([3.0, 4.0, 0.0])),
+                (True, True, False),
+                [[7.0, -5.0, 13.0]],
+                [[1.0, 3.0, 13.0]],
+            ),
+            # 1D wire along z, zero a and b: folds z only.
+            (
+                torch.diag(torch.tensor([0.0, 0.0, 7.0])),
+                (False, False, True),
+                [[1.0, -2.0, -15.0]],
+                [[1.0, -2.0, 6.0]],
+            ),
+            # 1D wire along a tilted a: folds along a, keeps the orthogonal part.
+            (
+                torch.tensor([[2.0, 2.0, 0.0], [0.0] * 3, [0.0] * 3]),
+                (True, False, False),
+                [[5.5, 7.0, 3.0]],
+                [[-0.5, 1.0, 3.0]],
+            ),
+        ],
+    )
+    def test_adapt_input_folds_low_dimensional_cells(
+        self, mock_omat, cell, pbc, pos, expected
+    ):
+        """Zero lattice vectors are completed, so 1D/2D systems fold along periodic axes."""
+        data = AtomicData(
+            positions=torch.tensor(pos),
+            atomic_numbers=torch.tensor([29]),
+            cell=cell[None],
+            pbc=torch.tensor([pbc]),
+        )
+        fc = mock_omat.adapt_input(data)
+        torch.testing.assert_close(fc.pos, torch.tensor(expected))
+        assert torch.linalg.det(fc.cell).abs().item() > 0
 
     def test_gradient_passes_through_unchanged(self):
         pos = torch.tensor([[9.0, -1.0, 4.0]], requires_grad=True)

@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Standalone diagnostic: NPT-then-SGC full-trajectory dump.
 
 Runs 300 raw NPT steps (equilibration, no MC at all) on a fresh 50/50 Au-Pt
@@ -39,6 +53,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 from run_campaign import (  # noqa: E402
     BAROSTAT_TIME_FS,
     CHECKPOINT,
@@ -58,7 +73,6 @@ from run_campaign import (  # noqa: E402
     _refresh_masses_after_transmutation,
     build_ase_structure,
 )
-from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.integrators.npt import NPT
@@ -88,7 +102,9 @@ def _build_initial_state(
     generator = torch.Generator(device=device).manual_seed(seed)
     numbers = torch.full_like(data.atomic_numbers, SPECIES[0])
     pt_count = round(pt_fraction * n_atoms)
-    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = SPECIES[1]
+    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = (
+        SPECIES[1]
+    )
     data.atomic_numbers = numbers
     data.atomic_masses = None
     data.use_default_masses()
@@ -96,7 +112,8 @@ def _build_initial_state(
         torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
     )
     data.velocities = (
-        torch.randn((n_atoms, 3), device=device, generator=generator) * velocity_std[:, None]
+        torch.randn((n_atoms, 3), device=device, generator=generator)
+        * velocity_std[:, None]
     )
     data.velocities -= data.velocities.mean(dim=0, keepdim=True)
     data.forces = torch.zeros_like(data.positions)
@@ -118,14 +135,26 @@ def _save_and_check(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out-dir", type=Path, required=True, help="Root for checkpoints/ under this run")
+    """Run the NPT-then-SGC diagnostic and dump its trajectory."""
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="Root for checkpoints/ under this run",
+    )
     parser.add_argument("--n-atoms", type=int, default=500)
-    parser.add_argument("--pt-fraction", type=float, default=0.50, help="Initial composition (\"50/50\")")
+    parser.add_argument(
+        "--pt-fraction", type=float, default=0.50, help='Initial composition ("50/50")'
+    )
     parser.add_argument("--temperature-k", type=float, default=1400.0)
     parser.add_argument("--n-npt-steps", type=int, default=300)
     parser.add_argument(
-        "--n-sgc-steps", type=int, default=None,
+        "--n-sgc-steps",
+        type=int,
+        default=None,
         help="Default: round(0.2 * n_atoms), matching MC_STEP_FRACTION in run_campaign.py",
     )
     parser.add_argument("--delta-mu-ref-ev", type=float, default=-2.9662178325653072)
@@ -134,14 +163,20 @@ def main() -> None:
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    n_sgc_steps = args.n_sgc_steps if args.n_sgc_steps is not None else round(0.2 * args.n_atoms)
+    n_sgc_steps = (
+        args.n_sgc_steps if args.n_sgc_steps is not None else round(0.2 * args.n_atoms)
+    )
     pt_atomic_number = SPECIES[1]
 
     checkpoint_dir = args.out_dir / "checkpoints"
     store = FinalStateStore(checkpoint_dir)
 
     template = build_ase_structure(
-        TEMPLATE_SYMBOL, CRYSTAL_STRUCTURE, LATTICE_A_ANG, SIZE_REPEATS[args.n_atoms], cubic=CONVENTIONAL_CELL
+        TEMPLATE_SYMBOL,
+        CRYSTAL_STRUCTURE,
+        LATTICE_A_ANG,
+        SIZE_REPEATS[args.n_atoms],
+        cubic=CONVENTIONAL_CELL,
     )
     if len(template) != args.n_atoms:
         raise ValueError(f"expected {args.n_atoms} atoms, built {len(template)}")
@@ -154,10 +189,15 @@ def main() -> None:
     )
 
     model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=INFERENCE_SETTINGS
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=INFERENCE_SETTINGS,
     )
 
-    data = _build_initial_state(template, args.temperature_k, args.pt_fraction, args.seed, device)
+    data = _build_initial_state(
+        template, args.temperature_k, args.pt_fraction, args.seed, device
+    )
     batch = Batch.from_data_list([data])
     store.save("initial", batch.get_data(0))
 

@@ -198,6 +198,49 @@ class _DerivativeTables:
     stress: bool
 
 
+def _complete_cell(cell: torch.Tensor) -> torch.Tensor:
+    """Replace zero lattice vectors by unit vectors orthogonal to the others.
+
+    Batched, sync-free counterpart of ``ase.geometry.complete_cell`` (what
+    fairchem's ``AtomicData.from_ase`` feeds its graph builder via
+    ``get_cell(complete=True)``): a 2D slab with a zero out-of-plane vector gets
+    the unit normal, a 1D wire with one vector ``a`` gets two unit vectors
+    spanning the plane orthogonal to ``a``, and an all-zero cell becomes the
+    identity. The completed cell is right-handed wherever vectors were added
+    and is returned unchanged for systems with no zero vector.
+
+    Parameters
+    ----------
+    cell : torch.Tensor
+        Row-vector lattice ``[B, 3, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Completed lattice ``[B, 3, 3]``.
+    """
+
+    def unit(v: torch.Tensor) -> torch.Tensor:
+        return v / v.norm(dim=-1, keepdim=True).clamp_min(torch.finfo(v.dtype).tiny)
+
+    def cyclic_normals(c: torch.Tensor) -> torch.Tensor:
+        # Row i is unit(c[i+1] x c[i+2]), i.e. right-handed with the other two.
+        return unit(torch.linalg.cross(c.roll(-1, dims=1), c.roll(-2, dims=1)))
+
+    missing = ~cell.any(dim=-1, keepdim=True)  # [B, 3, 1]
+    n_missing = missing.sum(dim=1, keepdim=True)  # [B, 1, 1]
+    eye = torch.eye(3, dtype=cell.dtype, device=cell.device).expand_as(cell)
+    cell = torch.where(n_missing == 3, eye, cell)
+    # 1D: put a unit vector orthogonal to the lone vector ``a`` in the first
+    # empty slot (crossing ``a`` with its least-aligned axis), leaving one gap.
+    a = cell.sum(dim=1)
+    axis = torch.nn.functional.one_hot(a.abs().argmin(dim=-1), 3).to(cell.dtype)
+    first_gap = missing & (missing.cumsum(dim=1) == 1) & (n_missing == 2)
+    cell = torch.where(first_gap, unit(torch.linalg.cross(a, axis))[:, None], cell)
+    # 1D (second gap) and 2D: the unit normal of the other two vectors.
+    return torch.where(~cell.any(dim=-1, keepdim=True), cyclic_normals(cell), cell)
+
+
 def _fold_into_cell(
     pos: torch.Tensor,
     cell: torch.Tensor,
@@ -1511,9 +1554,11 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         ``data.positions.device``, preserving GPU residency and autograd.
         ``edge_index`` is left empty ``(2, 0)`` so fairchem's ``MLIPPredictUnit``
         rebuilds the graph internally, matching the default ``FAIRChemCalculator``
-        path (``r_edges=False``), so outputs are equivalent. Positions are
-        folded into the periodic cell along periodic directions first, as
-        ``FAIRChemCalculator`` does; ``data.positions`` is not modified.
+        path (``r_edges=False``), so outputs are equivalent. As in
+        ``FAIRChemCalculator``, zero lattice vectors are completed with unit
+        vectors (so 1D and 2D systems have a valid cell) and positions are
+        folded into the cell along periodic directions; ``data.positions`` is
+        not modified.
         Charge/spin default
         per the ASE-calculator convention (per-system LongTensors; spin defaults
         to the closed-shell singlet for OMol, 0 for periodic tasks) unless the
@@ -1561,6 +1606,10 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             cell = torch.zeros(n_systems, 3, 3, dtype=target_dtype, device=device)
         else:
             cell = cell.to(target_dtype)
+        # Zero lattice vectors (1D/2D systems, molecules) would give fairchem's
+        # graph builder a zero volume and make the fold below a no-op; complete
+        # them as fairchem's own ``from_ase`` does.
+        cell = _complete_cell(cell.reshape(n_systems, 3, 3))
 
         pbc = getattr(data, "pbc", None)
         if pbc is None:

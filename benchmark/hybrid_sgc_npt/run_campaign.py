@@ -187,8 +187,8 @@ import json
 import math
 import statistics
 import time
-from datetime import datetime, timezone
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -199,7 +199,10 @@ from ase.build import bulk
 from ase.data import chemical_symbols
 
 from nvalchemi.data import AtomicData, Batch
-from nvalchemi.data.atomic_data import _default_mass_table  # noqa: PLC2701 -- reused for
+from nvalchemi.data.atomic_data import (
+    _default_mass_table,  # noqa: PLC2701 -- reused for
+)
+
 # refresh_masses_after_transmutation, to stay bit-identical with AtomicData.use_default_masses()
 from nvalchemi.dynamics import DynamicsStage
 from nvalchemi.dynamics.integrators.npt import NPT
@@ -229,7 +232,9 @@ TASK = "omat"
 # 1.9x faster per step than the old "batch" preset, same sampled chain -- see
 # "UMA settings for SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md.
 # A key=value spec, which UMAWrapper.from_checkpoint parses into InferenceSettings.
-INFERENCE_SETTINGS = "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
+INFERENCE_SETTINGS = (
+    "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
+)
 # Inductor's pad_mm pass benchmarks real, padded copies of large batched
 # matmul operands while compiling (a ~20 GiB one-shot allocation at wide
 # batches), so a compiled model can OOM during compilation at a batch width
@@ -289,7 +294,9 @@ N_BLOCKS_REFERENCE = 200  # 50 equilibration + 150 production; no parent state.
 N_BLOCKS_CONTINUATION = 100  # 50 equilibration + 50 production; warm-started.
 N_BLOCKS_SCAN_SEED = 200  # Fresh A-rich/B-rich endpoint burn-in; no parent state.
 N_BLOCKS_SCAN_STEP = 100  # Per delta_mu_excess step along a scan branch; warm-started.
-EQUILIBRATION_WINDOW_BLOCKS = 25  # _equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
+EQUILIBRATION_WINDOW_BLOCKS = (
+    25  # _equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
+)
 
 USE_CONTINUATION = True
 
@@ -336,7 +343,9 @@ def _wrap_batch_positions(batch: Batch) -> None:
     if pbc.dim() == 3:
         pbc = pbc.squeeze(1)
     with torch.no_grad():
-        wrap_positions_into_cell(batch.positions, cell, pbc.to(torch.bool), batch.batch_idx)
+        wrap_positions_into_cell(
+            batch.positions, cell, pbc.to(torch.bool), batch.batch_idx
+        )
 
 
 def build_ase_structure(
@@ -348,7 +357,9 @@ def build_ase_structure(
     cubic: bool,
 ) -> Atoms:
     """Build a periodic ASE crystal template for one independent run."""
-    unit_cell = bulk(symbol, crystalstructure=crystal_structure, a=lattice_a, cubic=cubic)
+    unit_cell = bulk(
+        symbol, crystalstructure=crystal_structure, a=lattice_a, cubic=cubic
+    )
     return unit_cell * repeats
 
 
@@ -369,7 +380,9 @@ def _walker(
     numbers = torch.full_like(data.atomic_numbers, SPECIES[0])
     pt_fraction = float(run.metadata.get("pt_fraction", PT_FRACTION))
     pt_count = round(pt_fraction * n_atoms)
-    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = SPECIES[1]
+    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = (
+        SPECIES[1]
+    )
     data.atomic_numbers = numbers
     data.atomic_masses = None
     data.use_default_masses()
@@ -377,7 +390,8 @@ def _walker(
         torch.as_tensor(KB_EV * run.temperature_k, device=device) / data.atomic_masses
     )
     data.velocities = (
-        torch.randn((n_atoms, 3), device=device, generator=generator) * velocity_std[:, None]
+        torch.randn((n_atoms, 3), device=device, generator=generator)
+        * velocity_std[:, None]
     )
     data.velocities -= data.velocities.mean(dim=0, keepdim=True)
     data.forces = torch.zeros_like(data.positions)
@@ -427,7 +441,9 @@ def make_workload(
     temperatures = torch.tensor([run.temperature_k for run in runs], device=device)
     pressures = torch.tensor([run.pressure_ev_per_a3 for run in runs], device=device)
     chemical_potentials = {
-        number: torch.tensor([run.chemical_potentials_ev[number] for run in runs], device=device)
+        number: torch.tensor(
+            [run.chemical_potentials_ev[number] for run in runs], device=device
+        )
         for number in species
     }
     mc_steps = max(1, round(mc_step_fraction * len(template)))
@@ -449,7 +465,11 @@ def make_workload(
         hooks=_npt_wrap_hooks(),
     )
     hybrid = HybridMCMD(
-        mc=sgc, md=npt, mc_steps=mc_steps, md_steps=md_steps_per_block, mc_energy_only=MC_ENERGY_ONLY,
+        mc=sgc,
+        md=npt,
+        mc_steps=mc_steps,
+        md_steps=md_steps_per_block,
+        mc_energy_only=MC_ENERGY_ONLY,
     )
     batch = _make_batch(template, runs, parent_states, device)
     _wrap_batch_positions(batch)
@@ -481,7 +501,11 @@ def _build_campaign(n_atoms: int, reference_runs: tuple[RunSpec, ...]) -> Campai
             name=f"aupt_{n_atoms}atoms_cooling",
         )
     runs = tuple(
-        replace(reference, run_id=f"{reference.run_id}.T{temperature:g}", temperature_k=temperature)
+        replace(
+            reference,
+            run_id=f"{reference.run_id}.T{temperature:g}",
+            temperature_k=temperature,
+        )
         for reference in reference_runs
         for temperature in TEMPERATURES_K
     )
@@ -489,7 +513,10 @@ def _build_campaign(n_atoms: int, reference_runs: tuple[RunSpec, ...]) -> Campai
 
 
 def _endpoint_ladder(
-    seed_value: float, min_step_ev: float, refine_ratio: float = 0.5, overshoot_ev: float = 0.0
+    seed_value: float,
+    min_step_ev: float,
+    refine_ratio: float = 0.5,
+    overshoot_ev: float = 0.0,
 ) -> tuple[float, ...]:
     """Values from ``seed_value`` in toward (and including) 0.0, NON-UNIFORMLY
     spaced -- the per-branch delta_mu_excess ladder for
@@ -605,8 +632,12 @@ def _build_delta_mu_scan_schedule(
     if missing:
         raise ValueError(f"delta_mu_ref_by_t has no entry for {sorted(missing)!r}")
 
-    ladder_a_excess = _endpoint_ladder(-bracket_ev, min_step_ev, refine_ratio, overshoot_ev)
-    ladder_b_excess = _endpoint_ladder(bracket_ev, min_step_ev, refine_ratio, overshoot_ev)
+    ladder_a_excess = _endpoint_ladder(
+        -bracket_ev, min_step_ev, refine_ratio, overshoot_ev
+    )
+    ladder_b_excess = _endpoint_ladder(
+        bracket_ev, min_step_ev, refine_ratio, overshoot_ev
+    )
 
     runs: list[RunSpec] = []
     endpoints: list[RunSpec] = []
@@ -656,14 +687,18 @@ def _build_delta_mu_scan_schedule(
         # within-temperature delta_mu ladder and the cross-temperature
         # endpoint chain) resolves inside the same combined run set.
         runs.extend(
-            CampaignSpec.delta_mu_scan_runs((seed_a, seed_b), (ladder_a, ladder_b), SPECIES[1])
+            CampaignSpec.delta_mu_scan_runs(
+                (seed_a, seed_b), (ladder_a, ladder_b), SPECIES[1]
+            )
         )
         endpoints.extend((seed_a, seed_b))
         if not independent_temperatures:
             # Chains to the SEED, not the last ladder child (see docstring above).
             parent_a, parent_b = seed_a.run_id, seed_b.run_id
 
-    campaign = CampaignSpec(runs=tuple(runs), name=f"aupt_{n_atoms}atoms_deltamu_scan_schedule")
+    campaign = CampaignSpec(
+        runs=tuple(runs), name=f"aupt_{n_atoms}atoms_deltamu_scan_schedule"
+    )
     return campaign, tuple(endpoints)
 
 
@@ -680,15 +715,22 @@ def _build_pure_element_template(symbol: str, n_atoms: int) -> Atoms:
     ``compute_reference_energies`` below for the physical rationale.
     """
     repeats = SIZE_REPEATS[n_atoms]
-    unit_cell = bulk(symbol, crystalstructure=CRYSTAL_STRUCTURE, cubic=CONVENTIONAL_CELL)
+    unit_cell = bulk(
+        symbol, crystalstructure=CRYSTAL_STRUCTURE, cubic=CONVENTIONAL_CELL
+    )
     template = unit_cell * repeats
     if len(template) != n_atoms:
-        raise ValueError(f"expected {n_atoms} atoms for pure {symbol}, repeats={repeats} built {len(template)}")
+        raise ValueError(
+            f"expected {n_atoms} atoms for pure {symbol}, repeats={repeats} built {len(template)}"
+        )
     return template
 
 
 def _pure_element_endpoint(
-    template: Atoms, temperature_k: float, velocity_seed: int, device: torch.device,
+    template: Atoms,
+    temperature_k: float,
+    velocity_seed: int,
+    device: torch.device,
 ) -> AtomicData:
     """One pure-element ``AtomicData`` with a Maxwell-Boltzmann velocity draw
     at ``temperature_k``. Adapted from reference_energy_calibration.py."""
@@ -697,8 +739,12 @@ def _pure_element_endpoint(
     data.atomic_masses = None
     data.use_default_masses()
     generator = torch.Generator(device=device).manual_seed(velocity_seed)
-    velocity_std = torch.sqrt(torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses)
-    data.velocities = torch.randn((n, 3), device=device, generator=generator) * velocity_std[:, None]
+    velocity_std = torch.sqrt(
+        torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
+    )
+    data.velocities = (
+        torch.randn((n, 3), device=device, generator=generator) * velocity_std[:, None]
+    )
     data.velocities -= data.velocities.mean(dim=0, keepdim=True)
     data.forces = torch.zeros_like(data.positions)
     data.energy = torch.zeros(1, 1, device=device)
@@ -747,10 +793,13 @@ def compute_reference_energies(
         raise ValueError("at least one temperature is required")
     symbols = [chemical_symbols[z] for z in SPECIES]
     templates = {
-        number: _build_pure_element_template(symbol, n_atoms) for number, symbol in zip(SPECIES, symbols)
+        number: _build_pure_element_template(symbol, n_atoms)
+        for number, symbol in zip(SPECIES, symbols)
     }
 
-    graph_index: list[tuple[int, float]] = [(number, t) for number in SPECIES for t in temperatures]
+    graph_index: list[tuple[int, float]] = [
+        (number, t) for number in SPECIES for t in temperatures
+    ]
     data_list = [
         _pure_element_endpoint(templates[number], t, velocity_seed + i, device)
         for i, (number, t) in enumerate(graph_index)
@@ -799,14 +848,17 @@ def compute_reference_energies(
         volume_gate = _equilibration_gate(volume_per_atom_series[i][1:], window)
         resolved = (
             bool(energy_gate.get("resolved")) and bool(volume_gate.get("resolved"))
-            if energy_gate.get("resolved") is not None and volume_gate.get("resolved") is not None
+            if energy_gate.get("resolved") is not None
+            and volume_gate.get("resolved") is not None
             else None
         )
         tail = min(window, len(energy_per_atom_series[i]))
         mean_energy = statistics.fmean(energy_per_atom_series[i][-tail:])
         mean_volume = statistics.fmean(volume_per_atom_series[i][-tail:])
         se_energy = (
-            statistics.pstdev(energy_per_atom_series[i][-tail:]) / (tail**0.5) if tail > 1 else float("nan")
+            statistics.pstdev(energy_per_atom_series[i][-tail:]) / (tail**0.5)
+            if tail > 1
+            else float("nan")
         )
         lattice_a = (mean_volume * n_atoms) ** (1 / 3) / n_rep
         reference.setdefault(f"{t:g}", {})[symbol] = {
@@ -816,13 +868,21 @@ def compute_reference_energies(
             "volume_A3_per_atom": mean_volume,
             "lattice_constant_a_ang": lattice_a,
             "averaging_window_blocks": tail,
-            "equilibration_gate": {"energy": energy_gate, "volume": volume_gate, "resolved": resolved},
+            "equilibration_gate": {
+                "energy": energy_gate,
+                "volume": volume_gate,
+                "resolved": resolved,
+            },
         }
 
     s0, s1 = symbols
     for t_entry in reference.values():
-        t_entry["delta_mu_ref_eV"] = t_entry[s1]["energy_eV_per_atom"] - t_entry[s0]["energy_eV_per_atom"]
-        t_entry["delta_mu_ref_definition"] = f"mu({s1}) - mu({s0}), per PHASE_DIAGRAM_MANUAL.md section 6.2"
+        t_entry["delta_mu_ref_eV"] = (
+            t_entry[s1]["energy_eV_per_atom"] - t_entry[s0]["energy_eV_per_atom"]
+        )
+        t_entry["delta_mu_ref_definition"] = (
+            f"mu({s1}) - mu({s0}), per PHASE_DIAGRAM_MANUAL.md section 6.2"
+        )
 
     return {
         "checkpoint": CHECKPOINT,
@@ -841,7 +901,11 @@ def compute_reference_energies(
 
 
 def _load_available_delta_mu_ref(
-    reference_path: Path | None, temperatures_k: Sequence[float], symbols: list[str], *, allow_unresolved: bool,
+    reference_path: Path | None,
+    temperatures_k: Sequence[float],
+    symbols: list[str],
+    *,
+    allow_unresolved: bool,
 ) -> tuple[dict[float, float], tuple[float, ...]]:
     """Like ``_load_delta_mu_ref``, but tolerant of a MISSING temperature:
     returns whatever calibrated ``delta_mu_ref_eV`` values ARE already in
@@ -877,8 +941,13 @@ def _load_available_delta_mu_ref(
                 f"{reference_path}'s T={t:g} K entry has no delta_mu_ref_eV "
                 "(only written for the 2-species case)"
             )
-        gate_status = {symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols}
-        if not allow_unresolved and not all(status is True for status in gate_status.values()):
+        gate_status = {
+            symbol: entry[symbol]["equilibration_gate"]["resolved"]
+            for symbol in symbols
+        }
+        if not allow_unresolved and not all(
+            status is True for status in gate_status.values()
+        ):
             raise ValueError(
                 f"T={t:g} K: equilibration_gate.resolved is {gate_status}, not all True -- "
                 "this reference value isn't trustworthy enough to anchor delta_mu on. Pass "
@@ -889,7 +958,11 @@ def _load_available_delta_mu_ref(
 
 
 def _load_delta_mu_ref(
-    reference_path: Path, temperatures_k: Sequence[float], symbols: list[str], *, allow_unresolved: bool,
+    reference_path: Path,
+    temperatures_k: Sequence[float],
+    symbols: list[str],
+    *,
+    allow_unresolved: bool,
 ) -> dict[float, float]:
     """delta_mu_ref_eV per requested temperature, from
     reference_energy_calibration.py's reference_energies.json (this file's
@@ -923,9 +996,12 @@ def _load_delta_mu_ref(
                 "(only written for the 2-species case)"
             )
         gate_status = {
-            symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols
+            symbol: entry[symbol]["equilibration_gate"]["resolved"]
+            for symbol in symbols
         }
-        if not allow_unresolved and not all(status is True for status in gate_status.values()):
+        if not allow_unresolved and not all(
+            status is True for status in gate_status.values()
+        ):
             raise ValueError(
                 f"T={t:g} K: equilibration_gate.resolved is {gate_status}, not all True -- "
                 "this reference value isn't trustworthy enough to anchor delta_mu on. Pass "
@@ -936,7 +1012,8 @@ def _load_delta_mu_ref(
 
 
 def _apply_calibrated_delta_mu(
-    campaign: CampaignSpec, delta_mu_ref_by_t: dict[float, float],
+    campaign: CampaignSpec,
+    delta_mu_ref_by_t: dict[float, float],
 ) -> CampaignSpec:
     """Replace every run's literal chemical_potentials_ev with
     {Au: 0.0, Pt: delta_mu_ref_by_t[T] + delta_mu_excess}, using each run's
@@ -955,7 +1032,8 @@ def _apply_calibrated_delta_mu(
             run,
             chemical_potentials_ev={
                 SPECIES[0]: 0.0,
-                SPECIES[1]: delta_mu_ref_by_t[run.temperature_k] + float(run.metadata["delta_mu_ev"]),
+                SPECIES[1]: delta_mu_ref_by_t[run.temperature_k]
+                + float(run.metadata["delta_mu_ev"]),
             },
         )
         for run in campaign.runs
@@ -977,7 +1055,15 @@ def profile_workload(
         replace(reference_runs[index % len(reference_runs)], run_id=f"profile.{index}")
         for index in range(width)
     )
-    return make_workload(model, template, runs, (None,) * width, device, md_steps_per_block, mc_step_fraction)
+    return make_workload(
+        model,
+        template,
+        runs,
+        (None,) * width,
+        device,
+        md_steps_per_block,
+        mc_step_fraction,
+    )
 
 
 def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> None:
@@ -1034,7 +1120,13 @@ def select_batch_width(
     )
     measurements = planner.profile(
         lambda width, dev: profile_workload(
-            model, template, reference_runs, width, dev, md_steps_per_block, mc_step_fraction
+            model,
+            template,
+            reference_runs,
+            width,
+            dev,
+            md_steps_per_block,
+            mc_step_fraction,
         ),
         BATCH_WIDTH_CANDIDATES[n_atoms],
         device=device,
@@ -1043,7 +1135,8 @@ def select_batch_width(
     )
     _verify_memory_floor(measurements, n_atoms)
     width = planner.recommend_width(
-        measurements, total_memory_bytes=torch.cuda.get_device_properties(device).total_memory
+        measurements,
+        total_memory_bytes=torch.cuda.get_device_properties(device).total_memory,
     )
     print(f"[batch-width] n_atoms={n_atoms} selected width={width} from {measurements}")
     if n_atoms == 500 and not 7 <= width <= 13:
@@ -1083,7 +1176,9 @@ def _equilibration_gate(series: list[float], window: int) -> dict:
     combined_se = (se_a**2 + se_b**2) ** 0.5
     difference = mean_b - mean_a
     return {
-        "resolved": bool(abs(difference) < 2 * combined_se) if combined_se > 0 else None,
+        "resolved": bool(abs(difference) < 2 * combined_se)
+        if combined_se > 0
+        else None,
         "window_blocks": window,
         "mean_penultimate_window": mean_a,
         "mean_last_window": mean_b,
@@ -1121,7 +1216,11 @@ def _refresh_masses_after_transmutation(batch: Batch) -> None:
 
 
 def _run_hybrid_with_observables(
-    hybrid: HybridMCMD, batch: Batch, n_blocks: int, n_graphs: int, pt_number: int,
+    hybrid: HybridMCMD,
+    batch: Batch,
+    n_blocks: int,
+    n_graphs: int,
+    pt_number: int,
 ) -> tuple[Batch, list[list[float]], list[list[float]]]:
     """Run n_blocks hybrid MC-MD blocks, recording each block's per-graph Pt
     fraction and energy/atom -- the observable series _equilibration_gate
@@ -1159,7 +1258,9 @@ def _run_hybrid_with_observables(
         for block_index in range(n_blocks):
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
-            hybrid.run_mc_block(batch)  # not hybrid.mc.run: that would bypass mc_energy_only
+            hybrid.run_mc_block(
+                batch
+            )  # not hybrid.mc.run: that would bypass mc_energy_only
             hybrid.md.compute(batch)
             hybrid.md.run(batch, n_steps=hybrid.md_steps)
             hybrid.mc.synchronize(batch)
@@ -1236,23 +1337,43 @@ def _run_campaign(
         pt_number = SPECIES[1]
         while ready := scheduler.ready_batches(batch_width):
             for runs in ready:
-                n_blocks = n_blocks_root if runs[0].parent_id is None else n_blocks_continuation
-                parents = tuple(scheduler.parent_state(run, device=device) for run in runs)
+                n_blocks = (
+                    n_blocks_root
+                    if runs[0].parent_id is None
+                    else n_blocks_continuation
+                )
+                parents = tuple(
+                    scheduler.parent_state(run, device=device) for run in runs
+                )
                 hybrid, batch = make_workload(
-                    model, template, runs, parents, device, md_steps_per_block, mc_step_fraction
+                    model,
+                    template,
+                    runs,
+                    parents,
+                    device,
+                    md_steps_per_block,
+                    mc_step_fraction,
                 )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                     torch.cuda.reset_peak_memory_stats(device)
                 start = time.perf_counter()
-                result, pt_fraction_series, energy_per_atom_series = _run_hybrid_with_observables(
-                    hybrid, batch, n_blocks, len(runs), pt_number,
+                result, pt_fraction_series, energy_per_atom_series = (
+                    _run_hybrid_with_observables(
+                        hybrid,
+                        batch,
+                        n_blocks,
+                        len(runs),
+                        pt_number,
+                    )
                 )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                 elapsed = time.perf_counter() - start
                 if device.type == "cuda":
-                    peak_allocated_gb = torch.cuda.max_memory_allocated(device) / 1024**3
+                    peak_allocated_gb = (
+                        torch.cuda.max_memory_allocated(device) / 1024**3
+                    )
                     peak_reserved_gb = torch.cuda.max_memory_reserved(device) / 1024**3
                 else:
                     peak_allocated_gb = 0.0
@@ -1261,26 +1382,41 @@ def _run_campaign(
                 acceptance = hybrid.mc.stats.acceptance
                 atoms_per_walker = result.num_nodes // len(runs)
                 unresolved_run_ids = []
-                for graph_index, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
+                for graph_index, (run, final_state) in enumerate(
+                    zip(runs, result.to_data_list())
+                ):
                     scheduler.complete(run.run_id, final_state)
-                    composition_series = [block[graph_index] for block in pt_fraction_series]
-                    energy_series = [block[graph_index] for block in energy_per_atom_series]
-                    composition_gate = _equilibration_gate(composition_series, EQUILIBRATION_WINDOW_BLOCKS)
-                    energy_gate = _equilibration_gate(energy_series, EQUILIBRATION_WINDOW_BLOCKS)
+                    composition_series = [
+                        block[graph_index] for block in pt_fraction_series
+                    ]
+                    energy_series = [
+                        block[graph_index] for block in energy_per_atom_series
+                    ]
+                    composition_gate = _equilibration_gate(
+                        composition_series, EQUILIBRATION_WINDOW_BLOCKS
+                    )
+                    energy_gate = _equilibration_gate(
+                        energy_series, EQUILIBRATION_WINDOW_BLOCKS
+                    )
                     resolved = (
-                        bool(composition_gate.get("resolved")) and bool(energy_gate.get("resolved"))
-                        if composition_gate.get("resolved") is not None and energy_gate.get("resolved") is not None
+                        bool(composition_gate.get("resolved"))
+                        and bool(energy_gate.get("resolved"))
+                        if composition_gate.get("resolved") is not None
+                        and energy_gate.get("resolved") is not None
                         else None
                     )
                     if resolved is not True:
                         unresolved_run_ids.append(run.run_id)
-                    (scheduler.state_store.root / f"{run.run_id}.equilibration.json").write_text(
+                    (
+                        scheduler.state_store.root / f"{run.run_id}.equilibration.json"
+                    ).write_text(
                         json.dumps(
                             {
                                 "run_id": run.run_id,
                                 "temperature_K": run.temperature_k,
                                 "chemical_potentials_ev": {
-                                    chemical_symbols[z]: run.chemical_potentials_ev[z] for z in SPECIES
+                                    chemical_symbols[z]: run.chemical_potentials_ev[z]
+                                    for z in SPECIES
                                 },
                                 "n_blocks": n_blocks,
                                 "window_blocks": EQUILIBRATION_WINDOW_BLOCKS,
@@ -1341,7 +1477,7 @@ def _batch_means_se(series: list[float], n_batches: int = 5) -> float:
     n = len(series) // n_batches
     if n < 2:
         return float("nan")
-    means = [statistics.fmean(series[i * n:(i + 1) * n]) for i in range(n_batches)]
+    means = [statistics.fmean(series[i * n : (i + 1) * n]) for i in range(n_batches)]
     return statistics.stdev(means) / n_batches**0.5
 
 
@@ -1355,17 +1491,47 @@ class NvalchemiTraceEngine:
     makes the tracer reject the step. A phase's state is the list of its replicas' checkpoint
     run_ids in ``store`` (or, for the starting walkers, one .pt path used by every replica)."""
 
-    def __init__(self, model, template, device, store, md_steps_per_block, mc_step_fraction, n_blocks, label,
-                 log_path, replicas=1, z=2.576, min_jump=0.03):
-        self.model, self.template, self.device, self.store = model, template, device, store
-        self.md_steps, self.mc_fraction, self.n_blocks, self.label = md_steps_per_block, mc_step_fraction, n_blocks, label
-        self.log_path, self.replicas, self.z, self.min_jump = log_path, replicas, z, min_jump
+    def __init__(
+        self,
+        model,
+        template,
+        device,
+        store,
+        md_steps_per_block,
+        mc_step_fraction,
+        n_blocks,
+        label,
+        log_path,
+        replicas=1,
+        z=2.576,
+        min_jump=0.03,
+    ):
+        self.model, self.template, self.device, self.store = (
+            model,
+            template,
+            device,
+            store,
+        )
+        self.md_steps, self.mc_fraction, self.n_blocks, self.label = (
+            md_steps_per_block,
+            mc_step_fraction,
+            n_blocks,
+            label,
+        )
+        self.log_path, self.replicas, self.z, self.min_jump = (
+            log_path,
+            replicas,
+            z,
+            min_jump,
+        )
 
     def _load(self, state: str) -> AtomicData:
         path = Path(state)
         if path.suffix == ".pt" and path.is_file():
             payload = torch.load(path, map_location=self.device, weights_only=True)
-            return AtomicData.model_validate(payload["state"] if "state" in payload else payload).to(self.device)
+            return AtomicData.model_validate(
+                payload["state"] if "state" in payload else payload
+            ).to(self.device)
         return self.store.load(state, device=self.device)
 
     def _states(self, state) -> list[str]:
@@ -1373,19 +1539,34 @@ class NvalchemiTraceEngine:
         if len(states) == 1:
             states = states * self.replicas
         if len(states) != self.replicas:
-            raise ValueError(f"expected {self.replicas} replica states, got {len(states)} (was --trace-replicas changed "
-                             "mid-trace? keep it fixed for one trace.json)")
+            raise ValueError(
+                f"expected {self.replicas} replica states, got {len(states)} (was --trace-replicas changed "
+                "mid-trace? keep it fixed for one trace.json)"
+            )
         return states
 
     def _observe(self, xs: list[float], es: list[float]) -> dict:
         gx = _equilibration_gate(xs, EQUILIBRATION_WINDOW_BLOCKS)
         ge = _equilibration_gate(es, EQUILIBRATION_WINDOW_BLOCKS)
-        tail_x, tail_e = xs[-2 * EQUILIBRATION_WINDOW_BLOCKS:], es[-2 * EQUILIBRATION_WINDOW_BLOCKS:]
+        tail_x, tail_e = (
+            xs[-2 * EQUILIBRATION_WINDOW_BLOCKS :],
+            es[-2 * EQUILIBRATION_WINDOW_BLOCKS :],
+        )
         return dict(
-            x=gx.get("mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])),
-            x_se=max(_batch_means_se(tail_x), (gx.get("combined_standard_error") or 0) / 2**0.5),
-            E=ge.get("mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])),
-            E_se=max(_batch_means_se(tail_e), (ge.get("combined_standard_error") or 0) / 2**0.5),
+            x=gx.get(
+                "mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])
+            ),
+            x_se=max(
+                _batch_means_se(tail_x),
+                (gx.get("combined_standard_error") or 0) / 2**0.5,
+            ),
+            E=ge.get(
+                "mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])
+            ),
+            E_se=max(
+                _batch_means_se(tail_e),
+                (ge.get("combined_standard_error") or 0) / 2**0.5,
+            ),
             drift=gx.get("difference", 0.0),
             resolved=bool(gx.get("resolved")) and bool(ge.get("resolved")),
         )
@@ -1396,12 +1577,18 @@ class NvalchemiTraceEngine:
         within = math.sqrt(sum(r["x_se"] ** 2 for r in reps)) / n
         between = statistics.stdev(xs) / math.sqrt(n) if n > 1 else 0.0
         e_within = math.sqrt(sum(r["E_se"] ** 2 for r in reps)) / n
-        e_between = statistics.stdev([r["E"] for r in reps]) / math.sqrt(n) if n > 1 else 0.0
+        e_between = (
+            statistics.stdev([r["E"] for r in reps]) / math.sqrt(n) if n > 1 else 0.0
+        )
         spread = max(xs) - min(xs)
-        split_tol = max(self.z * math.sqrt(2) * max(r["x_se"] for r in reps), self.min_jump)
+        split_tol = max(
+            self.z * math.sqrt(2) * max(r["x_se"] for r in reps), self.min_jump
+        )
         return dict(
-            x=statistics.fmean(xs), x_se=max(within, between),
-            E=statistics.fmean(r["E"] for r in reps), E_se=max(e_within, e_between),
+            x=statistics.fmean(xs),
+            x_se=max(within, between),
+            E=statistics.fmean(r["E"] for r in reps),
+            E_se=max(e_within, e_between),
             drift=statistics.fmean(r["drift"] for r in reps),
             resolved=all(r["resolved"] for r in reps),
             x_replicas=[round(v, 5) for v in xs],
@@ -1409,31 +1596,53 @@ class NvalchemiTraceEngine:
         )
 
     def run(self, T, mu, state_a, state_g, tag=""):
+        """Equilibrate both phases at ``(T, mu)`` and return their observables and final states."""
         tag = f"{self.label}.{tag}".replace("+", "")
         phases = ("alpha", "gamma")
         runs = tuple(
             RunSpec(
-                run_id=f"{tag}.{phase}.r{k}", temperature_k=float(T), pressure_ev_per_a3=PRESSURE_EV_PER_A3,
-                chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: float(mu)}, species=SPECIES,
-                batch_group="trace", metadata={"phase": phase, "replica": k},
+                run_id=f"{tag}.{phase}.r{k}",
+                temperature_k=float(T),
+                pressure_ev_per_a3=PRESSURE_EV_PER_A3,
+                chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: float(mu)},
+                species=SPECIES,
+                batch_group="trace",
+                metadata={"phase": phase, "replica": k},
             )
-            for phase in phases for k in range(self.replicas)
+            for phase in phases
+            for k in range(self.replicas)
         )
-        parents = tuple(self._load(st) for st in self._states(state_a) + self._states(state_g))
+        parents = tuple(
+            self._load(st) for st in self._states(state_a) + self._states(state_g)
+        )
         width = len(runs)
-        hybrid, batch = make_workload(self.model, self.template, runs, parents, self.device, self.md_steps, self.mc_fraction)
+        hybrid, batch = make_workload(
+            self.model,
+            self.template,
+            runs,
+            parents,
+            self.device,
+            self.md_steps,
+            self.mc_fraction,
+        )
         start = time.perf_counter()
-        result, x_series, e_series = _run_hybrid_with_observables(hybrid, batch, self.n_blocks, width, SPECIES[1])
+        result, x_series, e_series = _run_hybrid_with_observables(
+            hybrid, batch, self.n_blocks, width, SPECIES[1]
+        )
         elapsed = time.perf_counter() - start
         acceptance = hybrid.mc.stats.acceptance
         per_run = []
         for i, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
             self.store.save(run.run_id, final_state)
-            per_run.append(self._observe([b[i] for b in x_series], [b[i] for b in e_series]))
+            per_run.append(
+                self._observe([b[i] for b in x_series], [b[i] for b in e_series])
+            )
         obs, new_states = {}, {}
         for j, phase in enumerate(phases):
             sl = slice(j * self.replicas, (j + 1) * self.replicas)
-            obs[phase] = self._combine(per_run[sl]) | dict(acceptance=acceptance, wall_seconds=elapsed, width=width)
+            obs[phase] = self._combine(per_run[sl]) | dict(
+                acceptance=acceptance, wall_seconds=elapsed, width=width
+            )
             new_states[phase] = [r.run_id for r in runs[sl]]
         # Each workload enters a fresh CUDA stream (BaseDynamics.__enter__), stranding the previous
         # stream's cached blocks; release them so reserved memory stays at one run's footprint.
@@ -1442,14 +1651,24 @@ class NvalchemiTraceEngine:
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
         with self.log_path.open("a") as fh:
-            fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])) + "\n")
+            fh.write(
+                json.dumps(
+                    dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])
+                )
+                + "\n"
+            )
         a, g = obs["alpha"], obs["gamma"]
-        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
-              f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={acceptance:.3f} width={width} {elapsed:.0f}s", flush=True)
+        print(
+            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
+            f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={acceptance:.3f} width={width} {elapsed:.0f}s",
+            flush=True,
+        )
         return a, g, new_states["alpha"], new_states["gamma"]
 
 
-def _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir) -> None:
+def _run_trace(
+    args, model, template, device, md_steps_per_block, checkpoint_dir
+) -> None:
     """--mode trace-boundary: integrate eq. (29) from one coexistence point (resumable)."""
     from boundary_tracer import BoundaryTracer, TraceConfig
 
@@ -1457,23 +1676,43 @@ def _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir
     trace_dir.mkdir(parents=True, exist_ok=True)
     store = FinalStateStore(trace_dir / "states")
     cfg = TraceConfig(
-        t0=args.trace_t0, mu0=args.trace_mu0, mu0_se=args.trace_mu0_se, t_stop=args.trace_t_stop,
-        dt=args.trace_dt, dt_min=args.trace_dt_min, dt_max=args.trace_dt_max,
-        tol_mu=args.trace_tol_mu, min_gap=args.trace_min_gap,
+        t0=args.trace_t0,
+        mu0=args.trace_mu0,
+        mu0_se=args.trace_mu0_se,
+        t_stop=args.trace_t_stop,
+        dt=args.trace_dt,
+        dt_min=args.trace_dt_min,
+        dt_max=args.trace_dt_max,
+        tol_mu=args.trace_tol_mu,
+        min_gap=args.trace_min_gap,
     )
     engine = NvalchemiTraceEngine(
-        model, template, device, store, md_steps_per_block, args.mc_step_fraction, args.trace_n_blocks,
-        args.trace_label, trace_dir / "runs.jsonl", replicas=args.trace_replicas,
+        model,
+        template,
+        device,
+        store,
+        md_steps_per_block,
+        args.mc_step_fraction,
+        args.trace_n_blocks,
+        args.trace_label,
+        trace_dir / "runs.jsonl",
+        replicas=args.trace_replicas,
     )
-    print(f"[trace] {args.trace_label}: T {cfg.t0:g} -> {cfg.t_stop:g} K from dmu={cfg.mu0:.5f} eV, "
-          f"{args.trace_n_blocks} blocks/run, md_steps_per_block={md_steps_per_block}, "
-          f"mc_step_fraction={args.mc_step_fraction}, replicas/phase={args.trace_replicas} "
-          f"(batch width {2 * args.trace_replicas}), inference_settings={args.inference_settings!r}, "
-          f"mc_energy_only={MC_ENERGY_ONLY}; trace file {trace_dir / 'trace.json'}", flush=True)
+    print(
+        f"[trace] {args.trace_label}: T {cfg.t0:g} -> {cfg.t_stop:g} K from dmu={cfg.mu0:.5f} eV, "
+        f"{args.trace_n_blocks} blocks/run, md_steps_per_block={md_steps_per_block}, "
+        f"mc_step_fraction={args.mc_step_fraction}, replicas/phase={args.trace_replicas} "
+        f"(batch width {2 * args.trace_replicas}), inference_settings={args.inference_settings!r}, "
+        f"mc_energy_only={MC_ENERGY_ONLY}; trace file {trace_dir / 'trace.json'}",
+        flush=True,
+    )
     result = BoundaryTracer(cfg, engine, trace_dir / "trace.json").run(
         str(args.trace_alpha_state), str(args.trace_gamma_state)
     )
-    print(f"[trace] {result['status']}: {result['stop_reason']} ({len(result['points'])} points)", flush=True)
+    print(
+        f"[trace] {result['status']}: {result['stop_reason']} ({len(result['points'])} points)",
+        flush=True,
+    )
 
 
 def main() -> None:
@@ -1481,23 +1720,34 @@ def main() -> None:
     two-branch delta_mu-scan schedule across one or more temperatures
     (--mode delta-mu-scan), end-to-end."""
     global MC_ENERGY_ONLY  # noqa: PLW0603 -- read by make_workload, which every run path calls
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS))
-    parser.add_argument("--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints"))
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--n-atoms", type=int, required=True, choices=sorted(SIZE_REPEATS)
+    )
+    parser.add_argument(
+        "--checkpoint-root", type=Path, default=Path("hybrid_sgc_npt_checkpoints")
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
-        "--mc-energy-only", action=argparse.BooleanOptionalAction, default=MC_ENERGY_ONLY,
+        "--mc-energy-only",
+        action=argparse.BooleanOptionalAction,
+        default=MC_ENERGY_ONLY,
         help="Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks keep "
         "full outputs. Exact: each MC block re-evaluates its baseline under the same outputs. "
         "On by default; --no-mc-energy-only restores full outputs in every phase.",
     )
     parser.add_argument(
-        "--inference-settings", default=INFERENCE_SETTINGS,
+        "--inference-settings",
+        default=INFERENCE_SETTINGS,
         help="UMA inference settings: a fairchem preset name or a key=value InferenceSettings "
         "spec. Defaults to the SGC-safe spec in INFERENCE_SETTINGS.",
     )
     parser.add_argument(
-        "--md-steps-per-block", type=int, default=None,
+        "--md-steps-per-block",
+        type=int,
+        default=None,
         help="MD steps per hybrid block for the actual campaign runs (both "
         "--mode cooling and --mode delta-mu-scan) -- NOT the calibration "
         "sub-step (see --calibration-md-steps-per-block for that). Defaults "
@@ -1508,7 +1758,9 @@ def main() -> None:
         "therefore output filenames are otherwise identical).",
     )
     parser.add_argument(
-        "--mc-step-fraction", type=float, default=MC_STEP_FRACTION,
+        "--mc-step-fraction",
+        type=float,
+        default=MC_STEP_FRACTION,
         help=f"MC trials per block = round(fraction * n_atoms); default {MC_STEP_FRACTION} "
         "(100 trials at 500 atoms). Raise it when MC acceptance is so low that a block "
         "accepts well under one move, which is what pins a hybrid MD+MC walker at a pure "
@@ -1528,7 +1780,9 @@ def main() -> None:
         help="Skip auto-profiling and use this batch width instead.",
     )
     parser.add_argument(
-        "--reference-energies-json", type=Path, default=None,
+        "--reference-energies-json",
+        type=Path,
+        default=None,
         help="reference_energy_calibration.py output. Rebuilds every run's "
         "chemical_potentials_ev as {Au: 0.0, Pt: delta_mu_ref_eV(T) + delta_mu_excess} "
         "at each run's own temperature, replacing the literal, uncalibrated DELTA_MU_EV "
@@ -1536,12 +1790,15 @@ def main() -> None:
         "Omit to keep the old literal behavior (a warning is printed).",
     )
     parser.add_argument(
-        "--allow-unresolved-reference", action="store_true",
+        "--allow-unresolved-reference",
+        action="store_true",
         help="Proceed even if a needed temperature's calibration entry has "
         "equilibration_gate.resolved != true. Off by default.",
     )
     parser.add_argument(
-        "--mode", choices=["cooling", "delta-mu-scan", "trace-boundary"], default="cooling",
+        "--mode",
+        choices=["cooling", "delta-mu-scan", "trace-boundary"],
+        default="cooling",
         help="'cooling' (default): the existing 3000->1600 K, fixed-delta_mu "
         "campaign. 'delta-mu-scan': a two-branch (A-rich/B-rich) "
         "delta_mu_excess continuation across one or more "
@@ -1553,7 +1810,10 @@ def main() -> None:
         "calibration' below.",
     )
     parser.add_argument(
-        "--scan-temperatures-k", type=float, nargs="+", default=None,
+        "--scan-temperatures-k",
+        type=float,
+        nargs="+",
+        default=None,
         help="--mode delta-mu-scan only: one or more temperatures, HIGHEST "
         "FIRST. A single value is a from-scratch scan at that temperature; "
         "two or more chain each next (lower) temperature's two endpoints as "
@@ -1564,7 +1824,8 @@ def main() -> None:
         "delta-mu-scan mode.",
     )
     parser.add_argument(
-        "--scan-independent-temperatures", action="store_true",
+        "--scan-independent-temperatures",
+        action="store_true",
         help="--mode delta-mu-scan only: drop cross-temperature continuation "
         "-- every requested temperature's A-rich/B-rich seed pair gets "
         "parent_id=None instead of chaining to the previous temperature's "
@@ -1574,19 +1835,25 @@ def main() -> None:
         "temperature for full generation-1 batch width. Off by default.",
     )
     parser.add_argument(
-        "--delta-mu-excess-bracket-ev", type=float, default=0.2,
+        "--delta-mu-excess-bracket-ev",
+        type=float,
+        default=0.2,
         help="--mode delta-mu-scan only: half-width of the scan -- the seed "
         "endpoints sit at delta_mu_excess = -bracket (A-rich) and +bracket "
         "(B-rich), each marching toward 0.0. Default 0.2 eV.",
     )
     parser.add_argument(
-        "--delta-mu-excess-min-step-ev", type=float, default=0.01,
+        "--delta-mu-excess-min-step-ev",
+        type=float,
+        default=0.01,
         help="--mode delta-mu-scan only: finest (last, closest to 0.0) step "
         "size in each branch's NON-UNIFORM ladder -- see "
         "--delta-mu-excess-refine-ratio. Default 0.01 eV.",
     )
     parser.add_argument(
-        "--delta-mu-excess-refine-ratio", type=float, default=0.5,
+        "--delta-mu-excess-refine-ratio",
+        type=float,
+        default=0.5,
         help="--mode delta-mu-scan only: each new ladder point sits this "
         "fraction of the way from the previous point to 0.0 (default 0.5, "
         "i.e. halving), so steps shrink geometrically approaching the "
@@ -1594,7 +1861,9 @@ def main() -> None:
         "in (0, 1).",
     )
     parser.add_argument(
-        "--delta-mu-excess-overshoot-ev", type=float, default=0.0,
+        "--delta-mu-excess-overshoot-ev",
+        type=float,
+        default=0.0,
         help="--mode delta-mu-scan only: continue each branch PAST delta_mu_excess "
         "= 0.0 by this much (step size doubling away from 0.0), so the A-rich and "
         "B-rich branches share a delta_mu window. Required to see hysteresis and "
@@ -1604,11 +1873,15 @@ def main() -> None:
         "branch per temperature.",
     )
     parser.add_argument(
-        "--n-blocks-scan-seed", type=int, default=N_BLOCKS_SCAN_SEED,
+        "--n-blocks-scan-seed",
+        type=int,
+        default=N_BLOCKS_SCAN_SEED,
         help=f"Blocks for each from-scratch A-rich/B-rich endpoint (default {N_BLOCKS_SCAN_SEED}).",
     )
     parser.add_argument(
-        "--n-blocks-scan-step", type=int, default=N_BLOCKS_SCAN_STEP,
+        "--n-blocks-scan-step",
+        type=int,
+        default=N_BLOCKS_SCAN_STEP,
         help=f"Blocks per warm-started delta_mu step (default {N_BLOCKS_SCAN_STEP}). Raise when runs "
         "near the transition fail the equilibration gate.",
     )
@@ -1618,50 +1891,105 @@ def main() -> None:
         "van de Walle & Asta eq. (29) (boundary_tracer.py, vendored from the sgc-phase-boundary "
         "skill). Two walkers -- one per phase -- run at the same (T, dmu) every step.",
     )
-    trace.add_argument("--trace-t0", type=float, help="starting temperature (K), a known coexistence point")
-    trace.add_argument("--trace-mu0", type=float, help="coexistence dmu = mu_Pt - mu_Au at --trace-t0 (eV)")
-    trace.add_argument("--trace-mu0-se", type=float, default=0.0, help="uncertainty of --trace-mu0 (eV)")
-    trace.add_argument("--trace-t-stop", type=float, help="trace toward this temperature (K), up or down")
-    trace.add_argument("--trace-alpha-state", type=Path,
-                       help="checkpoint .pt of a walker equilibrated in the Au-rich (low-x) phase near --trace-mu0")
-    trace.add_argument("--trace-gamma-state", type=Path,
-                       help="checkpoint .pt of a walker equilibrated in the Pt-rich (high-x) phase near --trace-mu0")
-    trace.add_argument("--trace-label", default="trace", help="names the trace file and its checkpoints")
+    trace.add_argument(
+        "--trace-t0",
+        type=float,
+        help="starting temperature (K), a known coexistence point",
+    )
+    trace.add_argument(
+        "--trace-mu0",
+        type=float,
+        help="coexistence dmu = mu_Pt - mu_Au at --trace-t0 (eV)",
+    )
+    trace.add_argument(
+        "--trace-mu0-se",
+        type=float,
+        default=0.0,
+        help="uncertainty of --trace-mu0 (eV)",
+    )
+    trace.add_argument(
+        "--trace-t-stop",
+        type=float,
+        help="trace toward this temperature (K), up or down",
+    )
+    trace.add_argument(
+        "--trace-alpha-state",
+        type=Path,
+        help="checkpoint .pt of a walker equilibrated in the Au-rich (low-x) phase near --trace-mu0",
+    )
+    trace.add_argument(
+        "--trace-gamma-state",
+        type=Path,
+        help="checkpoint .pt of a walker equilibrated in the Pt-rich (high-x) phase near --trace-mu0",
+    )
+    trace.add_argument(
+        "--trace-label",
+        default="trace",
+        help="names the trace file and its checkpoints",
+    )
     trace.add_argument("--trace-dt", type=float, default=50.0, help="initial |dT| (K)")
     trace.add_argument("--trace-dt-min", type=float, default=5.0)
     trace.add_argument("--trace-dt-max", type=float, default=100.0)
-    trace.add_argument("--trace-n-blocks", type=int, default=200, help="blocks per walker per (T, dmu) run")
-    trace.add_argument("--trace-tol-mu", type=float, default=0.002, help="corrector convergence (eV)")
-    trace.add_argument("--trace-min-gap", type=float, default=0.05, help="stop when x_gamma - x_alpha drops below")
-    trace.add_argument("--trace-replicas", type=int, default=1, choices=(1, 2),
-                       help="independent walkers per phase; batch width = 2 x replicas (GPU_MEMORY_GUIDE.md: 2-4 "
-                            "for the energy-only SGC spec). Keep fixed for one trace.json")
+    trace.add_argument(
+        "--trace-n-blocks",
+        type=int,
+        default=200,
+        help="blocks per walker per (T, dmu) run",
+    )
+    trace.add_argument(
+        "--trace-tol-mu", type=float, default=0.002, help="corrector convergence (eV)"
+    )
+    trace.add_argument(
+        "--trace-min-gap",
+        type=float,
+        default=0.05,
+        help="stop when x_gamma - x_alpha drops below",
+    )
+    trace.add_argument(
+        "--trace-replicas",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help="independent walkers per phase; batch width = 2 x replicas (GPU_MEMORY_GUIDE.md: 2-4 "
+        "for the energy-only SGC spec). Keep fixed for one trace.json",
+    )
     parser.add_argument(
-        "--calibration-n-blocks", type=int, default=100,
+        "--calibration-n-blocks",
+        type=int,
+        default=100,
         help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
         "missing temperature's pure-Au/pure-Pt NPT run. Default 100 (matches "
         "reference_energy_calibration.py's own default).",
     )
     parser.add_argument(
-        "--calibration-md-steps-per-block", type=int, default=None,
+        "--calibration-md-steps-per-block",
+        type=int,
+        default=None,
         help="--mode delta-mu-scan only, auto-calibration: MD steps/block "
         "for the calibration run. Defaults to MD_STEPS_PER_BLOCK (the "
         "alloy's own value).",
     )
     parser.add_argument(
-        "--calibration-equilibration-window-blocks", type=int, default=25,
+        "--calibration-equilibration-window-blocks",
+        type=int,
+        default=25,
         help="--mode delta-mu-scan only, auto-calibration: equilibration-gate "
         "window, PHASE_DIAGRAM_MANUAL.md section 7. Default 25.",
     )
     parser.add_argument(
-        "--calibration-velocity-seed", type=int, default=None,
+        "--calibration-velocity-seed",
+        type=int,
+        default=None,
         help="--mode delta-mu-scan only, auto-calibration: base velocity "
         "seed. Defaults to SEED (the alloy's own base seed).",
     )
     args = parser.parse_args()
     torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
     MC_ENERGY_ONLY = args.mc_energy_only
-    print(f"[hybrid] mc_energy_only={MC_ENERGY_ONLY} inference_settings={args.inference_settings!r}", flush=True)
+    print(
+        f"[hybrid] mc_energy_only={MC_ENERGY_ONLY} inference_settings={args.inference_settings!r}",
+        flush=True,
+    )
 
     device = torch.device(args.device)
     n_atoms = args.n_atoms
@@ -1669,23 +1997,51 @@ def main() -> None:
     checkpoint_dir = args.checkpoint_root / f"atoms{n_atoms}"
     log_path = args.checkpoint_root / f"atoms{n_atoms}_throughput.csv"
 
-    template = build_ase_structure(TEMPLATE_SYMBOL, CRYSTAL_STRUCTURE, LATTICE_A_ANG, repeats, cubic=CONVENTIONAL_CELL)
+    template = build_ase_structure(
+        TEMPLATE_SYMBOL,
+        CRYSTAL_STRUCTURE,
+        LATTICE_A_ANG,
+        repeats,
+        cubic=CONVENTIONAL_CELL,
+    )
     if len(template) != n_atoms:
-        raise ValueError(f"expected {n_atoms} atoms, repeats={repeats} built {len(template)}")
+        raise ValueError(
+            f"expected {n_atoms} atoms, repeats={repeats} built {len(template)}"
+        )
 
     model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=args.inference_settings
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=args.inference_settings,
     )
     md_steps_per_block = (
-        args.md_steps_per_block if args.md_steps_per_block is not None else MD_STEPS_PER_BLOCK
+        args.md_steps_per_block
+        if args.md_steps_per_block is not None
+        else MD_STEPS_PER_BLOCK
     )
-    print(f"[hybrid] md_steps_per_block={md_steps_per_block}" + (" (pure SGC)" if md_steps_per_block == 0 else ""))
+    print(
+        f"[hybrid] md_steps_per_block={md_steps_per_block}"
+        + (" (pure SGC)" if md_steps_per_block == 0 else "")
+    )
 
     if args.mode == "trace-boundary":
-        missing = [f for f in ("trace_t0", "trace_mu0", "trace_t_stop", "trace_alpha_state", "trace_gamma_state")
-                   if getattr(args, f) is None]
+        missing = [
+            f
+            for f in (
+                "trace_t0",
+                "trace_mu0",
+                "trace_t_stop",
+                "trace_alpha_state",
+                "trace_gamma_state",
+            )
+            if getattr(args, f) is None
+        ]
         if missing:
-            parser.error("--mode trace-boundary requires " + ", ".join("--" + m.replace("_", "-") for m in missing))
+            parser.error(
+                "--mode trace-boundary requires "
+                + ", ".join("--" + m.replace("_", "-") for m in missing)
+            )
         _run_trace(args, model, template, device, md_steps_per_block, checkpoint_dir)
         return
 
@@ -1694,7 +2050,9 @@ def main() -> None:
             parser.error("--mode delta-mu-scan requires --scan-temperatures-k")
         symbols = [chemical_symbols[z] for z in SPECIES]
         delta_mu_ref_by_t, missing_temperatures = _load_available_delta_mu_ref(
-            args.reference_energies_json, args.scan_temperatures_k, symbols,
+            args.reference_energies_json,
+            args.scan_temperatures_k,
+            symbols,
             allow_unresolved=args.allow_unresolved_reference,
         )
         if missing_temperatures:
@@ -1704,9 +2062,12 @@ def main() -> None:
                 "same GPU, same model already loaded above)"
             )
             calibration = compute_reference_energies(
-                model, missing_temperatures, n_atoms,
+                model,
+                missing_temperatures,
+                n_atoms,
                 n_blocks=args.calibration_n_blocks,
-                md_steps_per_block=args.calibration_md_steps_per_block or MD_STEPS_PER_BLOCK,
+                md_steps_per_block=args.calibration_md_steps_per_block
+                or MD_STEPS_PER_BLOCK,
                 equilibration_window_blocks=args.calibration_equilibration_window_blocks,
                 velocity_seed=args.calibration_velocity_seed or SEED,
                 device=device,
@@ -1716,8 +2077,13 @@ def main() -> None:
             calibration_path.write_text(json.dumps(calibration, indent=2) + "\n")
             for t in missing_temperatures:
                 entry = calibration["reference"][f"{t:g}"]
-                gate_status = {symbol: entry[symbol]["equilibration_gate"]["resolved"] for symbol in symbols}
-                if not args.allow_unresolved_reference and not all(v is True for v in gate_status.values()):
+                gate_status = {
+                    symbol: entry[symbol]["equilibration_gate"]["resolved"]
+                    for symbol in symbols
+                }
+                if not args.allow_unresolved_reference and not all(
+                    v is True for v in gate_status.values()
+                ):
                     raise SystemExit(
                         f"[calibration] auto-calibration at T={t:g} K did not pass the "
                         f"equilibration gate ({gate_status}) -- rerun with a larger "
@@ -1725,12 +2091,18 @@ def main() -> None:
                         "proceed anyway (not recommended)."
                     )
                 delta_mu_ref_by_t[t] = entry["delta_mu_ref_eV"]
-                print(f"  T={t:g} K: delta_mu_ref = {entry['delta_mu_ref_eV']:.6f} eV (auto-calibrated)")
+                print(
+                    f"  T={t:g} K: delta_mu_ref = {entry['delta_mu_ref_eV']:.6f} eV (auto-calibrated)"
+                )
             print(f"[calibration] wrote {calibration_path}")
         campaign, endpoints = _build_delta_mu_scan_schedule(
-            n_atoms, args.scan_temperatures_k, delta_mu_ref_by_t,
-            args.delta_mu_excess_bracket_ev, args.delta_mu_excess_min_step_ev,
-            args.delta_mu_excess_refine_ratio, args.delta_mu_excess_overshoot_ev,
+            n_atoms,
+            args.scan_temperatures_k,
+            delta_mu_ref_by_t,
+            args.delta_mu_excess_bracket_ev,
+            args.delta_mu_excess_min_step_ev,
+            args.delta_mu_excess_refine_ratio,
+            args.delta_mu_excess_overshoot_ev,
             independent_temperatures=args.scan_independent_temperatures,
         )
         reference_runs = endpoints
@@ -1741,7 +2113,9 @@ def main() -> None:
         if args.reference_energies_json is not None:
             symbols = [chemical_symbols[z] for z in SPECIES]
             delta_mu_ref_by_t = _load_delta_mu_ref(
-                args.reference_energies_json, TEMPERATURES_K, symbols,
+                args.reference_energies_json,
+                TEMPERATURES_K,
+                symbols,
                 allow_unresolved=args.allow_unresolved_reference,
             )
             campaign = _apply_calibrated_delta_mu(campaign, delta_mu_ref_by_t)
@@ -1763,17 +2137,38 @@ def main() -> None:
         batch_width = args.batch_width
     elif device.type == "cuda":
         batch_width = select_batch_width(
-            model, template, reference_runs, n_atoms, device, md_steps_per_block, args.mc_step_fraction
+            model,
+            template,
+            reference_runs,
+            n_atoms,
+            device,
+            md_steps_per_block,
+            args.mc_step_fraction,
         )
     else:
         batch_width = 1
         print("CUDA unavailable; using batch_width=1")
 
-    n_blocks_root = args.n_blocks_scan_seed if args.mode == "delta-mu-scan" else N_BLOCKS_REFERENCE
-    n_blocks_continuation = args.n_blocks_scan_step if args.mode == "delta-mu-scan" else N_BLOCKS_CONTINUATION
+    n_blocks_root = (
+        args.n_blocks_scan_seed if args.mode == "delta-mu-scan" else N_BLOCKS_REFERENCE
+    )
+    n_blocks_continuation = (
+        args.n_blocks_scan_step
+        if args.mode == "delta-mu-scan"
+        else N_BLOCKS_CONTINUATION
+    )
     _run_campaign(
-        model, template, scheduler, campaign, batch_width, device, log_path,
-        n_blocks_root, n_blocks_continuation, md_steps_per_block, args.mc_step_fraction,
+        model,
+        template,
+        scheduler,
+        campaign,
+        batch_width,
+        device,
+        log_path,
+        n_blocks_root,
+        n_blocks_continuation,
+        md_steps_per_block,
+        args.mc_step_fraction,
     )
 
 

@@ -85,12 +85,21 @@ def test_energy_only_mc_blocks_narrow_outputs_and_restore_them_for_md() -> None:
     md.compute = spy("md.compute", md.compute)
     md.run = spy("md.run", md.run)
 
-    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, mc_energy_only=True).run(batch, n_blocks=2)
+    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, mc_energy_only=True).run(
+        batch, n_blocks=2
+    )
 
     energy_only = frozenset({"energy"})
-    assert [name for name, _ in seen if name.startswith("mc")] == ["mc.refresh", "mc.run"] * 2
-    assert all(outputs == energy_only for name, outputs in seen if name.startswith("mc"))
-    assert all(outputs == frozenset(full) for name, outputs in seen if name.startswith("md"))
+    assert [name for name, _ in seen if name.startswith("mc")] == [
+        "mc.refresh",
+        "mc.run",
+    ] * 2
+    assert all(
+        outputs == energy_only for name, outputs in seen if name.startswith("mc")
+    )
+    assert all(
+        outputs == frozenset(full) for name, outputs in seen if name.startswith("md")
+    )
     assert set(model.model_config.active_outputs) == full
     assert batch.atomic_numbers.tolist() == [2]  # the MC move still happened
 
@@ -138,8 +147,13 @@ def test_separate_models_rebaseline_mc_with_its_own_model_every_block() -> None:
 
 def test_shared_model_without_energy_only_keeps_adopting_md_energy() -> None:
     model = DemoModelWrapper(DemoModel())
-    mc = SGC(model=model, temperature=1000.0, species=[1, 2],
-             chemical_potentials={1: 0.0, 2: 1.0e6}, random_seed=4)
+    mc = SGC(
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: 1.0e6},
+        random_seed=4,
+    )
     md = DemoDynamics(model=model, n_steps=None, dt=0.01)
     calls: list[int] = []
     mc.refresh_energy = lambda b: calls.append(1)
@@ -156,8 +170,13 @@ def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
     mc_model = DemoModelWrapper(DemoModel())
     md_model = DemoModelWrapper(DemoModel())
     batch = _one_atom_batch()
-    mc = SGC(model=mc_model, temperature=1000.0, species=[1, 2],
-             chemical_potentials={1: 0.0, 2: 1.0e6}, random_seed=4)
+    mc = SGC(
+        model=mc_model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: 1.0e6},
+        random_seed=4,
+    )
     md = DemoDynamics(model=md_model, n_steps=None, dt=0.01)
     events: list[tuple[str, int]] = []
 
@@ -171,7 +190,9 @@ def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
         return compute(b)
 
     md.compute = spy_compute
-    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, before_md_block=hook).run(batch, n_blocks=2)
+    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, before_md_block=hook).run(
+        batch, n_blocks=2
+    )
 
     names = [name for name, _ in events]
     # initial prepare+compute, then per block: prepare, compute (md.run's own

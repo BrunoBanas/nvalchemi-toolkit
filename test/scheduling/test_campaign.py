@@ -1,12 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Tests for dependency-aware simulation campaigns."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 import torch
-from dataclasses import replace
 
 from nvalchemi.data import AtomicData
 from nvalchemi.scheduling import (
@@ -50,9 +63,9 @@ def test_cooling_campaign_unlocks_one_temperature_at_a_time(tmp_path) -> None:
     assert [run.run_id for run in scheduler.ready()] == ["mu_minus", "mu_plus"]
     assert [len(batch) for batch in scheduler.ready_batches(max_batch_size=2)] == [2]
     waves = scheduler.ready_batch_waves(max_batch_size=2, gpu_ids=[3, 5])
-    assert [(assignment.gpu_id, assignment.wave, len(batch)) for assignment, batch in waves] == [
-        (3, 0, 2)
-    ]
+    assert [
+        (assignment.gpu_id, assignment.wave, len(batch)) for assignment, batch in waves
+    ] == [(3, 0, 2)]
 
     scheduler.complete("mu_minus", _state(1.0))
     assert [run.run_id for run in scheduler.ready()] == [
@@ -64,7 +77,9 @@ def test_cooling_campaign_unlocks_one_temperature_at_a_time(tmp_path) -> None:
     assert parent.positions.tolist() == [[1.0, 0.0, 0.0]]
 
 
-def test_cooling_barrier_waits_for_both_high_temperature_scan_directions(tmp_path) -> None:
+def test_cooling_barrier_waits_for_both_high_temperature_scan_directions(
+    tmp_path,
+) -> None:
     """Cooling can wait until a complete bidirectional reference scan is ready."""
     references = [
         _reference("up_start", -0.1),
@@ -123,7 +138,10 @@ def test_ready_batches_separate_incompatible_methods(tmp_path) -> None:
 
     batches = scheduler.ready_batches(max_batch_size=8)
 
-    assert [[run.run_id for run in batch] for batch in batches] == [["sgc"], ["canonical"]]
+    assert [[run.run_id for run in batch] for batch in batches] == [
+        ["sgc"],
+        ["canonical"],
+    ]
 
 
 def test_campaign_rejects_continuation_cycle() -> None:

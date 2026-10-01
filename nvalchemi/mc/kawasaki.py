@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -27,7 +28,7 @@ from nvalchemiops.torch.neighbors.neighbor_utils import (
 
 from nvalchemi.data import Batch
 from nvalchemi.dynamics.hooks._utils import KB_EV
-from nvalchemi.mc.base import BaseMonteCarlo
+from nvalchemi.mc.base import BaseMonteCarlo, _is_batch
 
 if TYPE_CHECKING:
     from nvalchemi.models.base import BaseModelMixin
@@ -35,7 +36,9 @@ if TYPE_CHECKING:
 __all__ = ["Kawasaki"]
 
 
-def _nearest_neighbor_edges(batch: Batch, cutoff: float) -> tuple[torch.Tensor, torch.Tensor]:
+def _nearest_neighbor_edges(
+    batch: Batch, cutoff: float
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Build a deduplicated, undirected nearest-neighbour pair list.
 
     Uses the same GPU cutoff neighbor-search kernel as
@@ -184,7 +187,7 @@ class Kawasaki(BaseMonteCarlo):
         self._unlike_before: torch.Tensor | None = None
         self._edges: torch.Tensor | None = None
         self._edge_offsets: torch.Tensor | None = None
-        self._graph_batch_id: int | None = None
+        self._graph_batch: weakref.ref[Batch] | None = None
         self._proposal_first: torch.Tensor | None = None
         self._proposal_second: torch.Tensor | None = None
         self._proposal_swapped: torch.Tensor | None = None
@@ -201,11 +204,11 @@ class Kawasaki(BaseMonteCarlo):
         offsets[1:] = torch.cumsum(counts, dim=0)
         self._edges = edges
         self._edge_offsets = offsets
-        self._graph_batch_id = id(batch)
+        self._graph_batch = weakref.ref(batch)
 
     def _ensure_proposal_graph(self, batch: Batch) -> None:
         """Build the proposal graph on first use for a given batch object."""
-        if self._edges is None or self._graph_batch_id != id(batch):
+        if self._edges is None or not _is_batch(self._graph_batch, batch):
             self._build_proposal_graph(batch)
 
     def synchronize(self, batch: Batch) -> None:
@@ -257,7 +260,9 @@ class Kawasaki(BaseMonteCarlo):
             # Rank of the drawn unlike edge among all unlike edges, then the
             # row holding it: the first row whose running total reaches it.
             exclusive = torch.cat((cumulative.new_zeros(1), cumulative[:-1]))
-            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(torch.long)
+            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(
+                torch.long
+            )
             rows = torch.searchsorted(cumulative, ranks + 1)
             # Inactive graphs draw no edge; keep their row in range anyway.
             rows = torch.where(active, rows, starts)

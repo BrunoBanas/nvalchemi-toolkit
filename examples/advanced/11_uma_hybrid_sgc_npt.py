@@ -140,9 +140,7 @@ def _walker(
     numbers = torch.full_like(data.atomic_numbers, 79)
     pt_fraction = float(run.metadata.get("pt_fraction", PT_FRACTION))
     pt_count = round(pt_fraction * n_atoms)
-    numbers[
-        torch.randperm(n_atoms, device=DEVICE, generator=generator)[:pt_count]
-    ] = 78
+    numbers[torch.randperm(n_atoms, device=DEVICE, generator=generator)[:pt_count]] = 78
     data.atomic_numbers = numbers
     data.atomic_masses = None
     data.use_default_masses()
@@ -200,6 +198,7 @@ model = UMAWrapper.from_checkpoint(
 # The same UMA object is deliberately passed to both stages. This is required
 # by ``HybridMCMD`` so every trial energy and MD force is supplied by one model.
 
+
 def make_workload(
     runs: tuple[RunSpec, ...],
     parent_states: tuple[AtomicData | None, ...],
@@ -249,7 +248,9 @@ def make_workload(
     )
 
 
-def _reference_scan(direction: str, delta_mu_values: tuple[float, ...]) -> tuple[RunSpec, ...]:
+def _reference_scan(
+    direction: str, delta_mu_values: tuple[float, ...]
+) -> tuple[RunSpec, ...]:
     """Build one high-temperature delta-mu continuation path."""
     parent_id = None
     endpoint_pt_fraction = 0.02 if direction == "up" else 0.98
@@ -266,7 +267,9 @@ def _reference_scan(direction: str, delta_mu_values: tuple[float, ...]) -> tuple
                 "delta_mu_ev": delta_mu,
                 "direction": direction,
                 "role": "high_temperature_reference",
-                "pt_fraction": endpoint_pt_fraction if parent_id is None else PT_FRACTION,
+                "pt_fraction": endpoint_pt_fraction
+                if parent_id is None
+                else PT_FRACTION,
             },
         )
         runs.append(run)

@@ -347,9 +347,14 @@ always integrates with the current species' mass, whether it runs under
 into the periodic cell before every evaluation, so UMA runs no longer need
 `WrapPeriodicHook` for correctness; the hook is still useful for tidy
 trajectories and for other models whose neighbour lists assume wrapped input.
-Do not combine the MC stage with `FusedStage`:
-alternating MC-MD needs a candidate-energy evaluation and an accepted-state
-force evaluation at different points in each block.
+`FusedStage` (`mc + md`) is not a substitute: it runs MC on some graphs and
+MD on others, selected by `status`, sharing one forward pass per step, whereas
+alternating MC-MD on the same graph needs a candidate-energy evaluation and an
+accepted-state force evaluation at different points in each block. In a fused
+stage, MC takes its acceptance baseline from the energy on the batch, so a
+graph that migrates into the MC stage needs no extra call; one migrating out
+of it carries the forces of its last (possibly rejected) trial into its first
+MD step.
 
 With separate models (`HybridMCMD(mc=SGC(model=mc_model, ...), md=NPT(model=md_model, ...))`)
 each MC block re-evaluates its baseline energy with the MC model, so acceptance
@@ -417,10 +422,9 @@ production capacity claim after changing the model or physics configuration.
 
 For heterogeneous system sizes, use `SizeAwareSampler` to pack each active GPU
 batch subject to calibrated `max_atoms`, `max_edges`, and `max_batch_size`
-budgets. Its default `estimated_bytes_per_atom=300` and
-`model_memory_fraction=0.2` remain available as a conservative starting
-heuristic. They are explicit parameters: validate them for the selected model
-with a representative profile, then override them if needed. A completed
+budgets. Pass these budgets explicitly from a representative profile rather
+than relying on the sampler's built-in GPU-memory estimate, which is a fixed,
+model-agnostic heuristic. A completed
 independent run may be replaced from the queue; an active run must retain its
 own configuration and simulation state until it reaches its declared stopping
 condition.

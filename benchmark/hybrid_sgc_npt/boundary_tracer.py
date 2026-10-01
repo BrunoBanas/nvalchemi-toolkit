@@ -74,6 +74,8 @@ TRACER_VERSION = "1.1"
 # ----------------------------------------------------------------------------- configuration
 @dataclass
 class TraceConfig:
+    """Settings for one boundary trace: start point, target temperature, step control and test thresholds."""
+
     t0: float  # starting temperature (K), a known coexistence point
     mu0: float  # coexistence dmu at t0 (eV)
     t_stop: float  # trace toward this temperature (either direction)
@@ -183,6 +185,7 @@ class BoundaryTracer:
 
     # -- main loop -----------------------------------------------------------------
     def run(self, state_a, state_g):
+        """Trace the boundary from the two starting phase states, resuming from ``self.path`` if present."""
         cfg = self.cfg
         if self.path.exists():  # resume
             self.trace = json.loads(self.path.read_text())
@@ -529,6 +532,7 @@ def report(
 
 
 def main():
+    """Command-line entry point: ``report`` merges traces, ``vendor`` copies this module."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -573,6 +577,7 @@ def _canonical_source() -> str:
 
 
 def vendor(dest: Path, header: Path | None = None) -> None:
+    """Write a self-contained copy of this tracer to *dest*, stamped with its version and hash."""
     import hashlib
 
     src = _canonical_source()

@@ -195,6 +195,7 @@ def select_batch_width(
 
 
 def main() -> None:
+    """Command-line entry point: profile batched Kawasaki MC across batch widths."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -301,7 +302,6 @@ def main() -> None:
 def _run(
     args, device: torch.device, process_start: float, diag: RunDiagnostics
 ) -> None:
-
     repeats = campaign.SIZE_REPEATS[args.n_atoms]
     template = campaign.build_ase_structure(
         campaign.TEMPLATE_SYMBOL,

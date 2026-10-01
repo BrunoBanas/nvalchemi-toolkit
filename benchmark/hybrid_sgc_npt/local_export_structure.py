@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Convert a single hybrid MC-MD checkpoint (.pt) to an OVITO-readable file.
 
 Standalone, local-machine companion to export_structures.py: takes ONE
@@ -50,7 +64,11 @@ def _load_state(path: Path) -> dict:
     hand-saved yourself with plain torch.save(state.model_dump(...)).
     """
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if isinstance(payload, dict) and "state" in payload and "atomic_numbers" not in payload:
+    if (
+        isinstance(payload, dict)
+        and "state" in payload
+        and "atomic_numbers" not in payload
+    ):
         return payload["state"]
     return payload
 
@@ -96,23 +114,34 @@ def _to_atoms(state: dict, pt_atomic_number: int | None) -> Atoms:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("checkpoint", type=Path, help="Path to a single <run_id>.pt checkpoint")
+    """Export one checkpointed state as a structure file."""
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
-        "-o", "--out", type=Path, default=None,
+        "checkpoint", type=Path, help="Path to a single <run_id>.pt checkpoint"
+    )
+    parser.add_argument(
+        "-o",
+        "--out",
+        type=Path,
+        default=None,
         help="Output path (default: <checkpoint's name>.extxyz next to the input). "
         "A .xyz extension is also written as extended XYZ (plain XYZ can't carry "
         "cell/PBC, which OVITO wants); any other extension (.cfg, .lammpstrj, ...) "
         "is inferred and dispatched by ase.io.write normally.",
     )
     parser.add_argument(
-        "--pt-atomic-number", type=int, default=78,
+        "--pt-atomic-number",
+        type=int,
+        default=78,
         help="Atomic number used for the pt_fraction info field (this project's "
         "Au-Pt default: Pt=78). Irrelevant to structure correctness -- pass "
         "--no-pt-fraction for other element systems.",
     )
     parser.add_argument(
-        "--no-pt-fraction", action="store_true",
+        "--no-pt-fraction",
+        action="store_true",
         help="Skip the pt_fraction info field entirely (for non-Au-Pt checkpoints).",
     )
     args = parser.parse_args()

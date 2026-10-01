@@ -488,10 +488,7 @@ maximises GPU utilisation while respecting the limits.
 
 If you omit `max_atoms`, the sampler can estimate a safe limit from the GPU's
 available memory fraction. This is useful for workloads where the optimal batch size
-depends on the hardware. The default estimate uses
-`estimated_bytes_per_atom=300` and `model_memory_fraction=0.2`; both are
-configurable. They are a conservative starting point, not a substitute for a
-representative profile of the selected model and simulation method.
+depends on the hardware.
 
 ### Inflight replacement
 

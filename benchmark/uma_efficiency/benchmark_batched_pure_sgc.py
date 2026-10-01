@@ -203,6 +203,7 @@ def select_batch_width(
 
 
 def main() -> None:
+    """Command-line entry point: profile batched SGC MC across batch widths."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
