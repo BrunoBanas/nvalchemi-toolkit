@@ -1,3 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Standalone diagnostic: NPT-then-SGC full-trajectory dump, MACE energy engine.
 
 MACE counterpart of ``debug_npt_then_sgc.py``. Runs the exact same protocol
@@ -60,6 +74,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 from run_campaign import (  # noqa: E402
     BAROSTAT_TIME_FS,
     CONVENTIONAL_CELL,
@@ -76,7 +91,6 @@ from run_campaign import (  # noqa: E402
     _refresh_masses_after_transmutation,
     build_ase_structure,
 )
-from export_structures import _check_min_distance, _to_atoms  # noqa: E402
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.base import DynamicsStage
@@ -115,7 +129,9 @@ def _build_initial_state(
     generator = torch.Generator(device=device).manual_seed(seed)
     numbers = torch.full_like(data.atomic_numbers, SPECIES[0])
     pt_count = round(pt_fraction * n_atoms)
-    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = SPECIES[1]
+    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = (
+        SPECIES[1]
+    )
     data.atomic_numbers = numbers
     data.atomic_masses = None
     data.use_default_masses()
@@ -123,7 +139,8 @@ def _build_initial_state(
         torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
     )
     data.velocities = (
-        torch.randn((n_atoms, 3), device=device, generator=generator) * velocity_std[:, None]
+        torch.randn((n_atoms, 3), device=device, generator=generator)
+        * velocity_std[:, None]
     )
     data.velocities -= data.velocities.mean(dim=0, keepdim=True)
     data.forces = torch.zeros_like(data.positions)
@@ -145,18 +162,32 @@ def _save_and_check(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--out-dir", type=Path, required=True, help="Root for checkpoints/ under this run")
+    """Run the NPT-then-SGC diagnostic with MACE and dump its trajectory."""
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="Root for checkpoints/ under this run",
+    )
     parser.add_argument("--n-atoms", type=int, default=500)
-    parser.add_argument("--pt-fraction", type=float, default=0.50, help="Initial composition (\"50/50\")")
+    parser.add_argument(
+        "--pt-fraction", type=float, default=0.50, help='Initial composition ("50/50")'
+    )
     parser.add_argument("--temperature-k", type=float, default=1400.0)
     parser.add_argument("--n-npt-steps", type=int, default=300)
     parser.add_argument(
-        "--n-sgc-steps", type=int, default=None,
+        "--n-sgc-steps",
+        type=int,
+        default=None,
         help="Default: round(0.2 * n_atoms), matching MC_STEP_FRACTION in run_campaign.py",
     )
     parser.add_argument(
-        "--delta-mu-ref-ev", type=float, required=True,
+        "--delta-mu-ref-ev",
+        type=float,
+        required=True,
         help="mu(Pt) - mu(Au) for THIS MACE checkpoint, from "
         "reference_energy_calibration_mace.py's reference[T]['delta_mu_ref_eV'] at "
         "--temperature-k. No default -- see module docstring point 3.",
@@ -164,41 +195,54 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=SEED)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument(
-        "--mace-checkpoint", type=str, default="medium-mpa-0",
+        "--mace-checkpoint",
+        type=str,
+        default="medium-mpa-0",
         help="Named MACE-MP foundation checkpoint (auto-downloaded and cached under "
         "XDG_CACHE_HOME/mace) or a local .model/.pt path. Default 'medium-mpa-0' -- "
         "mace-torch's own current default (MPtrj + Alexandria), 89-element coverage "
         "including Au and Pt.",
     )
     parser.add_argument(
-        "--dtype", type=str, default="float32", choices=sorted(_DTYPES),
+        "--dtype",
+        type=str,
+        default="float32",
+        choices=sorted(_DTYPES),
         help="Cast MACE weights to this dtype. float32 matches the toolkit docs' "
         "GPU-throughput recommendation; float64 trades speed for the precision some "
         "MACE-MP checkpoints were originally released at.",
     )
     parser.add_argument(
-        "--enable-cueq", action="store_true",
+        "--enable-cueq",
+        action="store_true",
         help="Convert to cuEquivariance format for GPU speedup (requires the "
         "cuequivariance-torch + cuequivariance-ops-torch-cuXX packages, i.e. the "
         "toolkit's 'mace' extra installed alongside 'cu12' or 'cu13'). Off by default "
         "for the first correctness pass.",
     )
     parser.add_argument(
-        "--compile-model", action="store_true",
+        "--compile-model",
+        action="store_true",
         help="torch.compile the model (inference-only afterward). Off by default: for "
         "a short 400-step debug run, compilation overhead can dominate wall time.",
     )
     args = parser.parse_args()
 
     device = torch.device(args.device)
-    n_sgc_steps = args.n_sgc_steps if args.n_sgc_steps is not None else round(0.2 * args.n_atoms)
+    n_sgc_steps = (
+        args.n_sgc_steps if args.n_sgc_steps is not None else round(0.2 * args.n_atoms)
+    )
     pt_atomic_number = SPECIES[1]
 
     checkpoint_dir = args.out_dir / "checkpoints"
     store = FinalStateStore(checkpoint_dir)
 
     template = build_ase_structure(
-        TEMPLATE_SYMBOL, CRYSTAL_STRUCTURE, LATTICE_A_ANG, SIZE_REPEATS[args.n_atoms], cubic=CONVENTIONAL_CELL
+        TEMPLATE_SYMBOL,
+        CRYSTAL_STRUCTURE,
+        LATTICE_A_ANG,
+        SIZE_REPEATS[args.n_atoms],
+        cubic=CONVENTIONAL_CELL,
     )
     if len(template) != args.n_atoms:
         raise ValueError(f"expected {args.n_atoms} atoms, built {len(template)}")
@@ -229,7 +273,9 @@ def main() -> None:
     # extra output.
     model.model_config.active_outputs = {"energy", "forces", "stress"}
 
-    data = _build_initial_state(template, args.temperature_k, args.pt_fraction, args.seed, device)
+    data = _build_initial_state(
+        template, args.temperature_k, args.pt_fraction, args.seed, device
+    )
     batch = Batch.from_data_list([data])
     store.save("initial", batch.get_data(0))
 
@@ -261,10 +307,14 @@ def main() -> None:
     # separate hook instances, one per dynamics engine that calls the model,
     # both firing at BEFORE_COMPUTE.
     npt.register_hook(
-        NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
+        NeighborListHook(
+            model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
+        )
     )
     sgc.register_hook(
-        NeighborListHook(model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE)
+        NeighborListHook(
+            model.model_config.neighbor_config, stage=DynamicsStage.BEFORE_COMPUTE
+        )
     )
 
     # Phase 1: pure NPT equilibration -- no MC at all.

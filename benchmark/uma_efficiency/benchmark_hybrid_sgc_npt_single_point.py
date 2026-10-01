@@ -105,6 +105,7 @@ class TimedHybridMCMD(HybridMCMD):
             torch.cuda.synchronize(self._timing_device)
 
     def run(self, batch, n_blocks: int):
+        """Run *n_blocks* MC-MD blocks, timing the MC, hand-off and MD phases of each."""
         if n_blocks < 1:
             raise ValueError("n_blocks must be positive")
         if getattr(batch, "forces", None) is None:
@@ -189,6 +190,7 @@ def _phase_stats(values: list[float]) -> dict[str, float]:
 
 
 def main() -> None:
+    """Command-line entry point: time one hybrid SGC-NPT state point."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

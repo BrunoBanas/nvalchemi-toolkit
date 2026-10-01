@@ -141,4 +141,6 @@ def test_hybrid_sgc_npt_smoke(uma_model: UMAWrapper) -> None:
         f"2 blocks, inference_settings={campaign.INFERENCE_SETTINGS!r}"
     )
     print(f"  mc acceptance: {hybrid.mc.stats.acceptance:.3f}")
-    print(f"  peak GPU memory: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
+    print(
+        f"  peak GPU memory: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB"
+    )

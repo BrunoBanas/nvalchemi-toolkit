@@ -195,6 +195,49 @@ class _DerivativeTables:
     stress: bool
 
 
+def _complete_cell(cell: torch.Tensor) -> torch.Tensor:
+    """Replace zero lattice vectors by unit vectors orthogonal to the others.
+
+    Batched, sync-free counterpart of ``ase.geometry.complete_cell`` (what
+    fairchem's ``AtomicData.from_ase`` feeds its graph builder via
+    ``get_cell(complete=True)``): a 2D slab with a zero out-of-plane vector gets
+    the unit normal, a 1D wire with one vector ``a`` gets two unit vectors
+    spanning the plane orthogonal to ``a``, and an all-zero cell becomes the
+    identity. The completed cell is right-handed wherever vectors were added
+    and is returned unchanged for systems with no zero vector.
+
+    Parameters
+    ----------
+    cell : torch.Tensor
+        Row-vector lattice ``[B, 3, 3]``.
+
+    Returns
+    -------
+    torch.Tensor
+        Completed lattice ``[B, 3, 3]``.
+    """
+
+    def unit(v: torch.Tensor) -> torch.Tensor:
+        return v / v.norm(dim=-1, keepdim=True).clamp_min(torch.finfo(v.dtype).tiny)
+
+    def cyclic_normals(c: torch.Tensor) -> torch.Tensor:
+        # Row i is unit(c[i+1] x c[i+2]), i.e. right-handed with the other two.
+        return unit(torch.linalg.cross(c.roll(-1, dims=1), c.roll(-2, dims=1)))
+
+    missing = ~cell.any(dim=-1, keepdim=True)  # [B, 3, 1]
+    n_missing = missing.sum(dim=1, keepdim=True)  # [B, 1, 1]
+    eye = torch.eye(3, dtype=cell.dtype, device=cell.device).expand_as(cell)
+    cell = torch.where(n_missing == 3, eye, cell)
+    # 1D: put a unit vector orthogonal to the lone vector ``a`` in the first
+    # empty slot (crossing ``a`` with its least-aligned axis), leaving one gap.
+    a = cell.sum(dim=1)
+    axis = torch.nn.functional.one_hot(a.abs().argmin(dim=-1), 3).to(cell.dtype)
+    first_gap = missing & (missing.cumsum(dim=1) == 1) & (n_missing == 2)
+    cell = torch.where(first_gap, unit(torch.linalg.cross(a, axis))[:, None], cell)
+    # 1D (second gap) and 2D: the unit normal of the other two vectors.
+    return torch.where(~cell.any(dim=-1, keepdim=True), cyclic_normals(cell), cell)
+
+
 def _fold_into_cell(
     pos: torch.Tensor,
     cell: torch.Tensor,
@@ -1488,9 +1531,11 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         ``data.positions.device``, preserving GPU residency and autograd.
         ``edge_index`` is left empty ``(2, 0)`` so fairchem's ``MLIPPredictUnit``
         rebuilds the graph internally, matching the default ``FAIRChemCalculator``
-        path (``r_edges=False``), so outputs are equivalent. Positions are
-        folded into the periodic cell along periodic directions first, as
-        ``FAIRChemCalculator`` does; ``data.positions`` is not modified.
+        path (``r_edges=False``), so outputs are equivalent. As in
+        ``FAIRChemCalculator``, zero lattice vectors are completed with unit
+        vectors (so 1D and 2D systems have a valid cell) and positions are
+        folded into the cell along periodic directions; ``data.positions`` is
+        not modified.
         Charge/spin default
         per the ASE-calculator convention (per-system LongTensors; spin defaults
         to the closed-shell singlet for OMol, 0 for periodic tasks) unless the
@@ -1538,6 +1583,10 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             cell = torch.zeros(n_systems, 3, 3, dtype=target_dtype, device=device)
         else:
             cell = cell.to(target_dtype)
+        # Zero lattice vectors (1D/2D systems, molecules) would give fairchem's
+        # graph builder a zero volume and make the fold below a no-op; complete
+        # them as fairchem's own ``from_ase`` does.
+        cell = _complete_cell(cell.reshape(n_systems, 3, 3))
 
         pbc = getattr(data, "pbc", None)
         if pbc is None:
@@ -1676,7 +1725,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         candidates = [getattr(getattr(inner, "backbone", None), "regress_config", None)]
         heads = getattr(inner, "output_heads", None)
         if heads is not None:
-            candidates += [getattr(head, "regress_config", None) for head in heads.values()]
+            candidates += [
+                getattr(head, "regress_config", None) for head in heads.values()
+            ]
         unique: dict[int, Any] = {}
         for config in candidates:
             if config is not None:
@@ -1703,16 +1754,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks = getattr(inner, "_tasks", None)
         dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
         configs = self._regress_configs()
-        if not configs or not isinstance(tasks, dict) or not isinstance(dataset_to_tasks, dict):
+        if (
+            not configs
+            or not isinstance(tasks, dict)
+            or not isinstance(dataset_to_tasks, dict)
+        ):
             return None
         if any(
-            getattr(config, "direct_forces", False) or getattr(config, "direct_stress", False)
+            getattr(config, "direct_forces", False)
+            or getattr(config, "direct_stress", False)
             for config in configs
         ):
             return None
         tables = _DerivativeTables(
             tasks=dict(tasks),
-            dataset_to_tasks={name: list(task_list) for name, task_list in dataset_to_tasks.items()},
+            dataset_to_tasks={
+                name: list(task_list) for name, task_list in dataset_to_tasks.items()
+            },
             forces=any(bool(getattr(config, "forces", False)) for config in configs),
             stress=any(bool(getattr(config, "stress", False)) for config in configs),
         )
@@ -1748,15 +1806,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # rebuilds an unmerged model after the first composition change), and
         # the replacement comes back computing every derivative.
         in_sync = (want_forces, want_stress) == self._applied_derivatives and all(
-            config.forces == want_forces and config.stress == want_stress for config in configs
+            config.forces == want_forces and config.stress == want_stress
+            for config in configs
         )
         if in_sync:
-            unwanted = {"forces", "stress"} - (  # hessians are never gated
-                {"forces"} if want_forces else set()
-            ) - ({"stress"} if want_stress else set())
+            unwanted = (
+                {"forces", "stress"}
+                - (  # hessians are never gated
+                    {"forces"} if want_forces else set()
+                )
+                - ({"stress"} if want_stress else set())
+            )
             inner = self._fairchem_model()
             live_tasks = getattr(inner, "_tasks", {})
-            if not any(getattr(task, "property", None) in unwanted for task in live_tasks.values()):
+            if not any(
+                getattr(task, "property", None) in unwanted
+                for task in live_tasks.values()
+            ):
                 return
 
         for config in configs:
@@ -1779,7 +1845,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks.clear()
         tasks.update({name: task for name, task in tables.tasks.items() if keep(task)})
         for name, task_list in tables.dataset_to_tasks.items():
-            dataset_to_tasks.setdefault(name, [])[:] = [task for task in task_list if keep(task)]
+            dataset_to_tasks.setdefault(name, [])[:] = [
+                task for task in task_list if keep(task)
+            ]
         self._applied_derivatives = (want_forces, want_stress)
 
     # ------------------------------------------------------------------

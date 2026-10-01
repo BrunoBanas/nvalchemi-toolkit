@@ -17,8 +17,8 @@
 from __future__ import annotations
 
 from nvalchemi.hybrid.batching import (
-    BatchMemoryEstimate,
     BatchMeasurement,
+    BatchMemoryEstimate,
     HybridBatchPlanner,
     RunAssignment,
     SimulationBatchPlanner,

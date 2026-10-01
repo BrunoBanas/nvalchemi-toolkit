@@ -123,6 +123,7 @@ class _BlockAdapter:
         self.steps_per_block = steps_per_block
 
     def run(self, batch: Batch, n_blocks: int) -> Batch:
+        """Run *n_blocks* blocks of ``steps_per_block`` dynamics steps."""
         for _ in range(n_blocks):
             self.dynamics.run(batch, n_steps=self.steps_per_block)
         return batch
@@ -234,6 +235,7 @@ def _make_factory(
 
 
 def main() -> None:
+    """Command-line entry point: measure peak memory over kernels, sizes and widths."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )

@@ -72,6 +72,7 @@ INFERENCE_SETTINGS = "batch"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the checkpoint, task, settings and MoLE-layer override options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=CHECKPOINT)
     parser.add_argument("--task", default=TASK)
@@ -102,6 +103,7 @@ def find_mole_modules(root: torch.nn.Module):
 
 
 def main() -> int:
+    """Load the checkpoint and report which MoLE layer implementation it uses."""
     args = parse_args()
 
     print(f"[env] python={sys.executable}")

@@ -28,7 +28,12 @@ from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 def _one_atom(number: int) -> Batch:
     batch = Batch.from_data_list(
-        [AtomicData(atomic_numbers=torch.tensor([number], dtype=torch.long), positions=torch.zeros(1, 3))]
+        [
+            AtomicData(
+                atomic_numbers=torch.tensor([number], dtype=torch.long),
+                positions=torch.zeros(1, 3),
+            )
+        ]
     )
     batch.energy = torch.zeros(1, 1)
     batch.forces = torch.zeros(1, 3)
@@ -77,11 +82,18 @@ def test_kawasaki_swap_carries_custom_per_species_masses() -> None:
     )
     batch = Batch.from_data_list([data])
     batch.energy = torch.zeros(1, 1)
-    sampler = Kawasaki(model=DemoModelWrapper(DemoModel()), temperature=1.0e6, cutoff=2.0, random_seed=7)
+    sampler = Kawasaki(
+        model=DemoModelWrapper(DemoModel()),
+        temperature=1.0e6,
+        cutoff=2.0,
+        random_seed=7,
+    )
 
     sampler.run(batch, n_steps=5)
 
-    for number, mass in zip(batch.atomic_numbers.tolist(), batch.atomic_masses.tolist()):
+    for number, mass in zip(
+        batch.atomic_numbers.tolist(), batch.atomic_masses.tolist()
+    ):
         assert abs(mass - custom[number]) < 1e-5, (number, mass)
 
 
@@ -98,7 +110,9 @@ def test_hybrid_md_integrates_the_transmuted_atom_with_its_new_mass() -> None:
         return run(b, n_steps=n_steps)
 
     md.run = spy
-    HybridMCMD(mc=_sgc(model, mu_2=1.0e6), md=md, mc_steps=1, md_steps=1).run(batch, n_blocks=1)
+    HybridMCMD(mc=_sgc(model, mu_2=1.0e6), md=md, mc_steps=1, md_steps=1).run(
+        batch, n_blocks=1
+    )
 
     assert batch.atomic_numbers.tolist() == [2]
     assert abs(seen[0] - float(_default_mass(2, batch.atomic_masses))) < 1e-5

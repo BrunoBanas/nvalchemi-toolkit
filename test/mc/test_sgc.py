@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -117,6 +119,44 @@ def test_per_graph_chemical_potential_shape_is_checked() -> None:
 
     with pytest.raises(ValueError, match="chemical-potential tensors"):
         sampler.run(batch, n_steps=1)
+
+
+def test_unequal_per_graph_chemical_potentials_rejected_at_construction() -> None:
+    """Per-graph reservoirs of different lengths cannot describe one batch."""
+    with pytest.raises(ValueError, match="equal lengths"):
+        _sampler({1: torch.tensor([0.0, 0.1]), 2: torch.tensor([0.0, 0.1, 0.2])})
+
+
+def test_species_and_potentials_are_copied_to_device_once() -> None:
+    """Repeated steps reuse the cached device tensors instead of re-uploading."""
+    batch = _batch([[1, 2], [2, 1]])
+    sampler = _sampler({1: 0.0, 2: torch.tensor([0.1, -0.1])})
+
+    sampler.run(batch, n_steps=1)
+    cached = dict(sampler._device_parameters)
+    sampler.run(batch, n_steps=3)
+
+    assert set(cached) == set(sampler._device_parameters)
+    assert all(
+        sampler._device_parameters[key] is value for key, value in cached.items()
+    )
+    torch.testing.assert_close(
+        sampler._chemical_potentials_for(batch),
+        torch.tensor([[0.0, 0.1], [0.0, -0.1]]),
+    )
+
+
+def test_new_batch_gets_a_fresh_energy_baseline() -> None:
+    """A batch replacing a freed one (possibly at the same id) is re-initialised."""
+    sampler = _sampler({1: 0.0, 2: 0.0})
+    sampler.run(_batch([[1, 2]]), n_steps=1)
+
+    with patch.object(
+        sampler, "_initialize_energy", wraps=sampler._initialize_energy
+    ) as init:
+        sampler.run(_batch([[2, 2]]), n_steps=1)
+
+    init.assert_called_once()
 
 
 def test_rejects_missing_reservoir_species() -> None:

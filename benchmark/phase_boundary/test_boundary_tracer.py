@@ -49,6 +49,7 @@ L0, L1, EB = 0.20, 0.03, -0.5
 
 
 def branch_roots(T):
+    """Return the low- and high-x increasing branches of mu(x) at *T*."""
     x = np.linspace(1e-7, 1 - 1e-7, 200001)
     _, _, mu = model(L0, L1, EB, T, x)
     breaks = np.where(np.diff(mu) <= 0)[0]
@@ -87,6 +88,7 @@ class MeanFieldEngine:
         return obs, dict(branch=branch)
 
     def run(self, T, mu, sa, sg, tag=""):
+        """Report both walkers' noisy observables at ``(T, mu)``, like an SGC engine."""
         self.calls += 1
         a, sa2 = self._walker(T, mu, sa)
         g, sg2 = self._walker(T, mu, sg)
@@ -94,6 +96,7 @@ class MeanFieldEngine:
 
 
 def exact_tc():
+    """Return the exact critical temperature by bisection on the existence of a gap."""
     lo, hi = 900.0, 1400.0
     for _ in range(30):
         mid = 0.5 * (lo + hi)
@@ -102,6 +105,7 @@ def exact_tc():
 
 
 def compare(trace):
+    """Return per-point errors of a trace against the exact coexistence line."""
     errs = []
     for p in trace["points"]:
         t = truth(L0, L1, EB, p["T"])
@@ -118,6 +122,7 @@ def compare(trace):
 
 
 def main():
+    """Run the downward, upward and offset-start traces and check them against the truth."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="tracer_selftest")
     args = ap.parse_args()
