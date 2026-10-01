@@ -84,6 +84,7 @@ through :meth:`from_checkpoint`'s ``inference_settings`` argument:
 from __future__ import annotations
 
 import contextlib
+import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,6 +122,8 @@ __all__ = ["UMATask", "UMAWrapper"]
 # UMA task heads. The ``Literal`` is the single source of truth for valid task
 # names; the membership set is derived from it.
 UMATask = Literal["omol", "omat", "oc20", "odac", "omc"]
+#: Shape mode of fairchem's torch.compile (see ``UMAWrapper.from_checkpoint``).
+CompileShapes = Literal["auto", "static", "dynamic"]
 _UMA_TASKS: frozenset[str] = frozenset(get_args(UMATask))
 
 # Tasks that declare PBC (stress supported). ``omol`` is molecular — no stress.
@@ -1022,8 +1025,14 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         predict_unit: "MLIPPredictUnit",
         task_name: UMATask = "omol",
         train: bool = False,
+        compile_shapes: CompileShapes = "auto",
     ) -> None:
         super().__init__()
+        if compile_shapes not in get_args(CompileShapes):
+            raise ValueError(
+                f"compile_shapes {compile_shapes!r} must be one of {get_args(CompileShapes)}"
+            )
+        self.compile_shapes = compile_shapes
         if task_name not in _UMA_TASKS:
             raise ValueError(
                 f"UMAWrapper task_name {task_name!r} must be one of {get_args(UMATask)}"
@@ -1104,6 +1113,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         inference_settings: "InferenceSettings | str" = "default",
         overrides: dict | None = None,
         train: bool = False,
+        compile_shapes: CompileShapes = "auto",
     ) -> "UMAWrapper":
         """Resolve and load a UMA checkpoint.
 
@@ -1147,6 +1157,14 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             ``forward`` path goes through fairchem's inference ``predict``
             (eval mode, detached forces); gradient-based training requires a
             separate path through the raw model.
+        compile_shapes : {"auto", "static", "dynamic"}
+            Shape mode of fairchem's ``torch.compile`` when the settings enable
+            compile. ``"auto"`` (default) is static under domain decomposition,
+            whose fixed-shape caps need it, and fairchem's own dynamic shapes
+            otherwise, so compiled MD does not recompile on every edge-count
+            change. ``"static"`` suits fixed-geometry runs (MC-only); with
+            ``"auto"`` the ``NVALCHEMI_UMA_COMPILE_SHAPES`` environment variable
+            can select either mode for benchmarking.
 
         Returns
         -------
@@ -1189,7 +1207,12 @@ class UMAWrapper(nn.Module, BaseModelMixin):
                 f"local file path. Known names: "
                 f"{sorted(pretrained_mlip.available_models)}"
             )
-        return cls(predict_unit, task_name=task_name, train=train)
+        return cls(
+            predict_unit,
+            task_name=task_name,
+            train=train,
+            compile_shapes=compile_shapes,
+        )
 
     def _extract_cutoff(self) -> float:
         """Pull the radial cutoff from the loaded backbone.
@@ -1676,7 +1699,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         candidates = [getattr(getattr(inner, "backbone", None), "regress_config", None)]
         heads = getattr(inner, "output_heads", None)
         if heads is not None:
-            candidates += [getattr(head, "regress_config", None) for head in heads.values()]
+            candidates += [
+                getattr(head, "regress_config", None) for head in heads.values()
+            ]
         unique: dict[int, Any] = {}
         for config in candidates:
             if config is not None:
@@ -1703,16 +1728,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks = getattr(inner, "_tasks", None)
         dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
         configs = self._regress_configs()
-        if not configs or not isinstance(tasks, dict) or not isinstance(dataset_to_tasks, dict):
+        if (
+            not configs
+            or not isinstance(tasks, dict)
+            or not isinstance(dataset_to_tasks, dict)
+        ):
             return None
         if any(
-            getattr(config, "direct_forces", False) or getattr(config, "direct_stress", False)
+            getattr(config, "direct_forces", False)
+            or getattr(config, "direct_stress", False)
             for config in configs
         ):
             return None
         tables = _DerivativeTables(
             tasks=dict(tasks),
-            dataset_to_tasks={name: list(task_list) for name, task_list in dataset_to_tasks.items()},
+            dataset_to_tasks={
+                name: list(task_list) for name, task_list in dataset_to_tasks.items()
+            },
             forces=any(bool(getattr(config, "forces", False)) for config in configs),
             stress=any(bool(getattr(config, "stress", False)) for config in configs),
         )
@@ -1748,15 +1780,23 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # rebuilds an unmerged model after the first composition change), and
         # the replacement comes back computing every derivative.
         in_sync = (want_forces, want_stress) == self._applied_derivatives and all(
-            config.forces == want_forces and config.stress == want_stress for config in configs
+            config.forces == want_forces and config.stress == want_stress
+            for config in configs
         )
         if in_sync:
-            unwanted = {"forces", "stress"} - (  # hessians are never gated
-                {"forces"} if want_forces else set()
-            ) - ({"stress"} if want_stress else set())
+            unwanted = (
+                {"forces", "stress"}
+                - (  # hessians are never gated
+                    {"forces"} if want_forces else set()
+                )
+                - ({"stress"} if want_stress else set())
+            )
             inner = self._fairchem_model()
             live_tasks = getattr(inner, "_tasks", {})
-            if not any(getattr(task, "property", None) in unwanted for task in live_tasks.values()):
+            if not any(
+                getattr(task, "property", None) in unwanted
+                for task in live_tasks.values()
+            ):
                 return
 
         for config in configs:
@@ -1779,12 +1819,29 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         tasks.clear()
         tasks.update({name: task for name, task in tables.tasks.items() if keep(task)})
         for name, task_list in tables.dataset_to_tasks.items():
-            dataset_to_tasks.setdefault(name, [])[:] = [task for task in task_list if keep(task)]
+            dataset_to_tasks.setdefault(name, [])[:] = [
+                task for task in task_list if keep(task)
+            ]
         self._applied_derivatives = (want_forces, want_stress)
 
     # ------------------------------------------------------------------
     # forward
     # ------------------------------------------------------------------
+
+    def _static_compile(self, dd_ctx: Any) -> bool:
+        """Whether fairchem's compile should be forced to static shapes."""
+        mode = self.compile_shapes
+        if mode == "auto":
+            mode = (
+                os.environ.get("NVALCHEMI_UMA_COMPILE_SHAPES", "auto").strip().lower()
+            )
+            if mode not in get_args(CompileShapes):
+                raise ValueError(
+                    f"NVALCHEMI_UMA_COMPILE_SHAPES={mode!r} must be one of {get_args(CompileShapes)}"
+                )
+        if mode == "auto":
+            return bool(dd_ctx.is_distributed)
+        return mode == "static"
 
     def forward(self, data: AtomicData | Batch, **kwargs: Any) -> ModelOutputs:
         """Run the UMA predict unit on ``data``.
@@ -1796,8 +1853,10 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         The single distribution touchpoint is ``ctx.maybe_pad_graph``, which under
         compiled domain decomposition pads the fairchem graph to stable per-rank
         shapes (a no-op single-process). The two blocks below handle fairchem's own
-        compile requirements: CPU routing for the first-call MoLE merge, and
-        forcing static shapes.
+        compile requirements: CPU routing for the first-call MoLE merge, and, under
+        domain decomposition only, forcing static shapes. Single-process runs keep
+        fairchem's own ``dynamic=True`` compile, so a compiled model stays compiled
+        while MD changes the graph's edge count every step.
 
         Parameters
         ----------
@@ -1810,7 +1869,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             ``energy`` (per system) plus ``forces`` / ``stress`` per
             ``model_config.active_outputs``.
         """
-        fc_data = current_dd_context().maybe_pad_graph(self.adapt_input(data, **kwargs))
+        dd_ctx = current_dd_context()
+        fc_data = dd_ctx.maybe_pad_graph(self.adapt_input(data, **kwargs))
         self._gate_derivative_heads()
 
         settings = getattr(self.predict_unit, "inference_settings", None)
@@ -1822,9 +1882,13 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             and (getattr(settings, "merge_mole", False) or compiling)
         ):
             fc_data = fc_data.to(torch.device("cpu"))
+        # Static shapes only pay with the fixed-shape caps domain decomposition pads
+        # to (and its joint graph needs them). Single-process, the edge count changes
+        # with every MD step: static compiles then recompile until dynamo's limit and
+        # fall back to eager, while fairchem's dynamic=True compile stays compiled.
         static_cm = (
             force_compile_static()
-            if (first_call and compiling)
+            if (first_call and compiling and self._static_compile(dd_ctx))
             else contextlib.nullcontext()
         )
         with static_cm:

@@ -224,9 +224,11 @@ changes the sampling.
   compiled run landed on a slower A100-PCIE-40GB, where it ran 5% faster than
   uncompiled SXM at width 1 and 3% slower at width 4, with about 35% more
   memory, so its per-step gain on matched hardware is unmeasured. In SGC-NPT,
-  MD changes the neighbor count and therefore the graph shape, which forces
-  recompiles under static-shape compilation, so leave `compile` off for hybrid
-  runs. For long fixed-geometry SGC, benchmark `compile=True` on your own
+  MD changes the neighbor count and therefore the graph shape, which forced
+  recompiles while `UMAWrapper` compiled with static shapes. Single-process runs
+  now keep fairchem's dynamic shapes (`compile_shapes="auto"`), so compiled
+  hybrids are viable again but not yet measured; until they are, leave
+  `compile` off for hybrid runs. For long fixed-geometry SGC, benchmark `compile=True` on your own
   hardware first.
 - **Batch width: 2-4.** SGC saturates the GPU early: energy-only gains 20%
   from width 1 to 4, and full outputs gain 7-10%.
@@ -234,10 +236,14 @@ changes the sampling.
 ### UMA settings for fixed-composition runs (Kawasaki, Kawasaki-NPT, MD)
 
 When composition cannot change, `merge_mole=True` folds the mixture-of-experts
-weights into one plain model and is the largest single speed-up. Compile stays
-off whenever MD runs, because MD changes the graph's edge count almost every
-step and each new count recompiles (32 recompiles, ~20 min, then a fallback to
-uncompiled speed). Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median
+weights into one plain model and is the largest single speed-up. The turbo rows
+below were measured while `UMAWrapper` forced static compile shapes: MD changes
+the graph's edge count almost every step, so each new count recompiled (32
+recompiles, ~20 min, then a fallback to uncompiled speed). Single-process runs
+now keep fairchem's own dynamic-shape compile (`compile_shapes="auto"`; static
+shapes remain for domain decomposition and can be forced with
+`compile_shapes="static"`), so compiled MD should stay compiled; its speed
+against merge without compile is still to be measured. Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median
 s/block (50 MD steps; Kawasaki-NPT adds 100 energy-only MC steps):
 
 | Run | Settings | width 1 | width 4 | Peak GiB, width 4 |

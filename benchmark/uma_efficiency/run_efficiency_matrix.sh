@@ -34,6 +34,13 @@
 #   kawasaki_2048   Kawasaki MC turbo vs merge_nocompile, widths 1 and 2
 #   npt_2048 / kawasaki_npt_2048 / sgc_npt_2048
 #                   width 1, fast settings vs activation checkpointing
+#   kawasaki_compile_shapes
+#                   Kawasaki MC turbo, static vs dynamic compile shapes, widths 1 4
+#   npt_compile / kawasaki_npt_compile / sgc_npt_compile
+#                   compiled MD with dynamic shapes (turbo; compile w/o merge) vs
+#                   the eager best, widths 1 4 (UMAWrapper keeps fairchem's dynamic
+#                   compile single-process since 2026-09-30)
+#   Config names ending in _static / _dynamic set NVALCHEMI_UMA_COMPILE_SHAPES.
 #   mole_profile    profile_mole_overhead.py
 #
 # Environment:
@@ -192,15 +199,18 @@ case "${KERNEL}" in
       esac
       echo "--inference-settings ${spec} ${mc_flag[*]:-}"
     } ;;
-  kawasaki_wide|kawasaki_2048)
+  kawasaki_wide|kawasaki_2048|kawasaki_compile_shapes)
     script="${TESTS}/benchmark_batched_pure_kawasaki.py"
     width_flag=--batch-width
     if [[ "${KERNEL}" == kawasaki_wide ]]; then
       common=(--n-atoms 500 --n-blocks 100 --temperature-k 1200.0 --cutoff-angstrom 3.40 --composition-seed 2026090102)
-      configs=(best); widths="4 8 12"
-    else
+      configs=(best_static); widths="4 8 12"
+    elif [[ "${KERNEL}" == kawasaki_2048 ]]; then
       common=(--n-atoms 2048 --n-blocks 10 --temperature-k 1200.0 --cutoff-angstrom 3.40 --composition-seed 2026090102)
-      configs=(best merge_nocompile); widths="1 2"
+      configs=(best_static merge_nocompile); widths="1 2"
+    else
+      common=(--n-atoms 500 --n-blocks 100 --temperature-k 1200.0 --cutoff-angstrom 3.40 --composition-seed 2026090102)
+      configs=(best_static best_dynamic); widths="1 4"
     fi
     config_args() {
       case "$1" in
@@ -215,7 +225,7 @@ case "${KERNEL}" in
     if [[ "${KERNEL}" == sgc_wide ]]; then
       configs=(best); widths="4 8 12"
     else
-      configs=(best compile_energy_only); widths="1 4"
+      configs=(best compile_energy_only_static compile_energy_only_dynamic); widths="1 4"
     fi
     config_args() {
       case "$1" in
@@ -223,7 +233,7 @@ case "${KERNEL}" in
         compile_energy_only) echo "--inference-settings compile=true,merge_mole=false,tf32=true,activation_checkpointing=false --energy-only" ;;
       esac
     } ;;
-  npt_wide|kawasaki_npt_wide|sgc_npt_ckpt|sgc_npt_108|sgc_npt_256|npt_2048|kawasaki_npt_2048|sgc_npt_2048)
+  npt_wide|kawasaki_npt_wide|sgc_npt_ckpt|sgc_npt_108|sgc_npt_256|npt_2048|kawasaki_npt_2048|sgc_npt_2048|npt_compile|kawasaki_npt_compile|sgc_npt_compile)
     script="${TESTS}/benchmark_hybrid_sgc_npt_single_point.py"
     width_flag=--n-walkers
     sgc_common=(--n-blocks 20 --temperature-k 1200.0 --delta-mu-ev 0.5)
@@ -254,6 +264,15 @@ case "${KERNEL}" in
       sgc_npt_2048)
         common=(--n-atoms 2048 --n-blocks 10 --temperature-k 1200.0 --delta-mu-ev 0.5)
         configs=(nomerge_nocompile_ckpt nomerge_nocompile); widths="1" ;;
+      npt_compile)
+        common=(--md-only --n-atoms 500 --n-blocks 20 --temperature-k 1200.0); mc_flag=()
+        configs=(merge_nocompile turbo_dynamic compile_nomerge_dynamic); widths="1 4" ;;
+      kawasaki_npt_compile)
+        common=("${kaw_common[@]}" --n-atoms 500 --n-blocks 20)
+        configs=(merge_nocompile turbo_dynamic); widths="1 4" ;;
+      sgc_npt_compile)
+        common=(--n-atoms 500 "${sgc_common[@]}")
+        configs=(nomerge_nocompile compile_nomerge_dynamic); widths="1 4" ;;
     esac
     config_args() {
       local spec
@@ -262,6 +281,8 @@ case "${KERNEL}" in
         nomerge_nocompile) spec="${SGC_BEST}" ;;
         merge_nocompile_ckpt) spec="compile=false,merge_mole=true,tf32=true,activation_checkpointing=true" ;;
         nomerge_nocompile_ckpt) spec="compile=false,merge_mole=false,tf32=true,activation_checkpointing=true" ;;
+        turbo) spec=turbo ;;
+        compile_nomerge) spec="compile=true,merge_mole=false,tf32=true,activation_checkpointing=false" ;;
       esac
       echo "--inference-settings ${spec} ${mc_flag[*]:-}"
     } ;;
@@ -272,12 +293,18 @@ for config in "${configs[@]}"; do
   for width in ${widths}; do
     case_dir="${root}/${config}_w${width}"
     mkdir -p "${case_dir}/run"
-    read -r -a extra <<< "$(config_args "${config}")"
+    config_base="${config%_static}"; config_base="${config_base%_dynamic}"
+    shape_env=()
+    case "${config}" in
+      *_static) shape_env=(NVALCHEMI_UMA_COMPILE_SHAPES=static) ;;
+      *_dynamic) shape_env=(NVALCHEMI_UMA_COMPILE_SHAPES=dynamic) ;;
+    esac
+    read -r -a extra <<< "$(config_args "${config_base}")"
     echo "$(stamp) ${KERNEL} ${config} width=${width}"
     set +e
     /usr/bin/time -f 'wall_seconds=%e\nmax_rss_kib=%M\nexit_status=%x' -o "${case_dir}/time.txt" \
       timeout --kill-after=300 "${CASE_TIMEOUT}" \
-      env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
+      env ${shape_env[@]+"${shape_env[@]}"} PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
         OMP_NUM_THREADS="${THREADS}" MKL_NUM_THREADS=1 \
         "${PYTHON}" "${script}" \
         "${common[@]}" "${width_flag}" "${width}" "${extra[@]}" --device cuda \

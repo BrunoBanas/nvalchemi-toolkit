@@ -53,8 +53,8 @@ from fairchem.core.datasets.atomic_data import AtomicData as FCAtomicData  # noq
 from nvalchemi.data import AtomicData, Batch  # noqa: E402
 from nvalchemi.dynamics.hooks._utils import kinetic_energy_per_graph  # noqa: E402
 from nvalchemi.dynamics.integrators.nve import NVE  # noqa: E402
-from nvalchemi.models.base import NeighborListFormat  # noqa: E402
 from nvalchemi.models import uma as uma_module  # noqa: E402
+from nvalchemi.models.base import NeighborListFormat  # noqa: E402
 from nvalchemi.models.uma import (  # noqa: E402
     _UMA_TASKS,
     UMAWrapper,
@@ -378,9 +378,7 @@ class TestFoldIntoCell:
         )
 
     def test_triclinic_all_periodic_lands_in_unit_cell(self):
-        frac_in = torch.tensor(
-            [[0.2, 0.3, 0.4], [1.2, -0.7, 2.4], [-3.1, 2.5, -1.9]]
-        )
+        frac_in = torch.tensor([[0.2, 0.3, 0.4], [1.2, -0.7, 2.4], [-3.1, 2.5, -1.9]])
         pos = frac_in @ self._CELL
         out = self._fold1(pos, self._CELL)
         frac_out = self._frac(out, self._CELL)
@@ -526,6 +524,81 @@ class TestForward:
         assert out["forces"].shape == (22, 3)
 
 
+class _CompilingPredictUnit(_MockPredictUnit):
+    """Predict unit whose first call reports whether ``torch.compile`` was patched."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inference_settings.compile = True
+        self.inference_settings.merge_mole = False
+        self.lazy_model_intialized = False
+        self.compile_was_patched: bool | None = None
+
+    def predict(self, data: FCAtomicData, undo_element_references: bool = True) -> dict:
+        self.compile_was_patched = torch.compile is not _ORIGINAL_TORCH_COMPILE
+        self.lazy_model_intialized = True
+        return super().predict(data, undo_element_references)
+
+
+_ORIGINAL_TORCH_COMPILE = torch.compile
+
+
+class _FakeDistributedContext:
+    is_distributed = True
+
+    def maybe_pad_graph(self, data):
+        return data
+
+
+class TestCompileShapes:
+    """Static compile is forced only under domain decomposition (fixed-shape caps).
+
+    Single-process MD changes the edge count every step; a static compile then
+    recompiles until dynamo's limit and falls back to eager, so fairchem's own
+    ``dynamic=True`` compile must be left alone there.
+    """
+
+    def test_single_process_keeps_fairchem_dynamic_compile(self):
+        pu = _CompilingPredictUnit()
+        UMAWrapper(pu, task_name="omol")(Batch.from_data_list([_make_propane()]))
+        assert pu.compile_was_patched is False
+        assert torch.compile is _ORIGINAL_TORCH_COMPILE
+
+    @pytest.mark.parametrize(
+        ("kwarg", "env", "static"),
+        [
+            ("static", None, True),
+            ("dynamic", "static", False),  # the explicit argument wins over the env var
+            ("auto", "static", True),
+            ("auto", "dynamic", False),
+        ],
+    )
+    def test_compile_shapes_override(self, monkeypatch, kwarg, env, static):
+        if env is None:
+            monkeypatch.delenv("NVALCHEMI_UMA_COMPILE_SHAPES", raising=False)
+        else:
+            monkeypatch.setenv("NVALCHEMI_UMA_COMPILE_SHAPES", env)
+        pu = _CompilingPredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omol", compile_shapes=kwarg)
+        wrapper(Batch.from_data_list([_make_propane()]))
+        assert pu.compile_was_patched is static
+
+    def test_invalid_compile_shapes_raises(self):
+        with pytest.raises(ValueError, match="compile_shapes"):
+            UMAWrapper(
+                _CompilingPredictUnit(), task_name="omol", compile_shapes="fixed"
+            )
+
+    def test_domain_decomposition_forces_static_compile(self, monkeypatch):
+        monkeypatch.setattr(
+            uma_module, "current_dd_context", lambda: _FakeDistributedContext()
+        )
+        pu = _CompilingPredictUnit()
+        UMAWrapper(pu, task_name="omol")(Batch.from_data_list([_make_propane()]))
+        assert pu.compile_was_patched is True
+        assert torch.compile is _ORIGINAL_TORCH_COMPILE  # restored after the call
+
+
 class TestInferenceSettingsSpec:
     """``from_checkpoint`` accepts a key=value spec besides presets and instances."""
 
@@ -533,8 +606,16 @@ class TestInferenceSettingsSpec:
         settings = _resolve_inference_settings(
             "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
         )
-        assert (settings.compile, settings.merge_mole, settings.tf32, settings.activation_checkpointing) == (
-            False, False, True, False,
+        assert (
+            settings.compile,
+            settings.merge_mole,
+            settings.tf32,
+            settings.activation_checkpointing,
+        ) == (
+            False,
+            False,
+            True,
+            False,
         )
 
     def test_presets_and_instances_pass_through(self):
@@ -562,10 +643,18 @@ class _GateablePredictUnit(_MockPredictUnit):
         self.regress = type(
             "RegressConfig",
             (),
-            {"forces": True, "stress": True, "hessian": False, "direct_forces": False, "direct_stress": False},
+            {
+                "forces": True,
+                "stress": True,
+                "hessian": False,
+                "direct_forces": False,
+                "direct_stress": False,
+            },
         )()
         inner.backbone.regress_config = self.regress
-        inner.output_heads = {"efs": type("Head", (), {"regress_config": self.regress})()}
+        inner.output_heads = {
+            "efs": type("Head", (), {"regress_config": self.regress})()
+        }
         omat = [_MockTask(f"omat_{p}", p) for p in ("energy", "forces", "stress")]
         inner._tasks = {t.name: t for t in omat}
         inner._dataset_to_tasks = {name: [] for name in _UMA_TASKS}
@@ -615,8 +704,16 @@ class TestDerivativeGating:
         # Simulate the rebuild: derivatives back on, full task table restored.
         pu.regress.forces, pu.regress.stress = True, True
         inner = pu.model.module
-        inner._tasks.update({t.name: t for t in inner._dataset_to_tasks["omat"] + [
-            _MockTask("omat_forces", "forces"), _MockTask("omat_stress", "stress")]})
+        inner._tasks.update(
+            {
+                t.name: t
+                for t in inner._dataset_to_tasks["omat"]
+                + [
+                    _MockTask("omat_forces", "forces"),
+                    _MockTask("omat_stress", "stress"),
+                ]
+            }
+        )
         wrapper(batch)
         assert pu.seen[-1] == (False, False, ["omat_energy"])
 
@@ -628,7 +725,11 @@ class TestDerivativeGating:
         energy_only.model_config.active_outputs = {"energy"}
         energy_only(batch)
         UMAWrapper(pu, task_name="omat")(batch)
-        assert pu.seen[-1] == (True, True, ["omat_energy", "omat_forces", "omat_stress"])
+        assert pu.seen[-1] == (
+            True,
+            True,
+            ["omat_energy", "omat_forces", "omat_stress"],
+        )
 
     def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
         mock_omat.model_config.active_outputs = {"energy"}
