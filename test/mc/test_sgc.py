@@ -166,3 +166,39 @@ def test_rejects_missing_reservoir_species() -> None:
 
     with pytest.raises(ValueError, match="outside the configured species"):
         sampler.run(batch, n_steps=1)
+
+
+def test_step_follows_the_dynamics_hook_lifecycle() -> None:
+    """Admission fires once; per-step hooks see the step's active-graph mask."""
+    from nvalchemi.dynamics.base import DynamicsStage
+
+    seen: list[tuple[str, list[bool] | None]] = []
+
+    class Recorder:
+        frequency = 1
+
+        def __init__(self, stage: DynamicsStage) -> None:
+            self.stage = stage
+
+        def __call__(self, ctx, stage) -> None:
+            mask = ctx.active_graph_mask
+            seen.append((stage.name, None if mask is None else mask.tolist()))
+
+    batch = _batch([[1], [1]])
+    batch.status = torch.tensor([[0], [1]], dtype=torch.long)
+    sampler = SGC(
+        model=DemoModelWrapper(DemoModel()),
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: 0.0},
+        exit_status=1,
+        hooks=[Recorder(DynamicsStage.ON_ADMISSION), Recorder(DynamicsStage.BEFORE_STEP)],
+    )
+
+    sampler.run(batch, n_steps=2)
+
+    assert seen == [
+        ("ON_ADMISSION", [True, False]),
+        ("BEFORE_STEP", [True, False]),
+        ("BEFORE_STEP", [True, False]),
+    ]

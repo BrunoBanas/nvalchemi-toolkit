@@ -185,9 +185,9 @@ def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
 
     compute = md.compute
 
-    def spy_compute(b):
+    def spy_compute(b, *args, **kwargs):
         events.append(("md.compute", int(b.atomic_numbers[0])))
-        return compute(b)
+        return compute(b, *args, **kwargs)
 
     md.compute = spy_compute
     HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, before_md_block=hook).run(
