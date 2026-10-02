@@ -32,8 +32,10 @@ from nvalchemi.dynamics.integrators import NPH, NPT, NVE, NVTLangevin, NVTNoseHo
 from nvalchemi.dynamics.optimizers import (
     FIRE,
     FIRE2,
+    LBFGS,
     FIRE2VariableCell,
     FIREVariableCell,
+    LBFGSVariableCell,
 )
 from nvalchemi.dynamics.sampler import SizeAwareSampler
 from nvalchemi.dynamics.sinks import (
@@ -68,6 +70,8 @@ __all__ = [
     "GPUBuffer",
     "Hook",
     "HostMemory",
+    "LBFGS",
+    "LBFGSVariableCell",
     "ResizableSink",
     "NPH",
     "NPT",
