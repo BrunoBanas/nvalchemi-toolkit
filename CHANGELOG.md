@@ -43,6 +43,26 @@
   PyTorch force equations and spring policies, fixed endpoints or atoms,
   serializable specs, and per-path diagnostics.
 
+### Changed
+
+- **`UMAWrapper` computes only the derivatives `active_outputs` asks for.**
+  `model_config.active_outputs = {"energy"}` switches off fairchem's
+  forces/stress autograd for that call instead of computing and discarding them;
+  `{"energy", "forces"}` also skips the strain derivative. The predict unit is
+  restored after every call, so a `FAIRChemCalculator` or another wrapper
+  sharing it is unaffected. Checkpoints with direct forces or stress, or an
+  unrecognised fairchem layout, keep computing everything with a one-time
+  `UserWarning`. Measured on an A100 for energy-only Monte Carlo on Au-Pt: 2.1x
+  per step for site swaps under `turbo`, ~1.4x for transmutations.
+- **`UMAWrapper.from_checkpoint` accepts a `key=value` settings spec**, e.g.
+  `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`,
+  besides preset names and `InferenceSettings` instances. Values are converted
+  to each field's type; unknown fields and values that do not fit raise
+  `ValueError`. Such a spec can express combinations no preset covers, e.g.
+  eager, unmerged inference with TF32 and no activation checkpointing for
+  composition-changing Monte Carlo: 2.75x faster per step than the `"batch"`
+  preset (with energy-only evaluation) and the same sampled chain.
+
 ### Breaking Changes
 
 - `MACEWrapper` no longer declares or passes through an ordinary `"hessian"`
