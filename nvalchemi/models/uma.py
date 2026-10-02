@@ -153,7 +153,7 @@ def _resolve_inference_settings(settings: Any) -> Any:
     ``"compile=false,merge_mole=false,tf32=true"`` builds
     ``InferenceSettings(compile=False, merge_mole=False, tf32=True)``, so one
     string can name any combination -- the fairchem presets (``"default"``,
-    ``"turbo"``, ``"batch"``) cannot express, e.g., the recommended SGC settings.
+    ``"turbo"``, ``"batch"``) cannot express, e.g., eager unmerged inference with TF32.
     Preset names and ``InferenceSettings`` instances are returned unchanged.
 
     Each value is converted to its field's declared type (``bool``, ``int``,
@@ -1209,7 +1209,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             ``"batch"``, or ``"turbo"``), a comma-separated ``key=value`` spec of
             ``InferenceSettings`` fields (e.g.
             ``"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"``,
-            the recommended SGC settings), or a
+            for composition-changing Monte Carlo), or a
             ``fairchem.core.units.mlip_unit.api.inference.InferenceSettings``
             instance. ``torch.compile`` is reached through this argument
             — see the module docstring's *torch.compile* section.
@@ -1636,7 +1636,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # offsets of +-ceil(cutoff * inverse plane spacing) around the positions
         # it is given, so it relies on wrapped input -- fairchem's own
         # AtomicData.from_ase wraps first. MD positions here are continuous
-        # (NPT and HybridMCMD never fold them back; WrapPeriodicHook is opt-in),
+        # (MD integrators never fold them back; WrapPeriodicHook is opt-in),
         # and once two atoms drift about a cell length apart their minimum image
         # is never generated: the interaction silently vanishes and atoms can
         # collapse onto each other. Whole-lattice-vector shifts leave energy,
