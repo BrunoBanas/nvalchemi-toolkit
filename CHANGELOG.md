@@ -8,6 +8,13 @@
   L-BFGS in `nvalchemiops`, with the same API shape as FIRE2.
 - `cell_force_scale` on `FIRE2VariableCell` and `LBFGSVariableCell`.
 - `FusedStage` restores segmented (per-atom) integrator state level by level.
+- **Hybrid MC-MD scheduler** (`nvalchemi.hybrid.HybridMCMD`): alternates MC
+  and MD blocks on the same walkers. `mc_energy_only=True` evaluates energies
+  only during MC blocks and re-evaluates each block's baseline under the same
+  outputs (`BaseMonteCarlo.refresh_energy`). MC and MD may use separate models
+  of the same potential (e.g. an unmerged UMA for SGC and a MoLE-merged one for
+  MD), with `before_md_block(batch)` to prepare the MD model; custom loops use
+  `run_mc_block` and `prepare_md_block`.
 - **Monte Carlo samplers** (`nvalchemi.mc`): GPU-resident, batched
   `BaseMonteCarlo` with one proposal per active graph per step.
   - `SGC`: semi-grand-canonical single-site transmutations; scalar or per-graph
