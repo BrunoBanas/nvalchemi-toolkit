@@ -8,6 +8,13 @@
   L-BFGS in `nvalchemiops`, with the same API shape as FIRE2.
 - `cell_force_scale` on `FIRE2VariableCell` and `LBFGSVariableCell`.
 - `FusedStage` restores segmented (per-atom) integrator state level by level.
+- **Simulation scheduling** (`nvalchemi.scheduling`): `SimulationBatchPlanner`
+  profiles candidate batch widths, recommends the smallest near peak
+  throughput within a memory budget, and packs campaigns into per-GPU batches
+  and serial waves. `RunSpec` / `CampaignSpec` describe dependency graphs
+  (continuation parents, barriers, cooling branches, bidirectional
+  chemical-potential scans); `CampaignScheduler` releases ready batches and
+  `FinalStateStore` checkpoints final atomic states atomically.
 - **Hybrid MC-MD scheduler** (`nvalchemi.hybrid.HybridMCMD`): alternates MC
   and MD blocks on the same walkers. `mc_energy_only=True` evaluates energies
   only during MC blocks and re-evaluates each block's baseline under the same

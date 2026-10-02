@@ -33,3 +33,7 @@ molecules via task selection on ``UMAWrapper.from_checkpoint``.
 **10 — MACE Training**: Training a ScaleShiftMACE model with the ALCHEMI
 training stack; Zarr dataloading, scheduled Huber losses, EMA, checkpointing,
 validation, and distributed launch patterns.
+
+**11 — UMA Hybrid SGC-NPT**: Batched semi-grand-canonical Au-Pt
+transmutations alternated with isotropic NPT molecular dynamics through the
+GPU-resident ``HybridMCMD`` scheduler.
