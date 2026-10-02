@@ -4,35 +4,48 @@
 
 ### Added
 
+- **Monte Carlo samplers** (`nvalchemi.mc`): GPU-resident, batched
+  `BaseMonteCarlo` with one proposal per active graph per step.
+  - `SGC`: semi-grand-canonical single-site transmutations; scalar or per-graph
+    chemical-potential reservoirs.
+  - `VCSGC`: binary variance-constrained SGC (Sadigh et al., Phys. Rev. B 85,
+    184203, 2012), holding a graph at any composition, including inside a
+    miscibility gap, and returning `mu_B - mu_A = reference - phi - 2 kappa cbar`.
+    Parametrised by `phi` or `target_concentration` with an intensive `kappa`
+    (eV); `reference_exchange_potential` centres the constraint on a calibrated
+    `mu_B - mu_A`, which machine-learned potentials need.
+  - `Kawasaki`: fixed-composition nearest-neighbour swaps on a short-range
+    proposal graph independent of the model's neighbour list. By default only
+    unlike-species pairs are drawn, with the Metropolis-Hastings factor
+    `n(x)/n(x')` over unlike-pair counts, so no evaluation is spent on a swap
+    that cannot change the state.
+  - Accepted moves update `atomic_masses` to the new species' mass (custom
+    per-species masses are kept), so MD after MC integrates with the right mass.
+  - Samplers compose with MD in a `FusedStage` (`mc + md`), each acting on its
+    own graphs within one shared forward pass.
+- **Hybrid MC-MD scheduler** (`nvalchemi.hybrid.HybridMCMD`): alternates MC
+  and MD blocks on the same walkers. `mc_energy_only=True` evaluates energies
+  only during MC blocks and re-evaluates each block's baseline under the same
+  outputs (`BaseMonteCarlo.refresh_energy`). MC and MD may use separate models
+  of the same potential (e.g. an unmerged UMA for SGC and a MoLE-merged one for
+  MD), with `before_md_block(batch)` to prepare the MD model; custom loops use
+  `run_mc_block` and `prepare_md_block`.
+- **Simulation scheduling** (`nvalchemi.scheduling`): `SimulationBatchPlanner`
+  profiles candidate batch widths, recommends the smallest near peak
+  throughput within a memory budget, and packs campaigns into per-GPU batches
+  and serial waves. `RunSpec` / `CampaignSpec` describe dependency graphs
+  (continuation parents, barriers, cooling branches, bidirectional
+  chemical-potential scans); `CampaignScheduler` releases ready batches and
+  `FinalStateStore` checkpoints final atomic states atomically.
 - Agent skills `nvalchemi-uma-submission` (UMA inference settings, batch width,
   memory and Slurm jobs for MC / MD / hybrid runs) and `nvalchemi-sgc-phase-boundary`
-  (phase boundaries and T-x boundary tracing from SGC data), with their tools:
+  (phase boundaries and T-x boundary tracing from SGC data), with their tools in
   `benchmark/uma_efficiency/` (planner, measured calibration, driver and job
-  templates, efficiency-matrix runner, MC / MD / hybrid / memory / MoLE
-  benchmarks) and `benchmark/phase_boundary/` (isotherm analysis, synthetic
-  data, tracer self-test). `benchmark/hybrid_sgc_npt/boundary_tracer.py` is now
-  the canonical tracer copy.
-- GPU-resident canonical (`Kawasaki`) Monte Carlo with fixed-composition
-  nearest-neighbour site-swap moves. The proposal graph is a short-range
-  cutoff neighbor search independent of the energy model's own interaction
-  neighbor list, so it stays valid on the disordered geometry produced by a
-  finite-temperature MD block.
-- GPU-resident binary variance-constrained semi-grand-canonical (`VCSGC`)
-  Monte Carlo (Sadigh et al., Phys. Rev. B 85, 184203, 2012). It reuses `SGC`'s
-  single-site transmutations with a quadratic concentration constraint, so a
-  graph can be held at any composition, including inside a miscibility gap,
-  and returns the free-energy slope `mu_B - mu_A = reference - phi - 2 kappa cbar` from
-  the mean concentration. Parametrised by `phi` or `target_concentration`, with
-  an intensive `kappa` (eV); scalar or per-graph parameters. An optional
-  `reference_exchange_potential` centres the constraint on a calibrated
-  `mu_B - mu_A`; machine-learned potentials need it, because their eV-scale
-  per-element energy offsets otherwise drive the walker to one end member.
-- GPU-resident semi-grand-canonical (`SGC`) Monte Carlo with model-energy
-  evaluation, a hybrid MC-MD block scheduler, and generic simulation capacity
-  planning that emits serial overflow waves across requested GPUs.
-- `RunSpec` / `CampaignSpec` dependency graphs with cooling-branch generation,
-  checkpointed final atomic states, ready-batch GPU-wave planning, and
-  per-graph SGC chemical-potential reservoirs.
+  templates, MC / MD / hybrid / memory / MoLE benchmarks),
+  `benchmark/phase_boundary/` (isotherm analysis, synthetic data, tracer
+  self-test) and `benchmark/hybrid_sgc_npt/` (campaign driver and boundary
+  tracer).
+
 - Domain decomposition for distributed inference and dynamics: a spatial halo
   strategy and a graph-parallel strategy, both driven by a declarative
   `MLIPSpec` a model wrapper publishes as `distribution_spec`. Ewald, PME,
@@ -123,46 +136,21 @@
 ### Changed
 
 - **`UMAWrapper` computes only the derivatives `active_outputs` asks for.**
-  `model_config.active_outputs = {"energy"}` now switches off fairchem's
-  forces/stress autograd (the `regress_config` flags plus the matching entries
-  in both task tables), instead of computing them and discarding the result;
-  `{"energy", "forces"}` also skips the strain derivative. Changes apply on the
-  next forward and are reversible; checkpoints with direct forces or stress, or
-  an unrecognised fairchem layout, keep computing everything with a one-time
-  `UserWarning`. Measured on an A100 for Monte Carlo: 2.1x per step for
-  `Kawasaki` under `turbo`, ~1.4x for `SGC`.
+  `model_config.active_outputs = {"energy"}` switches off fairchem's
+  forces/stress autograd for that call instead of computing and discarding
+  them; `{"energy", "forces"}` also skips the strain derivative. The predict
+  unit is restored after every call, so a `FAIRChemCalculator` or another
+  wrapper sharing it is unaffected. Checkpoints with direct forces or stress,
+  or an unrecognised fairchem layout, keep computing everything with a
+  one-time `UserWarning`. Measured on an A100 for Monte Carlo: 2.1x per step
+  for `Kawasaki` under `turbo`, ~1.4x for `SGC`.
 - **`UMAWrapper.from_checkpoint` accepts a `key=value` settings spec**, e.g.
   `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`,
-  besides preset names and `InferenceSettings` instances; unknown fields raise.
-  That spec is now the recommended (and `benchmark/hybrid_sgc_npt/run_campaign.py`
-  default) setting for SGC and SGC-NPT, with energy-only MC on by default there
-  (`--no-mc-energy-only` to disable): 2.75x faster per MC-only SGC step than the
-  `"batch"` preset with the same sampled chain.
-- **`HybridMCMD(mc_energy_only=True)`** narrows the shared model to energy-only
-  for each MC block and restores full outputs for MD. Each MC block re-evaluates
-  its baseline under the same outputs (new `BaseMonteCarlo.refresh_energy`), so
-  acceptance ratios never mix two evaluation paths -- one extra model call per
-  block. The per-block MC step is the new public `HybridMCMD.run_mc_block`;
-  loops that reimplement `run` must call it rather than `mc.run`.
-- **`HybridMCMD` accepts separate MC and MD models.** The shared-model
-  requirement is gone, so each phase can run its own inference path over the
-  same potential -- e.g. an unmerged UMA for SGC trials and a MoLE-merged UMA
-  for MD, which is 1.8-2.2x faster for NPT but valid only at a fixed
-  composition. With two models every MC block re-evaluates its baseline with
-  the MC model instead of adopting MD's energy. The new
-  `before_md_block(batch)` callback runs ahead of each MD block's first force
-  call (the place to re-merge an MD model on the current composition); loops
-  that reimplement `run` call it through `HybridMCMD.prepare_md_block`.
-- **`Kawasaki` proposes only unlike-species pairs** (`unlike_pairs_only=True`,
-  the new default). The species-blind draw spent a model evaluation on every
-  same-species pick -- about half of all steps on an equiatomic fcc alloy --
-  and those proposals cannot change the state. Drawing uniformly from the
-  current unlike pairs makes the proposal probability configuration-dependent,
-  so acceptance now carries the Metropolis-Hastings factor `n(x)/n(x')` over
-  unlike-pair counts; sampling stays exact. A graph whose neighbours are all
-  same-species has no legal move and is excluded from the step's proposals and
-  statistics, so reported acceptance is now acceptance among real moves. Pass
-  `unlike_pairs_only=False` to reproduce runs recorded before this change.
+  besides preset names and `InferenceSettings` instances. Values are converted
+  to each field's type; unknown fields and values that do not fit raise
+  `ValueError`. With energy-only MC this is the recommended setting for SGC and
+  SGC-NPT: 2.75x faster per SGC step than the `"batch"` preset with the same
+  sampled chain.
 
 ### Fixed
 
@@ -181,20 +169,10 @@
   coordinates, non-periodic (vacuum) directions are left alone, and gradients
   pass through unchanged. Energies, forces and stress are unchanged for
   correctly wrapped inputs.
-- **MC moves left atomic masses on the old species.** `SGC`, `VCSGC` and
-  `Kawasaki` change `atomic_numbers` but never touched `atomic_masses`, so any
-  dynamics run after an accepted move -- `HybridMCMD.run` or a hand-written
-  MC/MD loop -- integrated a transmuted or swapped atom with its previous
-  species' mass (NPT/NVT read `atomic_masses` directly). `BaseMonteCarlo` now
-  sets the mass of every atom whose species changed to its new species' mass,
-  in `post_update`, so every driver path gets it. Per-species masses are taken
-  from the batch when the sampler first sees it (custom masses such as
-  deuterium are kept and move with the species); species absent from it use the
-  periodic-table mass; unchanged atoms are never touched. `atomic_masses` is now
-  one of the samplers' `_mutable_fields`, so masked graphs keep theirs.
-  `benchmark/hybrid_sgc_npt/run_campaign.py` no longer needs its
-  `_refresh_masses_after_transmutation` workaround.
-
+  Zero lattice vectors (1D and 2D systems, molecules) are first completed
+  with orthonormal unit vectors, as fairchem's own `from_ase` does, so such
+  systems fold along their periodic axes and fairchem gets a non-zero cell
+  volume.
 - **Ewald charge gradients and cell derivatives** — the reciprocal term was only
   ever differentiated with respect to positions and charges, so a non-hybrid
   Ewald returned a wrong `dE/dq`, and strain-autograd through the detached

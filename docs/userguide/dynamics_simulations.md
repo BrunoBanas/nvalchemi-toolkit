@@ -186,9 +186,7 @@ scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20, mc_energy_only=
 
 `from_checkpoint` also accepts the same settings as one string,
 `inference_settings="compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`.
-`benchmark/hybrid_sgc_npt/run_campaign.py` uses exactly this as its default,
-with energy-only MC on (`--inference-settings` and `--no-mc-energy-only`
-override them).
+Together with energy-only MC, this is the recommended default for SGC runs.
 
 None of the named presets is right for SGC: `"default"` and `"turbo"` merge the
 mixture-of-experts weights for one composition, and `"batch"` enables
@@ -306,9 +304,12 @@ Per-element energy offsets put the system's own `mu_B - mu_A` electronvolts
 away from zero, while the constraint can supply at most `2 kappa`, so without
 the calibrated reference (the same one an SGC scan is centred on) the walker
 runs to the favoured end member instead of sampling near the target.
-Composition-conserving Kawasaki sampling will be added as a separate MC style;
-it is intentionally not exposed until its local proposal graph and detailed
-balance tests are complete.
+For a fixed composition use `Kawasaki`: each step swaps the species of one
+nearest-neighbour pair per graph (by default only unlike pairs, so no move is
+wasted). The pairs come from a short-range proposal graph,
+`Kawasaki(model=model, temperature=1000.0, cutoff=3.4)`, built independently of
+the model's own neighbour list; call `synchronize(batch)` after positions change
+outside the sampler (e.g. after an MD block) so the graph is rebuilt.
 
 ## Hybrid MC-MD blocks
 

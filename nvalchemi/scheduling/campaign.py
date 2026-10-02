@@ -266,19 +266,17 @@ class CampaignSpec:
         branch's own value. Every step's only new dependency is the
         immediately preceding step in its OWN branch, via ``RunSpec.parent_id``
         -- branches never share a parent, so neither can be silently re-seeded
-        from the other's basin. This implements PHASE_DIAGRAM_MANUAL.md
-        section 4 step 3: "From the A-rich endpoint, perform an
-        increasing-delta_mu sweep; from the B-rich endpoint, perform a
-        decreasing-delta_mu sweep. Within either sweep, start each point from
-        the final state at the preceding chemical potential."
+        from the other's basin. This is the hysteresis-resolving scan: an
+        increasing-delta_mu sweep from the A-rich endpoint and a decreasing one
+        from the B-rich endpoint, each point starting from the final state at
+        the preceding chemical potential.
 
         Returns a RAW tuple of every seed plus every marching child, in
         construction order -- NOT yet wrapped in a validated
         :class:`CampaignSpec`. A seed's own ``parent_id`` is deliberately not
         checked against this method's own output: that lets a caller building
         a LARGER combined campaign (e.g. one seed continuation-chained onto a
-        different temperature's own endpoint, ``run_campaign.py``'s
-        ``_build_delta_mu_scan_schedule``) accumulate several calls' runs and
+        different temperature's own endpoint) accumulate several calls' runs and
         validate the complete graph once, in one final
         ``CampaignSpec(runs=..., name=...)``. Use
         :meth:`delta_mu_scan_from_endpoints` instead for the common
