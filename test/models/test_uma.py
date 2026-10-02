@@ -36,6 +36,7 @@ from __future__ import annotations
 import math
 import os
 import warnings
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -632,6 +633,28 @@ class TestInferenceSettingsSpec:
         with pytest.raises(ValueError, match="compyle"):
             _resolve_inference_settings("compyle=false")
 
+    def test_values_take_their_field_types(self):
+        settings = _resolve_inference_settings(
+            "base_precision_dtype=float64,edge_chunk_size=512,execution_mode=general,max_atoms=none"
+        )
+        assert settings.base_precision_dtype is torch.float64
+        assert settings.edge_chunk_size == 512
+        assert settings.execution_mode == "general"
+        assert settings.max_atoms is None
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "compile=1",
+            "edge_chunk_size=true",
+            "base_precision_dtype=float7",
+            "predict_untrained_forces=x",
+        ],
+    )
+    def test_value_that_does_not_fit_the_field_is_rejected(self, spec):
+        with pytest.raises(ValueError, match="does not fit"):
+            _resolve_inference_settings(spec)
+
 
 class _MockTask:
     def __init__(self, name: str, prop: str) -> None:
@@ -723,7 +746,7 @@ class TestDerivativeGating:
         assert pu.seen[-1] == (False, False, ["omat_energy"])
 
     def test_wrapper_built_after_another_gated_the_unit_restores_derivatives(self):
-        """A second wrapper on an already-pruned unit still sees the as-loaded tables."""
+        """A wrapper built after an energy-only one ran still sees the as-loaded tables."""
         pu = _GateablePredictUnit()
         batch = Batch.from_data_list([_make_periodic_cu()])
         energy_only = UMAWrapper(pu, task_name="omat")
@@ -735,6 +758,42 @@ class TestDerivativeGating:
             True,
             ["omat_energy", "omat_forces", "omat_stress"],
         )
+
+    def test_unit_is_as_loaded_after_an_energy_only_call(self):
+        """A calculator sharing the unit is not left without forces/stress."""
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        wrapper(Batch.from_data_list([_make_periodic_cu()]))
+
+        assert pu.seen[-1] == (False, False, ["omat_energy"])
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+        assert sorted(pu.model.module._tasks) == [
+            "omat_energy",
+            "omat_forces",
+            "omat_stress",
+        ]
+        assert len(pu.dataset_to_tasks["omat"]) == 3
+
+    def test_unit_is_restored_when_predict_raises(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        with (
+            patch.object(pu, "predict", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            wrapper(Batch.from_data_list([_make_periodic_cu()]))
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+
+    def test_unrecognised_layout_no_warning_when_all_producible_outputs_requested(
+        self, mock_omol
+    ):
+        """omol has no stress: energy + forces is everything, nothing is discarded."""
+        mock_omol.model_config.active_outputs = {"energy", "forces"}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mock_omol(Batch.from_data_list([_make_propane()]))
 
     def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
         mock_omat.model_config.active_outputs = {"energy"}
@@ -839,34 +898,28 @@ def _load_predict_unit():
 
 @pytest.fixture(scope="module")
 def predict_unit():
-    """UMA predict unit shared by the wrappers, loaded once for the module.
+    """UMA predict unit shared by the wrappers and reference calculators.
 
-    ``UMAWrapper`` gates derivatives by mutating the unit (``regress_config``
-    and the task tables): the omol wrapper drops stress. Each wrapper re-gates
-    on every forward, so sharing is safe among wrappers -- but not with
-    ``FAIRChemCalculator``, which does not, hence ``reference_predict_unit``.
+    ``UMAWrapper`` gates derivatives only for the duration of each call and
+    restores the unit afterwards, so the calculators sharing it see the
+    as-loaded forces and stress -- these comparisons double as the end-to-end
+    check of that.
     """
     return _load_predict_unit()
 
 
 @pytest.fixture(scope="module")
-def reference_predict_unit():
-    """Untouched UMA predict unit backing the reference calculators only."""
-    return _load_predict_unit()
+def calc_omol(predict_unit):
+    from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
+
+    return FAIRChemCalculator(predict_unit=predict_unit, task_name="omol")
 
 
 @pytest.fixture(scope="module")
-def calc_omol(reference_predict_unit):
+def calc_omat(predict_unit):
     from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
 
-    return FAIRChemCalculator(predict_unit=reference_predict_unit, task_name="omol")
-
-
-@pytest.fixture(scope="module")
-def calc_omat(reference_predict_unit):
-    from fairchem.core.calculate.ase_calculator import FAIRChemCalculator
-
-    return FAIRChemCalculator(predict_unit=reference_predict_unit, task_name="omat")
+    return FAIRChemCalculator(predict_unit=predict_unit, task_name="omat")
 
 
 @pytest.fixture(scope="module")
