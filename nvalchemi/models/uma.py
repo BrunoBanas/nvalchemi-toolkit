@@ -1394,7 +1394,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             the removed ``"turbo"`` maps to ``"multigpu"``), a comma-separated ``key=value`` spec of
             ``InferenceSettings`` fields (e.g.
             ``"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"``,
-            the recommended SGC settings), or a
+            for composition-changing Monte Carlo), or a
             ``fairchem.core.units.mlip_unit.api.inference.InferenceSettings``
             instance. ``torch.compile`` is reached through this argument
             — see the module docstring's *torch.compile* section.
@@ -1949,7 +1949,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # offsets of +-ceil(cutoff * inverse plane spacing) around the positions
         # it is given, so it relies on wrapped input -- fairchem's own
         # AtomicData.from_ase wraps first. MD positions here are continuous
-        # (NPT and HybridMCMD never fold them back; WrapPeriodicHook is opt-in),
+        # (MD integrators never fold them back; WrapPeriodicHook is opt-in),
         # and once two atoms drift about a cell length apart their minimum image
         # is never generated: the interaction silently vanishes and atoms can
         # collapse onto each other. Whole-lattice-vector shifts leave energy,
