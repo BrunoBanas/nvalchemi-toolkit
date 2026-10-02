@@ -1173,6 +1173,67 @@ class TestUnwrappedPositions:
         _assert_same_outputs(_evaluate(wrapper_omat, shifted), ref)
 
 
+def _vacuum_padded(pbc: tuple[bool, bool, bool], seed: int) -> AtomicData:
+    """Rattled bcc Fe with vacuum along every non-periodic axis (non-singular cell)."""
+    repeats = tuple(3 if periodic else 2 for periodic in pbc)
+    atoms = bulk("Fe", "bcc", a=2.87, cubic=True) * repeats
+    atoms.rattle(stdev=0.05, seed=seed)
+    for axis, periodic in enumerate(pbc):
+        if not periodic:
+            atoms.center(vacuum=8.0, axis=axis)
+    atoms.pbc = pbc
+    atoms.wrap()
+    return _atomicdata_from_ase(atoms)
+
+
+def _zero_vacuum_vectors(data: AtomicData) -> AtomicData:
+    """Copy of *data* whose non-periodic lattice vectors are zero (singular cell)."""
+    cell = data.cell.clone()
+    cell[0, ~data.pbc.reshape(3)] = 0.0
+    return AtomicData(
+        positions=data.positions.clone(),
+        atomic_numbers=data.atomic_numbers,
+        cell=cell,
+        pbc=data.pbc,
+    )
+
+
+class TestLowDimensionalCells:
+    """1D/2D cells with zero lattice vectors match the vacuum-padded cell.
+
+    Non-periodic directions get no images, so a zero vector and an explicit
+    vacuum vector describe the same system. Without completing the zero
+    vectors, fairchem's graph builder sees a zero cell volume. Stress is
+    normalised by that volume, so only energy and forces are compared.
+    """
+
+    @pytest.mark.parametrize(
+        ("pbc", "shifts"),
+        [
+            ((True, True, False), {0: (2, 0, 0), 7: (-1, 3, 0), 20: (0, -2, 0)}),
+            ((False, False, True), {0: (0, 0, 2), 9: (0, 0, -3)}),
+        ],
+        ids=["2d_slab", "1d_wire"],
+    )
+    def test_zero_vacuum_vectors_match_vacuum_padded_cell(
+        self, wrapper_omat, pbc, shifts
+    ):
+        ref_data = _vacuum_padded(pbc, seed=11)
+        ref = _evaluate(wrapper_omat, ref_data)
+        assert ref["forces"].abs().max() > 1e-2  # rattled: non-trivial forces
+
+        zero = _zero_vacuum_vectors(ref_data)
+        for data in (zero, _shift_atoms(zero, shifts)):
+            ours = _evaluate(wrapper_omat, data)
+            assert torch.isfinite(ours["energy"]).all()
+            torch.testing.assert_close(
+                ours["energy"], ref["energy"], atol=1e-4, rtol=1e-6
+            )
+            torch.testing.assert_close(
+                ours["forces"], ref["forces"], atol=1e-4, rtol=1e-4
+            )
+
+
 # ---------------------------------------------------------------------------
 # NVE energy conservation (slow)
 # ---------------------------------------------------------------------------
