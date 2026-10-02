@@ -13,6 +13,7 @@ hooks
 dynamics/index
 models
 gen
+mc
 training/index
 distributed
 distributed_runtime
