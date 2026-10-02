@@ -8,6 +8,15 @@
   L-BFGS in `nvalchemiops`, with the same API shape as FIRE2.
 - `cell_force_scale` on `FIRE2VariableCell` and `LBFGSVariableCell`.
 - `FusedStage` restores segmented (per-atom) integrator state level by level.
+- Agent skills `nvalchemi-uma-submission` (UMA inference settings, batch width,
+  memory and Slurm jobs for MC / MD / hybrid runs) and
+  `nvalchemi-sgc-phase-boundary` (phase boundaries and T-x boundary tracing from
+  SGC data), with their tools in `benchmark/uma_efficiency/` (planner, measured
+  calibration, driver and job templates, MC / MD / hybrid / memory / MoLE
+  benchmarks), `benchmark/phase_boundary/` (isotherm analysis, synthetic data,
+  tracer self-test) and `benchmark/hybrid_sgc_npt/` (campaign driver with
+  in-process chemical-potential calibration, Slurm array script and boundary
+  tracer).
 - **Simulation scheduling** (`nvalchemi.scheduling`): `SimulationBatchPlanner`
   profiles candidate batch widths, recommends the smallest near peak
   throughput within a memory budget, and packs campaigns into per-GPU batches

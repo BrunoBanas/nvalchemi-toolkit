@@ -1,0 +1,206 @@
+{
+  "_about": "Measured cost/memory coefficients for nvalchemi-toolkit + FairChem UMA, used by plan_run.py. Every number is from a real run; see benchmark/uma_efficiency/README.md for the derivations. Recalibrate by re-running the efficiency matrix (run_efficiency_matrix.sh) and refitting (README.md, 'Recalibrating').",
+  "reference": {
+    "model": "uma-s-1p2",
+    "task": "omat",
+    "system": "Au-Pt fcc, a = 4.00 A, 500 atoms (5x5x5 conventional cells), 1200 K",
+    "reference_density_atoms_per_A3": 0.0625,
+    "reference_n_atoms": 500,
+    "gpu": "A100-SXM4-80GB",
+    "measured": "2026-09-24..28, efficiency matrix (run_efficiency_matrix.sh, one allocation per kernel), 20-100 blocks"
+  },
+  "time_model": {
+    "_form": "one batched step takes c1_ms_per_atom * (n0_atoms + width * n_atoms_eff) ms on the reference GPU; n0 is the fixed per-call overhead in atom-equivalents. Fitted through measured width-1 and width-4 medians; reproduces width 2 within 1-3%.",
+    "mc_energy_only": {
+      "compiled_merged": {
+        "c1_ms_per_atom": 0.02178,
+        "n0_atoms": 679,
+        "source": "Kawasaki MC-only, turbo + energy-only: 25.68 ms/step w1, 58.34 ms/step w4"
+      },
+      "eager_merged": {
+        "c1_ms_per_atom": 0.02766,
+        "n0_atoms": 450,
+        "source": "Kawasaki MC-only, merge_mole w/o compile + energy-only: 26.28 / 67.76 ms/step; hybrid MC phase agrees (N0 470)"
+      },
+      "eager_unmerged": {
+        "c1_ms_per_atom": 0.1143,
+        "n0_atoms": 143,
+        "source": "SGC MC-only, recommended spec + energy-only: 73.46 / 244.9 ms/step; SGC-NPT MC phase agrees (N0 137)"
+      },
+      "checkpointed": {
+        "c1_ms_per_atom": 0.1143,
+        "n0_atoms": 143,
+        "source": "ASSUMED equal to eager_unmerged: energy-only has no backward pass, so activation checkpointing should cost nothing. Unmeasured."
+      }
+    },
+    "mc_full_outputs": {
+      "compiled_merged": {
+        "c1_ms_per_atom": 0.05024,
+        "n0_atoms": 350,
+        "source": "Kawasaki MC-only, turbo, full forces: 42.70 / 118.05 ms/step"
+      },
+      "eager_unmerged": {
+        "c1_ms_per_atom": 0.1702,
+        "n0_atoms": 69,
+        "source": "SGC MC-only, recommended spec, full outputs: 96.8 / 352.1 ms/step"
+      },
+      "checkpointed": {
+        "c1_ms_per_atom": 0.3278,
+        "n0_atoms": 52,
+        "source": "SGC MC-only, batch preset: 180.8 / 672.5 ms/step; size scaling 500->2048 atoms validated within 4% (memory_profile_matrix.py)"
+      }
+    },
+    "md_full_outputs": {
+      "eager_merged": {
+        "c1_ms_per_atom": 0.06539,
+        "n0_atoms": 309,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: merge w/o compile 52.9 / 151.0 ms/step (w1/w4); Kawasaki-NPT MD phase agrees (0.0642/403)"
+      },
+      "eager_unmerged": {
+        "c1_ms_per_atom": 0.161,
+        "n0_atoms": 89,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: no merge/no compile 94.9 / 336.4 ms/step; Kawasaki-NPT and SGC-NPT MD phases agree (0.165/105)"
+      },
+      "checkpointed_merged": {
+        "c1_ms_per_atom": 0.1667,
+        "n0_atoms": 138,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: merge w/o compile + activation checkpointing 106.4 / 356.4 ms/step"
+      },
+      "checkpointed_unmerged": {
+        "c1_ms_per_atom": 0.31,
+        "n0_atoms": 58,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 'batch' preset 173.1 / 638.1 ms/step; SGC-NPT MD phase agrees (0.328/61)"
+      },
+      "compiled_merged": {
+        "c1_ms_per_atom": 0.06539,
+        "n0_atoms": 309,
+        "one_off_penalty_s": 1200,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: turbo steady state = merge w/o compile (53.0 / 151.4 ms/step) after a 1146-1181 s first block (32 recompiles). Never worth it."
+      }
+    }
+  },
+  "memory_model": {
+    "_form": "peak reserved GiB = base_gib + width * per_walker_gib, per_walker scaled linearly with n_atoms_eff / 500. Straight line through measured width-1 and width-4 peaks (conservative at width 2 where the growth is super-linear).",
+    "kawasaki_mc": {
+      "compiled_merged": {
+        "base_gib": 0.11,
+        "per_walker_gib": 2.21,
+        "source": "turbo + energy-only: 2.33 / 4.55 / 8.96 GiB"
+      },
+      "eager_merged": {
+        "base_gib": 0.07,
+        "per_walker_gib": 3.59,
+        "source": "merge w/o compile + energy-only: 3.66 / 7.23 / 14.45 GiB"
+      },
+      "eager_unmerged": {
+        "base_gib": 1.24,
+        "per_walker_gib": 0.94,
+        "source": "PROXY: SGC MC-only energy-only (same settings, no merge)"
+      }
+    },
+    "sgc_mc": {
+      "eager_unmerged": {
+        "base_gib": 1.24,
+        "per_walker_gib": 0.94,
+        "source": "recommended spec + energy-only: 2.18 / 3.15 / 5.00 GiB"
+      },
+      "checkpointed": {
+        "base_gib": 1.24,
+        "per_walker_gib": 0.94,
+        "source": "ASSUMED = eager_unmerged energy-only (no backward to checkpoint). Unmeasured."
+      }
+    },
+    "kawasaki_npt": {
+      "eager_merged": {
+        "base_gib": 0.08,
+        "per_walker_gib": 3.98,
+        "source": "merge w/o compile, energy-only MC: 4.06 / 8.01 / 16.00 GiB"
+      },
+      "eager_unmerged": {
+        "base_gib": 1.37,
+        "per_walker_gib": 5.55,
+        "source": "no merge/no compile, energy-only MC: 6.91 / 12.39 / 23.55 GiB"
+      },
+      "compiled_merged": {
+        "base_gib": 0.0,
+        "per_walker_gib": 5.35,
+        "source": "turbo + energy-only (recompile storm inflates reserved): 4.01 / 7.91 / 20.06 GiB"
+      },
+      "checkpointed_merged": {
+        "base_gib": 0.14,
+        "per_walker_gib": 1.84,
+        "source": "PROXY: pure NPT merge + checkpointing (MD dominates Kawasaki-NPT memory; the merged no-ckpt pair agrees: 0.07+3.98 NPT vs 0.08+3.98 Kawasaki-NPT)"
+      },
+      "checkpointed_unmerged": {
+        "base_gib": -0.59,
+        "per_walker_gib": 4.54,
+        "source": "PROXY: SGC-NPT batch preset (checkpointing, no merge; full outputs)"
+      }
+    },
+    "sgc_npt": {
+      "eager_unmerged": {
+        "base_gib": -4.2,
+        "per_walker_gib": 13.23,
+        "superlinear": true,
+        "source": "recommended spec, energy-only MC: 9.02 / 17.84 / 48.70 GiB -- grows faster than linear; unexplained; widths > 4 unmeasured"
+      },
+      "checkpointed": {
+        "base_gib": -0.59,
+        "per_walker_gib": 4.54,
+        "source": "batch preset, full outputs: 3.95 / 6.80 / 17.57 GiB"
+      }
+    },
+    "md": {
+      "eager_merged": {
+        "base_gib": 0.07,
+        "per_walker_gib": 3.98,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 4.05 / 8.01 / 16.00 GiB"
+      },
+      "eager_unmerged": {
+        "base_gib": 1.36,
+        "per_walker_gib": 5.55,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 6.91 / 12.39 / 23.55 GiB"
+      },
+      "checkpointed_merged": {
+        "base_gib": 0.14,
+        "per_walker_gib": 1.84,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 1.98 / 4.11 / 7.49 GiB"
+      },
+      "checkpointed_unmerged": {
+        "base_gib": 1.26,
+        "per_walker_gib": 1.98,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: batch preset 3.24 / 5.16 / 9.19 GiB"
+      },
+      "compiled_merged": {
+        "base_gib": 0.3,
+        "per_walker_gib": 3.8,
+        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: turbo 4.10 / 7.84 / 15.50 GiB"
+      }
+    }
+  },
+  "size_scaling": {
+    "_note": "Per-walker memory measured 5.6 MB/atom at 500 atoms but 7.9-8.0 MB/atom at 1372-2048 atoms for full-force compiled runs (memory_profile_matrix.py); checkpointed runs stay linear (4.28 MB/atom). Applied as a conservative ramp to non-checkpointed memory, and to compiled per-atom time, which showed the same ~1.4x at 1372-2048 atoms.",
+    "large_system_factor": 1.45,
+    "ramp_from_atoms": 500,
+    "ramp_to_atoms": 1372
+  },
+  "gpus": {
+    "a100-sxm4-80gb": {
+      "capacity_gib": 79.27,
+      "time_factor": 1.0,
+      "note": "reference card"
+    },
+    "a100-pcie-40gb": {
+      "capacity_gib": 39.52,
+      "time_factor": 1.1,
+      "note": "hybrid measured 13.82 vs 12.61 s/block on SXM"
+    },
+    "h100-80gb": {
+      "capacity_gib": 79.17,
+      "time_factor": 0.45,
+      "note": "2.1-2.4x faster on every workload measured"
+    }
+  },
+  "process_overhead_s": 75,
+  "memory_fraction": 0.85
+}

@@ -23,6 +23,8 @@ copy the skill folders into your project's or home skills directory.
 | Build reaction paths or run NEB for minimum-energy paths | `nvalchemi-mep` |
 | Implement a new integrator, optimizer, or sampler class | `nvalchemi-dynamics-implementation` |
 | Add progress dashboards, TensorBoard, or CSV observability | `nvalchemi-reporting` |
+| Choose UMA inference settings, batch width, memory and jobs for MC / MD / hybrid runs | `nvalchemi-uma-submission` |
+| Turn SGC Monte Carlo isotherms into phase boundaries; trace a T-x coexistence line | `nvalchemi-sgc-phase-boundary` |
 
 Each skill lives at `.claude/skills/<name>/SKILL.md`.
 
@@ -37,6 +39,7 @@ model-wrapping + loss-api -> training-api -> fine-tuning
 dynamics-hooks -> dynamics-api | dynamics-implementation
 dynamics-hooks + dynamics-api -> mep
 reporting (orthogonal: attaches to training and dynamics)
+dynamics-api -> uma-submission -> sgc-phase-boundary
 ```
 
 ## Authoring conventions
