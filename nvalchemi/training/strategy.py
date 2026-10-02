@@ -57,6 +57,7 @@ from torch.optim.lr_scheduler import LRScheduler
 
 from nvalchemi._serialization import _import_cls
 from nvalchemi._typing import ModelOutputs
+from nvalchemi.data.level_storage import resolve_device
 from nvalchemi.distributed import DistributedManager
 from nvalchemi.hooks._context import TrainContext
 from nvalchemi.hooks._protocol import Hook
@@ -101,6 +102,7 @@ from nvalchemi.training.optimizers import (
 from nvalchemi.training.runtime import (
     freeze_unconfigured_models,
     move_to_devices,
+    rehome_optimizer_state,
     train_configured_models,
 )
 
@@ -381,8 +383,12 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     target. Every ``optimizer_configs`` key must name a model present in
     ``models``, and each entry must contain at least one
     :class:`OptimizerConfig`. ``devices`` must have length ``1`` or
-    ``len(models)``; named-model :meth:`run` currently supports a single shared
-    device only.
+    ``len(models)``. Named-model :meth:`run` stages one batch on
+    ``devices[0]``, so a per-model list must name the same device in every
+    entry, and a list naming distinct devices is refused. Entries are compared
+    after :func:`~nvalchemi.data.resolve_device` fills in the index of an
+    index-less ``cuda``, so ``cuda`` and ``cuda:0`` are one device on a
+    process whose current device is ``0``.
 
     Use :meth:`to_spec_dict` / :meth:`from_spec_dict` for JSON-based save/load.
     Optimizer configs, loss specs, devices, importable training functions, and
@@ -486,8 +492,11 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
     devices: list[torch.device] = Field(
         default_factory=lambda: [torch.device("cpu")],
         description=(
-            "One device shared by all models, or one device per model for helper "
-            "placement. Named-model ``run`` currently supports one device only."
+            "One device shared by all models, or one entry per model naming "
+            "that same device; named-model ``run`` stages its batch on the "
+            "first, so two distinct devices are refused at run time. An "
+            "index-less 'cuda' is resolved to the process's current device "
+            "before the entries are compared."
         ),
     )
     distributed_manager: Annotated[DistributedManager | None, SkipValidation()] = Field(
@@ -776,12 +785,22 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         )
 
     def _replace_hooks_with_registry_validation(self, hooks: Sequence[Hook]) -> None:
-        """Replace hook storage after validating each hook through the base registry."""
-        previous_hooks = self.hooks
+        """Replace hook storage after validating hooks through the base registry.
+
+        Update-hook folding rebuilds the hook list after some hooks may already
+        have registered. Preserve those hooks by identity so one-time
+        registration-time activities such as those involving model mutation
+        are not replayed.
+        """
+        previous_hooks = list(self.hooks)
+        registered_hook_ids = {id(hook) for hook in previous_hooks}
         self.hooks = []
         try:
             for hook in hooks:
-                HookRegistryMixin.register_hook(self, hook)
+                if id(hook) in registered_hook_ids:
+                    self.hooks.append(hook)
+                else:
+                    HookRegistryMixin.register_hook(self, hook)
         except Exception:
             self.hooks = previous_hooks
             raise
@@ -1003,20 +1022,48 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         return self.active_dataloader
 
     def _validate_runtime_devices(self) -> None:
-        """Raise for runtime device layouts that cannot be executed."""
-        if not self.single_model_input and len(self.devices) > 1:
+        """Raise for runtime device layouts that cannot be executed.
+
+        ``training_fn(models, batch)`` receives one batch staged on
+        ``devices[0]``, so a per-model list is accepted only when every entry
+        names the same device. An index-less ``cuda`` means the process's
+        current device, which each data-parallel rank sets to its node-local
+        one, so entries are compared after
+        :func:`~nvalchemi.data.resolve_device` fills that index in:
+        ``[cuda, cuda:0]`` is one device on the rank whose current device is
+        ``0`` and two devices on every other rank. Without a CUDA runtime the
+        index cannot be resolved, and entries are compared as written.
+        """
+        resolve = resolve_device if torch.cuda.is_available() else torch.device
+        distinct = {resolve(device) for device in self.devices}
+        if not self.single_model_input and len(distinct) > 1:
             raise ValueError(
-                "Named-model training with multiple devices is unsupported: "
-                "training_fn(models, batch) receives one batch on one device. "
-                "Use a single shared device or pass models=model for "
-                "single-model behavior."
+                "Named-model training across distinct devices is unsupported: "
+                "training_fn(models, batch) receives one batch on devices[0], so "
+                "a model on another device cannot read it; got "
+                f"{sorted(str(device) for device in distinct)!r}. An index-less "
+                "'cuda' resolves to this process's current device before the "
+                "comparison. Name one device for every model, or pass "
+                "models=model for single-model behavior."
             )
 
     def _setup_runtime_optimizers(
         self, *, rebuild: bool = False
     ) -> tuple[list[torch.optim.Optimizer], list[LRScheduler | None]]:
-        """Build or reuse flattened runtime optimizer/scheduler lists."""
+        """Build or reuse flattened runtime optimizer/scheduler lists.
+
+        Reused optimizers are rehomed before they are handed back. A resumed
+        optimizer holds state placed where the parameters sat at
+        ``load_state_dict`` time, and every entry point moves the models onto
+        ``devices`` just before asking for the optimizers, so that state can
+        predate the move — in :meth:`run`, in :meth:`train_batch`, or after a
+        :class:`~nvalchemi.training.hooks.DDPHook` re-pins a rank. Rehoming is
+        idempotent and only touches tensors whose device differs from their
+        parameter's, so freshly built optimizers pay nothing for it.
+        """
         if not rebuild and self._runtime_optimizers:
+            for optimizer in self._optimizers:
+                rehome_optimizer_state(optimizer)
             return self._optimizers, self._lr_schedulers
 
         records: list[_RuntimeOptimizer] = []
@@ -1380,9 +1427,9 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         Raises
         ------
         ValueError
-            If named-model training is configured with multiple devices, or if
-            the dataloader produces no batches before the configured target
-            step count is reached.
+            If named-model training is configured with more than one distinct
+            device, or if the dataloader produces no batches before the
+            configured target step count is reached.
         """
         training_started = False
         strategy_context = nullcontext(self) if self._context_depth > 0 else self
@@ -1540,6 +1587,7 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         root_folder: Path | str,
         *,
         checkpoint_index: int = -1,
+        save_trainable_state_only: bool = False,
     ) -> int:
         """Save this strategy as a restartable checkpoint.
 
@@ -1565,6 +1613,12 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
         checkpoint_index : int, optional
             Checkpoint index to write. ``-1`` auto-increments from the latest
             manifest index, or starts at ``0`` when no manifest exists.
+        save_trainable_state_only : bool, optional
+            If ``True``, save optimizer-selected model parameters plus buffers
+            and restore model weights non-strictly. Use this only when untrained
+            model weights are reproducible from the saved model specs. Set
+            ``False`` otherwise.
+            Default ``False``.
 
         Returns
         -------
@@ -1587,6 +1641,7 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             root_folder,
             checkpoint_index=checkpoint_index,
             strategy=self,
+            save_trainable_state_only=save_trainable_state_only,
         )
 
     def restore_checkpoint(
@@ -2035,6 +2090,14 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             summary is returned on every rank. The summary is also stored on
             :attr:`last_validation`.
 
+        Models are moved to :attr:`devices` first, so a standalone validation
+        pass on a freshly constructed strategy behaves like one taken during
+        :meth:`run`. The move is idempotent for models already in place. A
+        published :attr:`inference_model` that the configuration can select is
+        placed on ``devices[0]`` the same way :meth:`set_inference_model` places
+        it, so a slot filled before :attr:`devices` changed still meets batches
+        on the device they were moved to.
+
         Raises
         ------
         RuntimeError
@@ -2045,6 +2108,12 @@ class TrainingStrategy(BaseModel, HookRegistryMixin):
             raise RuntimeError(
                 "TrainingStrategy.validate() requires a validation_config."
             )
+        self.models = move_to_devices(self.models, self.devices)
+        if (
+            self.inference_model is not None
+            and self.validation_config.use_ema != "never"
+        ):
+            self.inference_model.to(self.devices[0], non_blocking=True)
         with _validation.ValidationLoop.from_training_strategy(self) as loop:
             self.last_validation = loop.execute()
         # Fire AFTER_VALIDATION while the summary is still live, before any

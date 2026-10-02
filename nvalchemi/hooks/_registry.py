@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
 from nvalchemi.data import Batch
 from nvalchemi.hooks._context import HookContext
@@ -178,10 +179,18 @@ class HookRegistryMixin:
                 return True
         return False
 
-    def _call_hooks(self, stage: Enum, batch: Batch | None) -> None:
+    def _call_hooks(
+        self,
+        stage: Enum,
+        batch: Batch | None,
+        *,
+        ignore_frequency: bool = False,
+        **context_kwargs: Any,
+    ) -> None:
         """Call hooks registered for the given stage, gated by frequency.
 
-        Hooks fire when ``self.step_count % hook.frequency == 0``.
+        Hooks fire when ``self.step_count % hook.frequency == 0`` unless
+        frequency gating is explicitly disabled for an event-driven dispatch.
         Hooks that define ``_runs_on_stage`` are called when that method
         returns ``True``; otherwise, the default check is
         ``stage == hook.stage``.
@@ -192,8 +201,15 @@ class HookRegistryMixin:
             Current workflow stage.
         batch : Batch | None
             Current batch being processed, if available.
+        ignore_frequency : bool
+            Whether to bypass the step-based frequency gate.
+        **context_kwargs
+            Workflow-specific fields forwarded to :meth:`_build_context`.
         """
-        ctx = self._build_context(batch)
+        if not self.hooks:
+            return
+
+        ctx = self._build_context(batch, **context_kwargs)
         for hook in self.hooks:
             runs_on_stage = getattr(hook, "_runs_on_stage", None)
             if runs_on_stage is not None:
@@ -201,5 +217,5 @@ class HookRegistryMixin:
                     continue
             elif stage != hook.stage:
                 continue
-            if self.step_count % hook.frequency == 0:
+            if ignore_frequency or self.step_count % hook.frequency == 0:
                 hook(ctx, stage)

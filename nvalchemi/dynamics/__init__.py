@@ -36,7 +36,20 @@ from nvalchemi.dynamics.optimizers import (
     FIREVariableCell,
 )
 from nvalchemi.dynamics.sampler import SizeAwareSampler
-from nvalchemi.dynamics.sinks import DataSink, GPUBuffer, HostMemory, ZarrData
+from nvalchemi.dynamics.sinks import (
+    DataSink,
+    GPUBuffer,
+    HostMemory,
+    ResizableSink,
+    ZarrData,
+)
+from nvalchemi.dynamics.strategy import DynamicsStrategy
+from nvalchemi.dynamics.structure_sampler import (
+    FitPolicy,
+    OrderedStructureSampler,
+    StructureSource,
+    WithinBudget,
+)
 
 __all__ = [
     "BaseDynamics",
@@ -45,20 +58,26 @@ __all__ = [
     "DemoDynamics",
     "DistributedPipeline",
     "DynamicsStage",
+    "DynamicsStrategy",
     "FIRE",
     "FIRE2",
     "FIRE2VariableCell",
     "FIREVariableCell",
+    "FitPolicy",
     "FusedStage",
     "GPUBuffer",
     "Hook",
     "HostMemory",
+    "ResizableSink",
     "NPH",
     "NPT",
     "NVE",
     "NVTLangevin",
     "NVTNoseHoover",
+    "OrderedStructureSampler",
     "SizeAwareSampler",
+    "StructureSource",
+    "WithinBudget",
     "ZarrData",
     "hooks",
     "initialize_velocities",
