@@ -198,6 +198,91 @@ with NPT(
 
 The model must return `stress` for NPT to propagate the cell degrees of freedom.
 
+## Monte Carlo
+
+The independent `nvalchemi.mc` package provides batched Monte Carlo samplers.
+`SGC` proposes single-site species transmutations and samples the
+semi-grand-canonical potential `E - sum(mu_i N_i)`:
+
+```python
+from nvalchemi.mc import SGC
+
+with SGC(
+  model=model,
+  temperature=1000.0,
+  species=[1, 2],
+  chemical_potentials={1: 0.0, 2: 0.2},
+  n_steps=10000,
+) as mc:
+  result = mc.run(batch)
+
+```
+
+One proposal is attempted independently for every active graph per step.
+Accepted moves are available as the graph-level boolean `batch.mc_accepted`.
+
+### Variance-constrained SGC
+
+`VCSGC` (variance-constrained SGC, binary systems) uses the same transmutation
+move but replaces the linear reservoir with a quadratic constraint on the
+concentration `c` of one species, sampling `E + N (phi c + kappa c^2)`. Plain
+SGC cannot hold a composition inside a miscibility gap, because the
+concentration jumps to one side; `VCSGC` can, and the slope of the free energy
+at the sampled mean `cbar` is `mu_B - mu_A = reference - phi - 2 kappa cbar`.
+Integrating that slope over a grid of target compositions gives `F(c)` for a
+common-tangent construction:
+
+```python
+from nvalchemi.mc import VCSGC
+
+mc = VCSGC(
+  model=model,
+  temperature=700.0,
+  species=[79, 78],            # c is the fraction of species[1] (Pt) by default
+  kappa=1.0,                   # eV, intensive
+  target_concentration=0.4,    # sets phi = -2 * kappa * c0
+  reference_exchange_potential=-2.87,  # calibrated mu_Pt - mu_Au at this T, eV
+)
+mc.run(batch, n_steps=2000)                  # equilibrate
+c_sum, n_samples = 0.0, 100
+for _ in range(n_samples):
+  mc.run(batch, n_steps=100)
+  c_sum = c_sum + mc.concentration(batch)    # per-graph instantaneous c
+cbar = c_sum / n_samples                     # the relation needs the ensemble mean
+delta_mu = mc.exchange_chemical_potential(cbar, batch)
+```
+
+Choose `kappa > -min f''(c) / 2`, where `f` is the free energy per atom:
+below that the composition distribution turns bimodal while `cbar` can still
+look right, so check that the sampled concentration is unimodal before using
+it. `kappa = 0` recovers `SGC` with `mu_B - mu_A = reference - phi`.
+
+Always pass `reference_exchange_potential` for a machine-learned potential.
+Per-element energy offsets put the system's own `mu_B - mu_A` electronvolts
+away from zero, while the constraint can supply at most `2 kappa`, so without
+the calibrated reference (the same one an SGC scan is centred on) the walker
+runs to the favoured end member instead of sampling near the target.
+
+### Kawasaki: fixed composition
+
+For a fixed composition use `Kawasaki`: each step swaps the species of one
+nearest-neighbour pair per graph (by default only unlike pairs, so no move is
+wasted). The pairs come from a short-range proposal graph,
+`Kawasaki(model=model, temperature=1000.0, cutoff=3.4)`, built independently of
+the model's own neighbour list; call `synchronize(batch)` after positions change
+outside the sampler (e.g. after an MD block) so the graph is rebuilt.
+
+### Species, masses and fused stages
+
+Every sampler updates `atomic_masses` for each atom whose species an accepted
+move changes, so MD run afterwards always integrates with the current species'
+mass. MC samplers also compose with MD in a `FusedStage` (`mc + md`), which
+runs MC on some graphs and MD on others, selected by `status`, sharing one
+forward pass per step. MC takes its acceptance baseline from the energy on the
+batch, so a graph that migrates into the MC stage needs no extra call; one
+migrating out of it carries the forces of its last (possibly rejected) trial
+into its first MD step.
+
 ## Writing your own dynamics
 
 All integrators and optimizers inherit from

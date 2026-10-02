@@ -8,6 +8,25 @@
   L-BFGS in `nvalchemiops`, with the same API shape as FIRE2.
 - `cell_force_scale` on `FIRE2VariableCell` and `LBFGSVariableCell`.
 - `FusedStage` restores segmented (per-atom) integrator state level by level.
+- **Monte Carlo samplers** (`nvalchemi.mc`): GPU-resident, batched
+  `BaseMonteCarlo` with one proposal per active graph per step.
+  - `SGC`: semi-grand-canonical single-site transmutations; scalar or per-graph
+    chemical-potential reservoirs.
+  - `VCSGC`: binary variance-constrained SGC (Sadigh et al., Phys. Rev. B 85,
+    184203, 2012), holding a graph at any composition, including inside a
+    miscibility gap, and returning `mu_B - mu_A = reference - phi - 2 kappa cbar`.
+    Parametrised by `phi` or `target_concentration` with an intensive `kappa`
+    (eV); `reference_exchange_potential` centres the constraint on a calibrated
+    `mu_B - mu_A`, which machine-learned potentials need.
+  - `Kawasaki`: fixed-composition nearest-neighbour swaps on a short-range
+    proposal graph independent of the model's neighbour list. By default only
+    unlike-species pairs are drawn, with the Metropolis-Hastings factor
+    `n(x)/n(x')` over unlike-pair counts, so no evaluation is spent on a swap
+    that cannot change the state.
+  - Accepted moves update `atomic_masses` to the new species' mass (custom
+    per-species masses are kept), so MD after MC integrates with the right mass.
+  - Samplers compose with MD in a `FusedStage` (`mc + md`), each acting on its
+    own graphs within one shared forward pass.
 - Add `GroupLayout` and `Batch.group_layout` for treating contiguous graphs as
   logical groups, with graph/node mappings, group cardinalities, reductions,
   broadcasts, cache invalidation, and grouped-batch append support.
