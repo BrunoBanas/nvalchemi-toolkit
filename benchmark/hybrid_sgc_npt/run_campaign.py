@@ -292,9 +292,7 @@ N_BLOCKS_REFERENCE = 200  # 50 equilibration + 150 production; no parent state.
 N_BLOCKS_CONTINUATION = 100  # 50 equilibration + 50 production; warm-started.
 N_BLOCKS_SCAN_SEED = 200  # Fresh A-rich/B-rich endpoint burn-in; no parent state.
 N_BLOCKS_SCAN_STEP = 100  # Per delta_mu_excess step along a scan branch; warm-started.
-EQUILIBRATION_WINDOW_BLOCKS = (
-    25  # _equilibration_gate check interval.
-)
+EQUILIBRATION_WINDOW_BLOCKS = 25  # _equilibration_gate check interval.
 
 USE_CONTINUATION = True
 

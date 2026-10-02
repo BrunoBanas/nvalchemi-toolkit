@@ -146,7 +146,4 @@ gate" above), and appends to `checkpoints/atoms<N>_throughput.csv`
 (`run_id, n_atoms, batch_width, n_blocks, wall_seconds,
 walker_blocks_per_second, mc_acceptance, continuation,
 composition_gate_resolved, energy_gate_resolved, resolved`) — the
-efficiency record for this benchmark. A `checkpoints/atoms<N>_throughput.csv`
-left over from before this fix has the old 8-column header; new rows
-appended to it will have 11 columns instead (no migration) -- delete it and let the header be rewritten
-if you hit this.
+efficiency record for this benchmark.
