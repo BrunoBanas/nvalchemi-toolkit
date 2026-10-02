@@ -4,6 +4,10 @@
 
 ### Added
 
+- `benchmark/uma_efficiency`: planner recalibrated on 62 measured cells (108-2048 atoms,
+  widths 1-16): per-walker time overhead, linear memory (no size ramp), SGC-NPT
+  walker-dependent memory with a 70% budget; new `fit_calibration.py` refits
+  `calibration.json` from efficiency-matrix results.
 - Agent skills `nvalchemi-uma-submission` (UMA inference settings, batch width,
   memory and Slurm jobs for MC / MD / hybrid runs) and `nvalchemi-sgc-phase-boundary`
   (phase boundaries and T-x boundary tracing from SGC data), with their tools:

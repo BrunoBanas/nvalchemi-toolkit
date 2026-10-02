@@ -7,30 +7,46 @@
     "reference_density_atoms_per_A3": 0.0625,
     "reference_n_atoms": 500,
     "gpu": "A100-SXM4-80GB",
-    "measured": "2026-09-24..28, efficiency matrix (run_efficiency_matrix.sh, one allocation per kernel), 20-100 blocks"
+    "measured": "2026-09-24..30, efficiency matrix (500 atoms, widths 1/2/4) + follow-up (widths 8/12, 108/256/2048 atoms, checkpointing, compile), A100-SXM4-80GB"
   },
   "time_model": {
-    "_form": "one batched step takes c1_ms_per_atom * (n0_atoms + width * n_atoms_eff) ms on the reference GPU; n0 is the fixed per-call overhead in atom-equivalents. Fitted through measured width-1 and width-4 medians; reproduces width 2 within 1-3%.",
+    "_form": "one batched step takes c1_ms_per_atom * (n0_atoms + width * (N_eff * sf + nw_atoms)) ms on the reference GPU: n0 = per-call overhead in atom-equivalents (amortized by batching), nw = per-walker overhead (not amortized), sf = size_scaling factor, applied to compiled runs only. Least-squares fit (relative error) to every A100-SXM cell of the efficiency matrix and its follow-up: 108-2048 atoms, widths 1-16.",
     "mc_energy_only": {
       "compiled_merged": {
-        "c1_ms_per_atom": 0.02178,
-        "n0_atoms": 679,
-        "source": "Kawasaki MC-only, turbo + energy-only: 25.68 ms/step w1, 58.34 ms/step w4"
+        "c1_ms_per_atom": 0.01873,
+        "n0_atoms": 818,
+        "nw_atoms": 76,
+        "source": "Kawasaki MC-only turbo + energy-only, 500 atoms w1-12 and 2048 atoms w1/2; 8 cells, max error 8.5%"
       },
       "eager_merged": {
-        "c1_ms_per_atom": 0.02766,
-        "n0_atoms": 450,
-        "source": "Kawasaki MC-only, merge_mole w/o compile + energy-only: 26.28 / 67.76 ms/step; hybrid MC phase agrees (N0 470)"
+        "c1_ms_per_atom": 0.02636,
+        "n0_atoms": 497,
+        "nw_atoms": 0,
+        "source": "Kawasaki MC-only and Kawasaki-NPT MC phase, merge w/o compile, 500 atoms w1-12, 2048 atoms w1/2; 12 cells, max error 3.3%"
       },
       "eager_unmerged": {
-        "c1_ms_per_atom": 0.1143,
-        "n0_atoms": 143,
-        "source": "SGC MC-only, recommended spec + energy-only: 73.46 / 244.9 ms/step; SGC-NPT MC phase agrees (N0 137)"
+        "c1_ms_per_atom": 0.10891,
+        "n0_atoms": 161,
+        "nw_atoms": 17,
+        "source": "SGC MC-only (500 atoms w1-12), SGC-NPT MC phase (108/256/500/2048 atoms incl. checkpointed), Kawasaki-NPT no-merge MC phase; 26 cells, max error 3.6%"
       },
       "checkpointed": {
-        "c1_ms_per_atom": 0.1143,
-        "n0_atoms": 143,
-        "source": "ASSUMED equal to eager_unmerged: energy-only has no backward pass, so activation checkpointing should cost nothing. Unmeasured."
+        "c1_ms_per_atom": 0.10891,
+        "n0_atoms": 161,
+        "nw_atoms": 17,
+        "source": "checkpointing does not slow unmerged energy-only MC: measured equal at 500 atoms w1/2/4 and 2048 atoms (SGC-NPT MC phase); same fit as eager_unmerged"
+      },
+      "checkpointed_unmerged": {
+        "c1_ms_per_atom": 0.10891,
+        "n0_atoms": 161,
+        "nw_atoms": 17,
+        "source": "checkpointing does not slow unmerged energy-only MC: measured equal at 500 atoms w1/2/4 and 2048 atoms (SGC-NPT MC phase); same fit as eager_unmerged"
+      },
+      "checkpointed_merged": {
+        "c1_ms_per_atom": 0.08853,
+        "n0_atoms": 497,
+        "nw_atoms": 0,
+        "source": "merge + checkpointing slows energy-only MC 3.36x vs merge alone (Kawasaki-NPT MC phase, 2048 atoms, 225 vs 66 ms/step); one cell, scaled from eager_merged"
       }
     },
     "mc_full_outputs": {
@@ -52,45 +68,50 @@
     },
     "md_full_outputs": {
       "eager_merged": {
-        "c1_ms_per_atom": 0.06539,
-        "n0_atoms": 309,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: merge w/o compile 52.9 / 151.0 ms/step (w1/w4); Kawasaki-NPT MD phase agrees (0.0642/403)"
+        "c1_ms_per_atom": 0.06597,
+        "n0_atoms": 345,
+        "nw_atoms": 0,
+        "source": "NPT md-only and Kawasaki-NPT MD phase, merge w/o compile, 500 atoms w1-12 and 2048 atoms; 14 cells, max error 8.0%"
       },
       "eager_unmerged": {
-        "c1_ms_per_atom": 0.161,
-        "n0_atoms": 89,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: no merge/no compile 94.9 / 336.4 ms/step; Kawasaki-NPT and SGC-NPT MD phases agree (0.165/105)"
+        "c1_ms_per_atom": 0.13253,
+        "n0_atoms": 208,
+        "nw_atoms": 72,
+        "source": "NPT md-only no merge (500 w1-4, 2048), SGC-NPT MD phase (108/256/500/2048), Kawasaki-NPT no-merge MD phase; small cells worst; 18 cells, max error 18.8%"
       },
       "checkpointed_merged": {
-        "c1_ms_per_atom": 0.1667,
-        "n0_atoms": 138,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: merge w/o compile + activation checkpointing 106.4 / 356.4 ms/step"
+        "c1_ms_per_atom": 0.16874,
+        "n0_atoms": 130,
+        "nw_atoms": 0,
+        "source": "NPT md-only and Kawasaki-NPT MD phase, merge + checkpointing, 500 atoms w1-4 and 2048 atoms; 5 cells, max error 0.9%"
       },
       "checkpointed_unmerged": {
-        "c1_ms_per_atom": 0.31,
-        "n0_atoms": 58,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 'batch' preset 173.1 / 638.1 ms/step; SGC-NPT MD phase agrees (0.328/61)"
+        "c1_ms_per_atom": 0.18592,
+        "n0_atoms": 115,
+        "nw_atoms": 78,
+        "source": "SGC-NPT MD phase, no merge + checkpointing (tf32 on), 500 atoms w1/2/4 and 2048 atoms; 4 cells, max error 1.7%"
       },
       "compiled_merged": {
-        "c1_ms_per_atom": 0.06539,
-        "n0_atoms": 309,
-        "one_off_penalty_s": 1200,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: turbo steady state = merge w/o compile (53.0 / 151.4 ms/step) after a 1146-1181 s first block (32 recompiles). Never worth it."
+        "c1_ms_per_atom": 0.06597,
+        "n0_atoms": 345,
+        "nw_atoms": 0,
+        "source": "turbo under NPT: steady state equals merge w/o compile after 32 recompiles (~1150-1180 s in the first block). Never worth it.",
+        "one_off_penalty_s": 1200
       }
     }
   },
   "memory_model": {
-    "_form": "peak reserved GiB = base_gib + width * per_walker_gib, per_walker scaled linearly with n_atoms_eff / 500. Straight line through measured width-1 and width-4 peaks (conservative at width 2 where the growth is super-linear).",
+    "_form": "peak reserved GiB = base_gib + per_walker_gib * A + per_walker_cross_gib * A * (width - 1), A = width * N_eff / 500 (memory is linear in atom count; no size ramp). The cross term is non-zero only for SGC-NPT, whose memory grows faster than linear in the number of walkers. budget_scale lowers the usable fraction of the card for families the fit under-predicts.",
     "kawasaki_mc": {
       "compiled_merged": {
-        "base_gib": 0.11,
-        "per_walker_gib": 2.21,
-        "source": "turbo + energy-only: 2.33 / 4.55 / 8.96 GiB"
+        "base_gib": 0.1,
+        "per_walker_gib": 2.226,
+        "source": "Kawasaki MC turbo + energy-only, 500 atoms w1-12 and 2048 atoms w1/2; max error 0.4%"
       },
       "eager_merged": {
-        "base_gib": 0.07,
-        "per_walker_gib": 3.59,
-        "source": "merge w/o compile + energy-only: 3.66 / 7.23 / 14.45 GiB"
+        "base_gib": 0.11,
+        "per_walker_gib": 3.56,
+        "source": "Kawasaki MC merge w/o compile + energy-only, 500 atoms w1/2/4 and 2048 w1/2; max error 0.7%"
       },
       "eager_unmerged": {
         "base_gib": 1.24,
@@ -100,9 +121,9 @@
     },
     "sgc_mc": {
       "eager_unmerged": {
-        "base_gib": 1.24,
-        "per_walker_gib": 0.94,
-        "source": "recommended spec + energy-only: 2.18 / 3.15 / 5.00 GiB"
+        "base_gib": 1.23,
+        "per_walker_gib": 0.951,
+        "source": "SGC MC energy-only, 500 atoms w1-12; max error 0.7%"
       },
       "checkpointed": {
         "base_gib": 1.24,
@@ -112,14 +133,14 @@
     },
     "kawasaki_npt": {
       "eager_merged": {
-        "base_gib": 0.08,
-        "per_walker_gib": 3.98,
-        "source": "merge w/o compile, energy-only MC: 4.06 / 8.01 / 16.00 GiB"
+        "base_gib": 0.11,
+        "per_walker_gib": 3.951,
+        "source": "Kawasaki-NPT merge w/o compile, 500 atoms w1-12 and 2048 atoms; max error 0.5%"
       },
       "eager_unmerged": {
         "base_gib": 1.37,
-        "per_walker_gib": 5.55,
-        "source": "no merge/no compile, energy-only MC: 6.91 / 12.39 / 23.55 GiB"
+        "per_walker_gib": 5.53,
+        "source": "Kawasaki-NPT no merge, 500 atoms w1/2/4; max error 0.4%"
       },
       "compiled_merged": {
         "base_gib": 0.0,
@@ -127,9 +148,9 @@
         "source": "turbo + energy-only (recompile storm inflates reserved): 4.01 / 7.91 / 20.06 GiB"
       },
       "checkpointed_merged": {
-        "base_gib": 0.14,
-        "per_walker_gib": 1.84,
-        "source": "PROXY: pure NPT merge + checkpointing (MD dominates Kawasaki-NPT memory; the merged no-ckpt pair agrees: 0.07+3.98 NPT vs 0.08+3.98 Kawasaki-NPT)"
+        "base_gib": 0.16,
+        "per_walker_gib": 1.863,
+        "source": "merge + checkpointing: pure-NPT fit, agrees with the 2048-atom Kawasaki-NPT cell (7.65 GiB)"
       },
       "checkpointed_unmerged": {
         "base_gib": -0.59,
@@ -138,33 +159,41 @@
       }
     },
     "sgc_npt": {
+      "budget_scale": 0.82,
       "eager_unmerged": {
-        "base_gib": -4.2,
-        "per_walker_gib": 13.23,
-        "superlinear": true,
-        "source": "recommended spec, energy-only MC: 9.02 / 17.84 / 48.70 GiB -- grows faster than linear; unexplained; widths > 4 unmeasured"
+        "base_gib": 0.96,
+        "per_walker_gib": 8.382,
+        "per_walker_cross_gib": 0.34,
+        "source": "SGC-NPT no merge, energy-only MC: 108 (w1-16), 256 (w1-8), 500 (w1/2/4), 2048 (w1) atoms; max error 21% (under-predicts 500 x 4 walkers: 38.5 vs 48.7 GiB) -- hence budget_scale"
+      },
+      "checkpointed_unmerged": {
+        "base_gib": 0.92,
+        "per_walker_gib": 2.885,
+        "per_walker_cross_gib": 0.368,
+        "source": "SGC-NPT no merge + checkpointing, energy-only MC, 500 atoms w1/2/4 and 2048 atoms; max error 9%"
       },
       "checkpointed": {
-        "base_gib": -0.59,
-        "per_walker_gib": 4.54,
-        "source": "batch preset, full outputs: 3.95 / 6.80 / 17.57 GiB"
+        "base_gib": 0.92,
+        "per_walker_gib": 2.885,
+        "per_walker_cross_gib": 0.368,
+        "source": "SGC-NPT no merge + checkpointing, energy-only MC, 500 atoms w1/2/4 and 2048 atoms; max error 9%"
       }
     },
     "md": {
       "eager_merged": {
-        "base_gib": 0.07,
-        "per_walker_gib": 3.98,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 4.05 / 8.01 / 16.00 GiB"
+        "base_gib": 0.11,
+        "per_walker_gib": 3.951,
+        "source": "NPT merge w/o compile, 500 atoms w1-12 and 2048 atoms; max error 0.5%"
       },
       "eager_unmerged": {
-        "base_gib": 1.36,
-        "per_walker_gib": 5.55,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 6.91 / 12.39 / 23.55 GiB"
+        "base_gib": 1.26,
+        "per_walker_gib": 5.623,
+        "source": "NPT no merge, 500 atoms w1/2/4 and 2048 atoms; max error 1.5%"
       },
       "checkpointed_merged": {
-        "base_gib": 0.14,
-        "per_walker_gib": 1.84,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: 1.98 / 4.11 / 7.49 GiB"
+        "base_gib": 0.16,
+        "per_walker_gib": 1.863,
+        "source": "NPT merge + checkpointing, 500 atoms w1/2/4 and 2048 atoms; max error 5.5%"
       },
       "checkpointed_unmerged": {
         "base_gib": 1.26,
@@ -179,7 +208,7 @@
     }
   },
   "size_scaling": {
-    "_note": "Per-walker memory measured 5.6 MB/atom at 500 atoms but 7.9-8.0 MB/atom at 1372-2048 atoms for full-force compiled runs (memory_profile_matrix.py); checkpointed runs stay linear (4.28 MB/atom). Applied as a conservative ramp to non-checkpointed memory, and to compiled per-atom time, which showed the same ~1.4x at 1372-2048 atoms.",
+    "_note": "Applied to compiled per-atom TIME only: one large graph costs more per atom under compile (Kawasaki turbo: 79 ms/step for 2048 atoms x 1 vs 58 ms for 500 x 4). Memory has no size ramp: it is linear in atom count (measured 108-2048 atoms).",
     "large_system_factor": 1.45,
     "ramp_from_atoms": 500,
     "ramp_to_atoms": 1372

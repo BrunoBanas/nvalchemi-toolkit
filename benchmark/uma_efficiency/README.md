@@ -11,6 +11,7 @@ Carlo, MD and hybrid MC-MD runs, and the benchmarks that calibrate them. The
 | `driver_template.py` | Adaptable driver for Kawasaki / SGC / VC-SGC, NPT / NVT and their hybrids. |
 | `job_template.sbatch` | Slurm job template: GPU guard, memory monitor, time record, USR1 forwarding. |
 | `run_efficiency_matrix.sh` | Runs benchmark kernels (settings x widths) back to back in one GPU allocation. |
+| `fit_calibration.py` | Fits `calibration.json` to efficiency-matrix results (time, memory, per class). |
 | `benchmark_batched_pure_kawasaki.py` | Batched Kawasaki MC only. |
 | `benchmark_batched_pure_sgc.py` | Batched SGC MC only. |
 | `benchmark_hybrid_sgc_npt_single_point.py` | SGC-NPT / Kawasaki-NPT hybrid, or `--md-only` NPT, with per-phase timing. |
@@ -92,36 +93,61 @@ Under MD, turbo recompiles on every change of the graph's edge count (32
 recompiles, 1146-1181 s in the first block) and then runs at merge-no-compile
 speed, so compile never pays when MD is involved.
 
+### Follow-up: wider batches, other sizes, checkpointing, compile
+
+Same card and kernels (`run_efficiency_matrix.sh`, `*_wide`, `sgc_npt_108/256`,
+`*_2048`, `sgc_npt_ckpt`, `sgc_compile`). Seconds per block per walker (block /
+width) and total peak GiB:
+
+| Workload, settings | Width 1 | Width 4 | Width 8 | Width 12 (16) |
+| --- | --- | --- | --- | --- |
+| Kawasaki MC, turbo + energy-only | 2.57 / 2.3 | 1.49 / 9.0 | 1.27 / 17.9 | 1.21 / 26.8 |
+| SGC MC, unmerged + energy-only | 7.35 / 2.2 | 6.07 / 5.0 | 5.90 / 8.9 | 5.85 / 12.7 |
+| NPT, merge w/o compile | 2.85 / 4.1 | 2.07 / 16.0 | 1.87 / 31.6 | 1.81 / 47.4 |
+| Kawasaki-NPT, merge w/o compile | 5.95 / 4.1 | 3.64 / 16.0 | 3.31 / 31.6 | 3.23 / 47.4 |
+| SGC-NPT 108 atoms, unmerged | 4.12 / 3.0 | 1.79 / 8.0 | 1.67 / 16.4 | (1.83 / 50.1) |
+| SGC-NPT 256 atoms, unmerged | 6.12 / 5.3 | 4.34 / 21.2 | 4.35 / 52.3 | - |
+| SGC-NPT 500 atoms, unmerged + checkpointing | 14.2 / 3.9 | 12.0 / 17.6 | - | - |
+
+2048 atoms, width 1 (Kawasaki MC also width 2), s/block and GiB:
+
+| Workload | Fastest | Alternatives |
+| --- | --- | --- |
+| Kawasaki MC (410 trials) | merge w/o compile 28.2 / 14.6 | turbo 32.4 / 9.2; width 2 per walker: turbo 24.9, merge 25.4 |
+| NPT (50 steps) | merge w/o compile 8.36 / 16.2 | no merge 15.7 / 24.7; merge + checkpointing 18.9 / 7.7 |
+| Kawasaki-NPT | merge w/o compile 35.7 / 16.2 | merge + checkpointing 112 / 7.7 (MC phase 3.4x slower) |
+| SGC-NPT | unmerged 117 / 35.8 | unmerged + checkpointing 122 / 13.1 |
+
+SGC MC with compile (no merge, energy-only) is slower than without at both widths
+(width 1: 9.72 vs 7.17 s/block, 2.9 vs 2.2 GiB).
+
 ## Model
 
 Per batched model call on the reference card:
 
 ```text
-time   t(w) = c1 * (N0 + w * N_eff)                   [ms]
-memory M(w) = base + w * per_walker * (N_eff / 500)   [GiB]
-N_eff  = N * (neighbours per atom within the cutoff) / 54
+time    t(w)  = c1 * (N0 + w * (N_eff * sf + Nw))              [ms]
+memory  M(w)  = base + a * A + b * A * (w - 1),  A = w * N_eff / 500   [GiB]
+N_eff   = N * (neighbours per atom within the cutoff) / 54
 ```
 
-`c1` and `N0` come from the width-1 and width-4 medians of each phase, per
-settings class and output set (`mc_energy_only`, `mc_full_outputs`,
-`md_full_outputs`). `N0`, the fixed per-call overhead in atom-equivalents, is
-what batching amortizes: large for merged / compiled paths (300-680), small for
-unmerged ones (60-140). Hybrid blocks add one MD evaluation (the energy
-refresh at each MC block) and each job ~75 s of model loading. UMA's cost
+`N0` is the per-call overhead batching amortizes (in atom-equivalents), `Nw` a
+per-walker overhead it does not (unmerged MoLE runs one small matmul per walker),
+`sf` the measured large-graph slowdown of compiled runs (1.0 at 500 atoms to 1.45
+at 1372 and above). Memory is linear in atom count; the cross term `b` is
+non-zero only for SGC-NPT, whose memory grows faster than linear in the number of
+walkers (2048 atoms x 1 walker: 35.8 GiB; 256 x 8: 52.3 GiB). Hybrid blocks add
+one MD evaluation per block and each job ~75 s of model loading. UMA's cost
 follows the edge count, not element identity, which is why the system enters
-through `N_eff`. SGC-NPT memory grows faster than linear up to width 4
-(9.0 / 17.8 / 48.7 GiB), so its whole curve is scaled with `N_eff`.
+through `N_eff`. All coefficients are least-squares fits (relative error) by
+`fit_calibration.py` over the 62 measured cells.
 
-Validation: the model reproduces all 18 measured 500-atom cells within 4% in
-time (width 2 was not fitted). Memory is exact at widths 1 and 4 and within 2%
-at width 2, except SGC-NPT (+25%, conservative). SGC-NPT at 2048 atoms with
-checkpointing on an A100-PCIe-40GB: 18.0 GiB predicted, 18.84 GiB measured.
-
-Size scaling (`memory_profile_matrix.py`, width 1, 500-2048 atoms):
-checkpointed runs grow linearly (1.03 GB + 4.28 MB/atom); compiled full-force
-runs rise from 5.6 MB/atom at 500 atoms to 7.9-8.0 MB/atom at 1372-2048, with
-~1.4x higher per-atom time. The planner applies this as a ramp to 1.45x from 500
-to 1372 atoms. Nothing above 2048 atoms is measured.
+Validation, replaying all 62 cells (108-2048 atoms, widths 1-16): median error
+1.6% in time and 0.5% in memory. Cells beyond 10%: SGC-NPT at 108-256 atoms
+(time -20% to +10%, memory -14% to +19%; fixed per-call costs dominate small
+cells) and SGC-NPT 500 atoms x 4 walkers (memory -21%, the jump from 17.8 to
+48.7 GiB between widths 2 and 4). SGC-NPT therefore plans against 70% of the card
+(`budget_scale`) instead of 85%.
 
 GPU factors: A100-PCIe-40GB ~1.10x slower than SXM; H100 ~2.1-2.4x faster on
 every workload measured (factor 0.45, from a few paired runs).
@@ -129,40 +155,44 @@ every workload measured (factor 0.45, from a few paired runs).
 ## Findings behind the rules
 
 - compile: valid only when neither geometry nor composition changes (MC-only
-  Kawasaki). Any MD changes the edge count and forces recompiles.
+  Kawasaki). Any MD changes the edge count and forces recompiles; for SGC MC it
+  is slower than no compile.
 - merge_mole: folds the 32 experts into one plain model for one composition;
   fairchem asserts that every graph in a batch shares it. Valid for Kawasaki
   and MD with identical walker compositions; never for SGC / VC-SGC (fairchem
-  2.21 asserts, 2.22 falls back to unmerged after the first change).
-- activation checkpointing: ~2x slower MD, ~2-3x less memory per walker;
-  only when nothing faster fits. Energy-only MC has no backward to checkpoint.
+  2.21 asserts, 2.22 falls back to unmerged after the first change). For a
+  single 2048-atom Kawasaki system it beats turbo (28.2 vs 32.4 s/block).
+- activation checkpointing: ~2x slower MD, ~2-3x less memory per walker; only
+  when nothing faster fits. Unmerged energy-only MC is unaffected (SGC-NPT 2048
+  atoms with checkpointing is only 4% slower), but with merge_mole it slows MC
+  ~3.4x, so merge + checkpointing is a poor fallback for Kawasaki-NPT.
 - tf32: identical accept/reject sequences, ueV/atom energy differences.
 - energy-only MC: SGC 1.3-1.44x, Kawasaki (turbo) 2.1x per MC step.
 - Kawasaki unlike-pair proposals: removes the ~50% of draws that swapped
   identical species; acceptance per real swap unchanged (~0.7 at 1200 K).
 - Hybrid MC-MD blocks cost within ~3% of the same MC and MD run separately
   (width 1 Kawasaki-NPT: ~9%).
-- Unmerged MoLE costs ~2.5x merged per atom in MD and ~4x in energy-only MC,
-  although with fixed coefficients it is the same linear algebra;
-  `profile_mole_overhead.py` measures which per-call piece is responsible.
-  `HybridMCMD` accepts separate MC and MD models plus a `before_md_block`
-  callback, the hook for a per-block re-merged MD model.
+- Unmerged UMA is 2.7x (MD) to 3.5x (MC, width 4) slower than merged. The MoLE
+  bookkeeping (expert-weight mixing, edge counts, coefficients) is under 1.5% of
+  it and caching it gains nothing (`profile_mole_overhead.py`); the time is in
+  the matmuls, which run as plain-FP32 kernels (`gemmSN`, `ampere_sgemm`) instead
+  of the TF32 tensor-core GEMMs the merged model's plain linear layers get.
+  Re-merging an MD model per block costs ~3.7 s per merge, more than it saves.
+  Mixed walker compositions cost the same as identical ones.
 
-Known gaps: widths above 4 and sizes other than 500 atoms are extrapolated
-(run the `*_wide`, `sgc_npt_108/256` and `*_2048` kernels); NVT is assumed to cost
-the same as NPT; VC-SGC the same as SGC; checkpointed energy-only MC the same as
-unmerged; only `uma-s-1p2` / `omat` is calibrated.
+Known gaps: SGC MC above 500 atoms, Kawasaki MC with unmerged settings, NVT
+(assumed equal to NPT), VC-SGC (assumed equal to SGC) and H100 beyond a few
+paired runs are not measured; widths beyond 12 at 500 atoms are extrapolated;
+only `uma-s-1p2` / `omat` is calibrated.
 
 ## Recalibrating
 
 1. Run the kernels you need on one pinned card, for example
    `KERNELS="kawasaki sgc hybrid kawasaki_npt npt" EXPECT_GPU=A100-SXM4-80GB`
    with `run_efficiency_matrix.sh`.
-2. From each case's `run/metrics.json` take the MC and MD block times (median
-   `phase_timing` for hybrids, run wall / blocks for MC-only) and
-   `peak_gpu_memory_reserved_GB`.
-3. Per settings class, with t in ms per step and N = 500:
-   `c1 = (t4 - t1) / (3 N)`, `N0 = t1 / c1 - N`; `per_walker = (M4 - M1) / 3`,
-   `base = M1 - per_walker`.
-4. Update `calibration.json` (keep a `source` string per entry) and replay the
-   measured cells with `plan_run.py --settings <class> --max-width 4`.
+2. Fit and review: `python benchmark/uma_efficiency/fit_calibration.py
+   <OUTPUT_ROOT>` prints every coefficient with its cell count and worst error.
+3. Write them: add `--write` to update `calibration.json` (hand-set entries such
+   as checkpointed merged MC and the SGC-NPT `budget_scale` are kept).
+4. Replay the measured cells with `plan_run.py --settings <class>
+   --max-width <width>` and check the recommendations.

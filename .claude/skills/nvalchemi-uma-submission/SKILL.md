@@ -67,7 +67,9 @@ Each knob pays under exactly one condition.
   Kawasaki). torch.compile specializes on graph shape; MD changes the edge count
   almost every step, which caused 32 recompiles (~20 min) and then a fallback to
   uncompiled speed. In a Kawasaki-NPT hybrid, turbo lost to merge-without-compile
-  at every width.
+  at every width; for SGC MC, compile is slower than no compile (9.7 vs 7.2
+  s/block). Even for Kawasaki MC, a single 2048-atom system runs faster merged
+  without compile (28.2 vs 32.4 s/block): compile wins only batched.
 - `merge_mole` only when composition is fixed. Merging folds UMA's 32 experts
   into one plain model for one composition, and fairchem asserts that every graph
   in a batch has that reduced composition. Batch with merge only when all walkers
@@ -78,9 +80,11 @@ Each knob pays under exactly one condition.
   back to the slower unmerged path. When valid it is the largest single win:
   pure NPT 1.8x (width 1) to 2.2x (width 4) faster than unmerged.
 - `activation_checkpointing` only when nothing faster fits: about 2x slower per
-  MD step, 2-3x less memory per walker. Energy-only MC has no backward pass, so it
-  gains nothing there. With merge available, merge + checkpointing is the better
-  fallback (pure NPT 2x faster than the `"batch"` preset at 0.6x its memory).
+  MD step, 2-3x less memory per walker. Unmerged energy-only MC is unaffected, so
+  for large SGC-NPT it costs only ~4% (2048 atoms: 122 vs 117 s/block at 13 vs 36
+  GiB). With merge it also slows MC ~3.4x (Kawasaki-NPT 2048 atoms: 112 vs 36
+  s/block), so it is a poor fallback there; merged MD fits 40 GB up to ~2048 atoms
+  anyway (16 GiB).
 - `tf32` on: identical accept/reject sequences, ueV/atom energy differences.
 - Energy-only MC skips the forces/stress backward pass: SGC 1.3-1.44x, Kawasaki
   (turbo) 2.1x per MC step. MC-only runs set it on the model; hybrids pass
@@ -132,10 +136,12 @@ Measured (500-atom Au-Pt, A100-SXM4-80GB):
 
 | Run | Throughput regime | Single system |
 |---|---|---|
-| Kawasaki MC | turbo (0.85 vs 0.69 walker-blocks/s for merge, no compile) | turbo ≈ merge, no compile (2.57 vs 2.63 s/block) |
-| Kawasaki-NPT, same composition | merge, no compile, width 4-6 | merge, no compile |
-| Kawasaki-NPT, mixed compositions | no merge, no compile | merge, no compile (model per system) |
-| SGC, SGC-NPT | no merge, no compile, width 2-5 (1.1-1.2x); wider for smaller cells | no merge, no compile; checkpointing if it does not fit |
+| Kawasaki MC, 500 atoms | turbo, width 12 (2.13x per walker vs width 1) | turbo ≈ merge, no compile (2.57 vs 2.63 s/block) |
+| Kawasaki MC, 2048 atoms | turbo ≈ merge, no compile at width 2 | merge, no compile (28.2 vs 32.4 s/block) |
+| SGC MC | no merge, no compile, width 8 (1.26x) | no merge, no compile |
+| NPT; Kawasaki-NPT, same composition | merge, no compile, width 8-12 (1.58x; 1.84x) | merge, no compile |
+| NPT or Kawasaki-NPT, mixed compositions | no merge, no compile | merge, no compile (model per system) |
+| SGC-NPT | no merge, no compile; width 4 at 500 atoms (1.18x), 4 at 256 (1.41x), 8 at 108 (2.47x) | no merge, no compile; checkpointing if it does not fit (~4% slower) |
 | Width 2 does not fit | - | fastest class that fits at width 1 |
 
 ## Planning
@@ -157,11 +163,13 @@ the planner warns when it is invalid), `--json`.
 How it estimates. UMA's cost follows graph edges, not element identity, so a
 system enters through `N_eff = N * (neighbours per atom within 6 A) / 54` (54 for
 the fcc Au-Pt calibration cell). A nanoparticle in vacuum costs less per atom, a
-dense oxide more. Time per batched call is `c1 * (N0 + width * N_eff)`, where
-`N0` is the per-call overhead batching amortizes (300-680 atom-equivalents for
-merged paths, 60-140 unmerged); memory is `base + width * per_walker *
-N_eff / 500`, limited to 85% of the card, with a measured 1.45x ramp between 500
-and 1372 atoms.
+dense oxide more. Time per batched call is `c1 * (N0 + width * (N_eff + Nw))`,
+where `N0` is the per-call overhead batching amortizes (130-820 atom-equivalents
+for merged and compiled paths, 115-210 unmerged) and `Nw` a per-walker overhead it
+does not (0 eager merged, 76 compiled, 17-78 unmerged); compiled runs also pay a
+measured slowdown on large single graphs. Memory is linear in batch atoms,
+`base + a * width * N_eff / 500`, limited to 85% of the card; SGC-NPT adds a term
+that grows with the number of walkers and plans against 70% of the card.
 
 How it chooses. Every valid class that fits is compared; the highest
 walker-blocks/s wins in the throughput regime, the lowest s/block at width 1 in
@@ -181,11 +189,14 @@ and timed for the slowest (A100-PCIe, ~1.10x slower than SXM; H100 is 2.1-2.4x
 faster). If the fast settings do not fit 40 GB at width 1, the planner switches to
 checkpointing; an 80 GB card would keep the faster settings.
 
-Trust. Time is within 4% at 500 atoms for widths 1-4 (18 measured cells). Widths
-above 4, sizes far from 500 atoms (N < 200, N > 1250, or a neighbour ratio off by
-more than 50%) and SGC-NPT memory above width 4 are extrapolated (about ±30%): say
-so, and propose a short width profile (`run_efficiency_matrix.sh`) before a long
-campaign. NVT is assumed to cost the same as NPT.
+Trust. Fitted to 62 measured cells (108-2048 atoms, widths 1-16): median error
+1.6% in time and 0.5% in memory. Worst: SGC-NPT on 108-256-atom cells (about
+±20%) and SGC-NPT memory at 500 atoms x 4 walkers (-21%, hence its 70% budget).
+Outside 100-2500 atoms, a neighbour ratio off by more than 50%, or widths above 12
+at 500 atoms, treat numbers as ±30%: say so, and propose a short width profile
+(`run_efficiency_matrix.sh`) before a long campaign. Not measured: NVT (assumed
+equal to NPT), VC-SGC (assumed equal to SGC), SGC MC above 500 atoms, unmerged
+Kawasaki MC.
 
 ## Entry points
 

@@ -50,7 +50,9 @@ from pathlib import Path
 CAL = json.loads((Path(__file__).resolve().parent / "calibration.json").read_text())
 REF_N = CAL["reference"]["reference_n_atoms"]
 REF_RHO = CAL["reference"]["reference_density_atoms_per_A3"]
-MEASURED_MAX_WIDTH = 4
+MEASURED_MAX_WIDTH = (
+    12  # widths measured at 500 atoms (SGC-NPT: 4; 108/256-atom cells: 16/8)
+)
 
 SPECS = {
     "compiled_merged": "turbo",
@@ -202,9 +204,15 @@ def memory_coeffs(family: str, cls: str) -> tuple[dict, str]:
 def step_ms(
     coef: dict, width: int, n_eff: float, compiled: bool, n_atoms: int
 ) -> float:
-    """Return the modelled milliseconds of one step at *width* walkers."""
-    per_atom = coef["c1_ms_per_atom"] * (size_factor(n_atoms) if compiled else 1.0)
-    return coef["c1_ms_per_atom"] * coef["n0_atoms"] + per_atom * width * n_eff
+    """Return the modelled milliseconds of one step at *width* walkers.
+
+    t = c1 * (N0 + width * (N_eff * sf + N_w)): N0 is the per-call overhead batching
+    amortizes, N_w a per-walker overhead it does not (unmerged MoLE runs one small
+    matmul per walker), sf the measured large-graph slowdown of compiled runs.
+    """
+    sf = size_factor(n_atoms) if compiled else 1.0
+    c1 = coef["c1_ms_per_atom"]
+    return c1 * (coef["n0_atoms"] + width * (n_eff * sf + coef.get("nw_atoms", 0)))
 
 
 def gpu_spec(name: str) -> dict:
@@ -227,18 +235,16 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
     mem_c, mem_key = memory_coeffs(ctx["family"], cls)
     if mem_key not in (cls, "checkpointed"):
         notes.append(f"memory for {cls}: using {mem_key}")
-    mem_scale = (n_eff / REF_N) * (
-        1.0 if cls.startswith("checkpointed") else size_factor(n_atoms)
-    )
+    mem_scale = (
+        n_eff / REF_N
+    )  # memory is linear in atom count (measured 108-2048 atoms)
 
     def memory(width: int) -> float:
-        if mem_c.get("superlinear"):
-            # The fit's intercept is an artifact of faster-than-linear growth: scale the
-            # whole measured curve rather than only its per-walker term.
-            return max(
-                0.5, (mem_c["base_gib"] + width * mem_c["per_walker_gib"]) * mem_scale
-            )
-        return max(0.5, mem_c["base_gib"] + width * mem_c["per_walker_gib"] * mem_scale)
+        atoms = width * mem_scale  # batch atoms in units of the 500-atom reference
+        # SGC-NPT grows faster than linear in the number of walkers (not in atoms):
+        # 2048 atoms x 1 walker uses 35.8 GiB, 256 x 8 uses 52.3 GiB.
+        extra = mem_c.get("per_walker_cross_gib", 0.0) * atoms * (width - 1)
+        return max(0.5, mem_c["base_gib"] + mem_c["per_walker_gib"] * atoms + extra)
 
     def block_seconds(width: int) -> dict:
         mc = md = handoff = 0.0
@@ -266,7 +272,7 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
             {
                 "width": w,
                 "memory_gib": mem,
-                "fits": mem <= ctx["budget"],
+                "fits": mem <= ctx["budget"] * ctx["budget_scale"],
                 "block_s": b["total"],
                 "mc_s": b["mc"],
                 "md_s": b["md"],
@@ -348,6 +354,8 @@ def plan(args) -> dict:
         "efficiency": args.efficiency,
     }
     ctx["budget"] = ctx["gpu"]["capacity_gib"] * args.memory_fraction
+    # Families whose memory model under-predicts some measured cells plan with more headroom.
+    ctx["budget_scale"] = CAL["memory_model"][family].get("budget_scale", 1.0)
     max_width = (
         1 if mode == "single" else min(args.max_width, walkers or args.max_width)
     )
@@ -390,18 +398,20 @@ def plan(args) -> dict:
         if rec["width"] > MEASURED_MAX_WIDTH:
             notes.append(
                 f"recommended width {rec['width']} is beyond the measured range (widths 1-{MEASURED_MAX_WIDTH} "
-                "for these settings; older full-force Kawasaki data saturated by ~8): confirm with a short "
-                f"profile at {MEASURED_MAX_WIDTH}/{rec['width']}/{2 * rec['width']} before production."
+                "at 500 atoms, where the model held within 6%): confirm with a short profile at "
+                f"{MEASURED_MAX_WIDTH}/{rec['width']} before production."
             )
-        if family == "sgc_npt" and cls == "eager_unmerged" and mode == "throughput":
+        if family == "sgc_npt" and mode == "throughput":
             notes.append(
-                "SGC-NPT memory grew faster than linear up to width 4 (9.0 / 17.8 / 48.7 GiB at 500 atoms); "
-                "widths above 4 are extrapolated -- profile before relying on them."
+                "SGC-NPT memory grows faster than linear in the number of walkers and the model is good to "
+                "about +-20% (it under-predicted 500 atoms x 4 walkers by 21%), so this family plans "
+                "against 70% of the card instead of 85%."
             )
         if cls.startswith("checkpointed"):
             notes.append(
                 "activation checkpointing chosen because the faster settings do not fit: ~2x slower per MD "
-                "step, ~2-3x less memory per walker. A larger card keeps the faster settings."
+                "step, ~2-3x less memory per walker. Unmerged energy-only MC is unaffected; with merge_mole "
+                "it slows MC ~3.4x too. A larger card keeps the faster settings."
             )
         if cls == "compiled_merged":
             notes.append(
@@ -410,14 +420,19 @@ def plan(args) -> dict:
             )
         if family == "sgc_npt" and regime.startswith("single"):
             notes.append(
-                "single-system SGC-NPT: MD could run on a separate merged model re-merged on the current "
-                "composition each block (merged NPT is 1.8x faster at width 1; one merge ~0.8 s). "
-                "HybridMCMD supports separate models + before_md_block, but the re-merge is not built yet."
+                "single-system SGC-NPT: the unmerged model is 2.7x slower than merged because its "
+                "matmuls run as plain-FP32 kernels instead of TF32 tensor-core GEMMs (MoLE bookkeeping "
+                "is < 1.5%); re-merging per MD block (~3.7 s per merge) costs more than it saves."
             )
-    if n_atoms > 2.5 * REF_N or n_atoms < 0.4 * REF_N or abs(ratio - 1) > 0.5:
+    if n_atoms > 2500 or n_atoms < 100 or abs(ratio - 1) > 0.5:
         notes.append(
-            "far from the 500-atom fcc calibration: treat times as +-30% and confirm the width "
-            "with a short 1/2/4 profile (or run_campaign's automatic width sweep) before production."
+            "outside the measured range (fcc Au-Pt, 108-2048 atoms): treat times as +-30% and "
+            "confirm the width with a short profile before production."
+        )
+    elif n_atoms < 300 and has_md and not merge_ok:
+        notes.append(
+            "small cell with unmerged MD: the model is good to about +-20% here (fixed per-call costs "
+            "dominate); confirm the width with a short profile."
         )
     if ensemble == "nvt":
         notes.append(
@@ -465,7 +480,7 @@ def plan(args) -> dict:
         "md_steps_per_block": ctx["md_steps"],
         "gpu": args.gpu,
         "gpu_note": ctx["gpu"].get("note", ""),
-        "memory_budget_gib": ctx["budget"],
+        "memory_budget_gib": ctx["budget"] * ctx["budget_scale"],
         "comparison": comparison,
         "widths": chosen["widths"] if chosen else evaluated[0]["widths"],
         "recommended": chosen["recommended"] if chosen else None,
