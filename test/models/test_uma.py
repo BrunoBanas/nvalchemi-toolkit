@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import os
+import warnings
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -63,6 +64,7 @@ from nvalchemi.models.uma import (  # noqa: E402
     _distributed_edgewise_gather,
     _distributed_partition_graph,
     _fold_into_cell,
+    _resolve_inference_settings,
 )
 
 _CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p1")
@@ -721,6 +723,206 @@ class TestForward:
         assert out["forces"].shape == (22, 3)
 
 
+class TestInferenceSettingsSpec:
+    """``from_checkpoint`` accepts a key=value spec besides presets and instances."""
+
+    def test_spec_builds_inference_settings(self):
+        settings = _resolve_inference_settings(
+            "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
+        )
+        assert (
+            settings.compile,
+            settings.merge_mole,
+            settings.tf32,
+            settings.activation_checkpointing,
+        ) == (
+            False,
+            False,
+            True,
+            False,
+        )
+
+    def test_presets_and_instances_pass_through(self):
+        assert _resolve_inference_settings("batch") == "batch"
+        settings = _resolve_inference_settings("tf32=true")
+        assert _resolve_inference_settings(settings) is settings
+
+    def test_unknown_field_is_rejected_not_dropped(self):
+        with pytest.raises(ValueError, match="compyle"):
+            _resolve_inference_settings("compyle=false")
+
+    def test_values_take_their_field_types(self):
+        settings = _resolve_inference_settings(
+            "base_precision_dtype=float64,edge_chunk_size=512,execution_mode=general,max_atoms=none"
+        )
+        assert settings.base_precision_dtype is torch.float64
+        assert settings.edge_chunk_size == 512
+        assert settings.execution_mode == "general"
+        assert settings.max_atoms is None
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "compile=1",
+            "edge_chunk_size=true",
+            "base_precision_dtype=float7",
+            "predict_untrained_forces=x",
+        ],
+    )
+    def test_value_that_does_not_fit_the_field_is_rejected(self, spec):
+        with pytest.raises(ValueError, match="does not fit"):
+            _resolve_inference_settings(spec)
+
+
+class _MockTask:
+    def __init__(self, name: str, prop: str) -> None:
+        self.name, self.property = name, prop
+
+
+class _GateablePredictUnit(_MockPredictUnit):
+    """Mock with fairchem's derivative-gating surface: a ``regress_config`` the
+    head also holds, and the two task tables post-processing indexes by."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        inner = self.model.module
+        self.regress = type(
+            "RegressConfig",
+            (),
+            {
+                "forces": True,
+                "stress": True,
+                "hessian": False,
+                "direct_forces": False,
+                "direct_stress": False,
+            },
+        )()
+        inner.backbone.regress_config = self.regress
+        inner.output_heads = {
+            "efs": type("Head", (), {"regress_config": self.regress})()
+        }
+        omat = [_MockTask(f"omat_{p}", p) for p in ("energy", "forces", "stress")]
+        inner._tasks = {t.name: t for t in omat}
+        inner._dataset_to_tasks = {name: [] for name in _UMA_TASKS}
+        inner._dataset_to_tasks["omat"] = omat
+        self.dataset_to_tasks = inner._dataset_to_tasks
+        self.seen: list[tuple[bool, bool, list[str]]] = []
+
+    def predict(self, data: FCAtomicData, undo_element_references: bool = True) -> dict:
+        tasks = self.model.module._tasks
+        self.seen.append((self.regress.forces, self.regress.stress, sorted(tasks)))
+        return super().predict(data, undo_element_references)
+
+
+class TestDerivativeGating:
+    """``active_outputs`` decides which autograd derivatives fairchem computes."""
+
+    def test_energy_only_skips_forces_and_stress_then_restores(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        batch = Batch.from_data_list([_make_periodic_cu()])
+
+        wrapper.model_config.active_outputs = {"energy"}
+        out = wrapper(batch)
+        assert "forces" not in out or out["forces"] is None
+        wrapper.model_config.active_outputs = {"energy", "forces", "stress"}
+        wrapper(batch)
+
+        assert pu.seen[0] == (False, False, ["omat_energy"])
+        assert pu.seen[1] == (True, True, ["omat_energy", "omat_forces", "omat_stress"])
+        assert pu.model.module._dataset_to_tasks["omat"] is pu.dataset_to_tasks["omat"]
+
+    def test_forces_without_stress_keeps_forces_only(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy", "forces"}
+        wrapper(Batch.from_data_list([_make_periodic_cu()]))
+        assert pu.seen[0] == (True, False, ["omat_energy", "omat_forces"])
+
+    def test_regates_after_fairchem_rebuilds_the_model_mid_run(self):
+        """fairchem 2.22's merge_mole fallback rebuilds an unmerged model after the
+        first composition change; energy-only must be re-applied on the next call."""
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        wrapper(batch)
+        # Simulate the rebuild: derivatives back on, full task table restored.
+        pu.regress.forces, pu.regress.stress = True, True
+        inner = pu.model.module
+        inner._tasks.update(
+            {
+                t.name: t
+                for t in inner._dataset_to_tasks["omat"]
+                + [
+                    _MockTask("omat_forces", "forces"),
+                    _MockTask("omat_stress", "stress"),
+                ]
+            }
+        )
+        wrapper(batch)
+        assert pu.seen[-1] == (False, False, ["omat_energy"])
+
+    def test_wrapper_built_after_another_gated_the_unit_restores_derivatives(self):
+        """A wrapper built after an energy-only one ran still sees the as-loaded tables."""
+        pu = _GateablePredictUnit()
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        energy_only = UMAWrapper(pu, task_name="omat")
+        energy_only.model_config.active_outputs = {"energy"}
+        energy_only(batch)
+        UMAWrapper(pu, task_name="omat")(batch)
+        assert pu.seen[-1] == (
+            True,
+            True,
+            ["omat_energy", "omat_forces", "omat_stress"],
+        )
+
+    def test_unit_is_as_loaded_after_an_energy_only_call(self):
+        """A calculator sharing the unit is not left without forces/stress."""
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        wrapper(Batch.from_data_list([_make_periodic_cu()]))
+
+        assert pu.seen[-1] == (False, False, ["omat_energy"])
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+        assert sorted(pu.model.module._tasks) == [
+            "omat_energy",
+            "omat_forces",
+            "omat_stress",
+        ]
+        assert len(pu.dataset_to_tasks["omat"]) == 3
+
+    def test_unit_is_restored_when_predict_raises(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        with (
+            patch.object(pu, "predict", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            wrapper(Batch.from_data_list([_make_periodic_cu()]))
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+
+    def test_unrecognised_layout_no_warning_when_all_producible_outputs_requested(
+        self, mock_omol
+    ):
+        """omol has no stress: energy + forces is everything, nothing is discarded."""
+        mock_omol.model_config.active_outputs = {"energy", "forces"}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mock_omol(Batch.from_data_list([_make_propane()]))
+
+    def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
+        mock_omat.model_config.active_outputs = {"energy"}
+        batch = Batch.from_data_list([_make_periodic_cu()])
+        with pytest.warns(UserWarning, match="cannot skip forces/stress"):
+            mock_omat(batch)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mock_omat(batch)  # second call must not warn again
+
+
 # ===========================================================================
 # Distribution spec — domain-decomposition halo policy (mock-only)
 # ===========================================================================
@@ -918,12 +1120,8 @@ class TestMLIPSpec:
 # ===========================================================================
 
 
-@pytest.fixture(scope="module")
-def predict_unit():
-    """Load the UMA predict unit once for the module.
-
-    Skips the dependent tests if HF access or download fails.
-    """
+def _load_predict_unit():
+    """Load a fresh UMA predict unit; skip if HF access or download fails."""
     from fairchem.core.calculate import pretrained_mlip
     from huggingface_hub.errors import GatedRepoError
 
@@ -933,6 +1131,18 @@ def predict_unit():
         pytest.skip(f"no HF access to UMA checkpoint {_CKPT}: {e}")
     except Exception as e:  # noqa: BLE001 — top-level guard for CI portability
         pytest.skip(f"could not load UMA checkpoint {_CKPT}: {e}")
+
+
+@pytest.fixture(scope="module")
+def predict_unit():
+    """UMA predict unit shared by the wrappers and reference calculators.
+
+    ``UMAWrapper`` gates derivatives only for the duration of each call and
+    restores the unit afterwards, so the calculators sharing it see the
+    as-loaded forces and stress -- these comparisons double as the end-to-end
+    check of that.
+    """
+    return _load_predict_unit()
 
 
 @pytest.fixture(scope="module")
