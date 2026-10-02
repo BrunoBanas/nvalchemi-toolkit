@@ -283,6 +283,152 @@ batch, so a graph that migrates into the MC stage needs no extra call; one
 migrating out of it carries the forces of its last (possibly rejected) trial
 into its first MD step.
 
+## Hybrid MC-MD blocks
+
+`HybridMCMD` owns the alternation between an MC sampler and a Toolkit MD
+integrator. The two stages usually share one model object; they may also use
+two models of the same potential that differ only in how it is evaluated (see
+below). The scheduler keeps one
+`Batch` on the active GPU, refreshes forces and stress after MC, then starts the
+MD block from the accepted configuration:
+
+```python
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.mc import SGC
+
+mc = SGC(
+  model=model,
+  temperature=1000.0,
+  species=[1, 2],
+  chemical_potentials={1: 0.0, 2: 0.2},
+)
+scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20)
+result = scheduler.run(batch, n_blocks=1000)
+```
+
+The supplied batch must contain a preallocated `forces` field, as required by
+the selected MD integrator. `UMAWrapper` folds positions into the periodic
+cell before every evaluation, so UMA runs do not need `WrapPeriodicHook` for
+correctness; the hook is still useful for tidy trajectories and for other
+models whose neighbour lists assume wrapped input. A `FusedStage` is not a
+substitute for `HybridMCMD`: alternating MC and MD on the same graph needs a
+candidate-energy evaluation and an accepted-state force evaluation at
+different points in each block.
+
+With separate models (`HybridMCMD(mc=SGC(model=mc_model, ...), md=NPT(model=md_model, ...))`)
+each MC block re-evaluates its baseline energy with the MC model, so acceptance
+ratios only ever compare MC-model energies, at one extra model call per block.
+The models must represent the same energy surface -- same checkpoint and task,
+differing in inference settings -- or the chain samples no single ensemble.
+`before_md_block=fn` calls `fn(batch)` before each MD block's first force
+evaluation, after MC has updated the species: use it to prepare the MD model
+for the current composition. Custom loops call `scheduler.prepare_md_block(batch)`
+before `md.compute(batch)`, as they call `scheduler.run_mc_block(batch)` for MC.
+
+### UMA settings for SGC and SGC-NPT
+
+Use these settings for every SGC and hybrid SGC-NPT run with a UMA model:
+
+```python
+from fairchem.core.units.mlip_unit.api.inference import InferenceSettings
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.models.uma import UMAWrapper
+
+settings = InferenceSettings(
+  compile=False,                    # see below
+  merge_mole=False,                 # never for SGC: composition changes every step
+  tf32=True,
+  activation_checkpointing=False,
+)
+model = UMAWrapper.from_checkpoint("uma-s-1p2", task_name="omat", inference_settings=settings)
+
+# MC-only: evaluate energies without the forces/stress autograd backward.
+model.model_config.active_outputs = {"energy"}
+# Hybrid MC-MD: energy-only during MC blocks, full outputs for MD.
+scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20, mc_energy_only=True)
+```
+
+`from_checkpoint` also accepts the same settings as one string,
+`inference_settings="compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`.
+Together with energy-only MC, this is the recommended default for SGC runs.
+
+None of the named presets is right for SGC: `"default"` and `"turbo"` merge the
+mixture-of-experts weights for one composition, and `"batch"` enables
+activation checkpointing, which recomputes activations during the backward pass.
+Measured on pure SGC, Au-Pt, 500 atoms, batch width 4, 100 MC steps per block,
+on one A100-SXM4-80GB unless noted:
+
+| Settings | s/block | Peak GiB | vs `"batch"` |
+|---|---|---|---|
+| `"batch"` | 67.3 | 9.2 | 1.00x |
+| custom above, full outputs | 35.2 | 23.6 | 1.91x |
+| **custom above, energy-only** | **24.5** | **5.0** | **2.75x** |
+| custom, `merge_mole=True`, energy-only requested | 35.3 | 23.6 | 1.91x |
+| custom, `compile=True`, energy-only (A100-PCIE-40GB) | 25.3 | 6.8 | not comparable |
+
+All five A100 runs produced the identical Markov chain (the same 987 of 8000
+moves accepted, identical final compositions), with mean final energies within
+12 ueV/atom (individual walkers within 23 ueV/atom), so none of these settings
+changes the sampling.
+
+- **`merge_mole`: off.** With fairchem 2.22 it does not fail for SGC; after the
+  first composition change it logs a fallback warning and continues on an
+  unmerged model, so it gains nothing. `UMAWrapper` gates energy-only on every
+  call, so it also applies after that rebuild. fairchem 2.21 raises an `AssertionError` instead.
+- **`activation_checkpointing`: off.** Worth 1.9x per step. It costs memory
+  only when forces are computed, and energy-only MC removes that cost.
+- **`tf32`: on.** Indistinguishable in the sampled chain.
+- **Energy-only MC: on.** Another 1.44x on top, with 4.7x less memory. Hybrid
+  runs get it through `mc_energy_only=True`, which re-evaluates each MC block's
+  baseline energy so acceptance ratios never mix evaluation paths.
+- **`compile`: off by default.** SGC composition changes did not trigger
+  recompiles (block times stayed flat), and one compile cost about 5 s. The only
+  compiled run landed on a slower A100-PCIE-40GB, where it ran 5% faster than
+  uncompiled SXM at width 1 and 3% slower at width 4, with about 35% more
+  memory, so its per-step gain on matched hardware is unmeasured. In SGC-NPT,
+  MD changes the neighbor count and therefore the graph shape, which forces
+  recompiles under static-shape compilation, so leave `compile` off for hybrid
+  runs. For long fixed-geometry SGC, benchmark `compile=True` on your own
+  hardware first.
+- **Batch width: 2-4.** SGC saturates the GPU early: energy-only gains 20%
+  from width 1 to 4, and full outputs gain 7-10%.
+
+### UMA settings for fixed-composition runs (Kawasaki, Kawasaki-NPT, MD)
+
+When composition cannot change, `merge_mole=True` folds the mixture-of-experts
+weights into one plain model and is the largest single speed-up. Compile stays
+off whenever MD runs, because MD changes the graph's edge count almost every
+step and each new count recompiles (32 recompiles, ~20 min, then a fallback to
+uncompiled speed). Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median
+s/block (50 MD steps; Kawasaki-NPT adds 100 energy-only MC steps):
+
+| Run | Settings | width 1 | width 4 | Peak GiB, width 4 |
+|---|---|---|---|---|
+| pure NPT | **merge, no compile** | **2.65** | **7.55** | 16.0 |
+| pure NPT | no merge, no compile | 4.74 | 16.82 | 23.5 |
+| pure NPT | merge, no compile, checkpointing | 5.32 | 17.82 | 7.5 |
+| pure NPT | `"batch"` | 8.66 | 31.91 | 9.2 |
+| Kawasaki-NPT | **merge, no compile** | **5.95** | **14.57** | 16.0 |
+| Kawasaki-NPT | no merge, no compile | 12.35 | 41.30 | 23.5 |
+
+Use `inference_settings="compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"`
+for Kawasaki-NPT and MD, `"turbo"` (compile + merge) only for Kawasaki MC with
+no MD, and merge + `activation_checkpointing=true` when memory is short.
+
+**A merged model is valid for one composition only.** fairchem merges on the
+first structure the model evaluates and then requires every later structure,
+and every graph in a batch, to have the same reduced composition (fairchem 2.21
+raises an `AssertionError`; 2.22 silently falls back to the slower unmerged
+model). So:
+
+- batching walkers with merge is correct only when all of them have the same
+  composition, e.g. replicas of one structure under Kawasaki;
+- turn merge off (`merge_mole=false`) as soon as different systems share a batch
+  or a model: different compositions, structures or sizes, or a sweep that runs
+  several systems through one model one after another -- or load a new merged
+  model per system;
+- turn merge off for SGC and VC-SGC, whose composition changes every step.
+
 ## Writing your own dynamics
 
 All integrators and optimizers inherit from

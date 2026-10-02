@@ -14,6 +14,7 @@ dynamics/index
 models
 gen
 mc
+hybrid
 training/index
 distributed
 distributed_runtime

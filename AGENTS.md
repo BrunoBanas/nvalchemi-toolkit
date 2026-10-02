@@ -190,6 +190,7 @@ be skippable with the `NVALCHEMI_SPHINX_BUILD` flag (see `docs/conf.py`)
   sampler, sinks, hooks, and low-level ops.
 - `nvalchemi/mc/`: batched Monte Carlo samplers (`SGC`, `VCSGC`, `Kawasaki`)
   built on `BaseDynamics`.
+- `nvalchemi/hybrid/`: `HybridMCMD`, alternating MC and MD blocks on one batch.
 - `nvalchemi/hooks/`: shared hook protocol/registry/context plus reporting,
   periodic, neighbor-list, profiling, and timing hooks.
 - `nvalchemi/training/`: CLI, strategy/spec validation, runtime, distributed
