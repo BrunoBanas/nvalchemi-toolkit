@@ -68,6 +68,14 @@ def bimodality(x: np.ndarray) -> float:
     return float((g**2 + 1) / (k + 3 * (n - 1) ** 2 / ((n - 2) * (n - 3))))
 
 
+def passes_run_start(gate: list[dict]) -> int:
+    """Block count at the first check of the final unbroken run of passing gate checks."""
+    k = len(gate)
+    while k > 0 and gate[k - 1]["passed"]:
+        k -= 1
+    return gate[k]["blocks"] if k < len(gate) else gate[-1]["blocks"]
+
+
 def walker_table(paths: list[Path], discard: float) -> list[dict]:
     rows = []
     for p in paths:
@@ -76,22 +84,31 @@ def walker_table(paths: list[Path], discard: float) -> list[dict]:
         if len(c) < 2 * WINDOW:
             continue
         T, kappa, n = s["temperature_K"], s["kappa"], s["n_atoms"]
-        prod = c[int(discard * len(c)) :]
-        u = np.array(s["u"])[int(discard * len(c)) :]
-        v = np.array(s["v"])[int(discard * len(c)) :]
+        # Production: from the start of the windows the live gate first found stationary (the
+        # driver stopped the walker after enough consecutive passes); otherwise drop --discard.
+        passes = [g for g in s.get("gate", []) if g["passed"]]
+        if s.get("stopped") == "equilibrated" and passes:
+            start = max(passes_run_start(s["gate"]) - 2 * WINDOW, 0)
+        else:
+            start = int(discard * len(c))
+        prod = c[start:]
+        u = np.array(s["u"])[start:]
+        v = np.array(s["v"])[start:]
         cbar, se = float(prod.mean()), batch_means_se(prod)
         last, prev = c[-WINDOW:], c[-2 * WINDOW : -WINDOW]
         drift = float(last.mean() - prev.mean())
         comb = math.hypot(last.std() / math.sqrt(WINDOW), prev.std() / math.sqrt(WINDOW))
+        stopped = s.get("stopped")
         rows.append(
             dict(
                 run_id=s["run_id"], T=T, c0=s["c0"], kappa=kappa, init=s["init"], n_atoms=n,
-                blocks=len(c), dmu_ref=s["delta_mu_ref_eV"], c_bar=cbar, c_se=se,
+                blocks=len(c), production_blocks=len(prod), stopped=stopped,
+                dmu_ref=s["delta_mu_ref_eV"], c_bar=cbar, c_se=se,
                 dmu=s["delta_mu_ref_eV"] + 2 * kappa * (s["c0"] - cbar),
                 dmu_excess=2 * kappa * (s["c0"] - cbar), dmu_se=2 * kappa * se,
                 c_std=float(prod.std()), c_std_unimodal=math.sqrt(KB_EV * T / (2 * kappa * n)),
                 bimodality=bimodality(prod), drift=drift,
-                resolved=bool(abs(drift) < 2 * comb) if comb > 0 else True,
+                resolved=(stopped == "equilibrated") if stopped else (bool(abs(drift) < 2 * comb) if comb > 0 else True),
                 u_mean=float(u.mean()), v_mean=float(v.mean()),
                 acceptance=s["acceptance"][-1]["acceptance"] if s["acceptance"] else None,
                 series_c=c.tolist(),
@@ -207,7 +224,9 @@ def main() -> None:
 
     flags = []
     for r in rows:
-        if not r["resolved"]:
+        if r["stopped"] == "cap":
+            flags.append(f"{r['run_id']}: hit its block cap without passing the gate -- extend it (raise n_blocks)")
+        elif not r["resolved"]:
             flags.append(f"{r['run_id']}: drifting (last-window change {r['drift']:+.4f})")
         if r["c_std"] > 2 * r["c_std_unimodal"] or (r["bimodality"] == r["bimodality"] and r["bimodality"] > 0.555):
             flags.append(f"{r['run_id']}: c distribution broad/bimodal (std {r['c_std']:.4f} vs {r['c_std_unimodal']:.4f}, "
@@ -232,9 +251,9 @@ def main() -> None:
     (args.out / "pure_free_energies_vcsgc.json").write_text(json.dumps({f"{T:g}": {"A": 0.0, "B": res["dF_pure"]}}, indent=2) + "\n")
 
     print(f"T={T:g} K  dmu_ref={ref:.5f} eV  {len(rows)} walkers (kappa {sorted(kappas)})")
-    print(" c0     init    blocks  c_bar    +-      dmu_excess(meV) +-    std(c)/unimodal  BC    resolved  acc")
+    print(" c0     init    blocks(prod)  c_bar    +-      dmu_excess(meV) +-    std(c)/unimodal  BC    resolved  acc")
     for r in rows:
-        print(f" {r['c0']:.3f}  {r['init']:6s}  {r['blocks']:4d}  {r['c_bar']:.4f} {r['c_se']:.4f}  {1e3 * r['dmu_excess']:+8.2f} {1e3 * r['dmu_se']:5.2f}"
+        print(f" {r['c0']:.3f}  {r['init']:10s}  {r['blocks']:4d}({r['production_blocks']:3d})  {r['c_bar']:.4f} {r['c_se']:.4f}  {1e3 * r['dmu_excess']:+8.2f} {1e3 * r['dmu_se']:5.2f}"
               f"   {r['c_std'] / r['c_std_unimodal']:5.2f}          {r['bimodality']:.2f}  {str(r['resolved']):5s}  {r['acceptance']}")
     b = res["dF_pure_boot"]
     print(f"\ng_Pt - g_Au = {res['dF_pure']:.5f} eV  (excess over dmu_ref {1e3 * (res['dF_pure'] - ref):+.2f} meV; "
