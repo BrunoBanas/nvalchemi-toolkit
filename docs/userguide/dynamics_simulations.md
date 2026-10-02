@@ -368,7 +368,7 @@ runner. Its `profile` method runs representative work at candidate widths,
 records actual CUDA reserved memory and throughput, then `recommend_width`
 selects the smallest width near peak throughput while retaining memory headroom.
 Its `assign_runs` method packs a larger campaign into concurrent per-GPU batches
-and serial queue waves. `HybridBatchPlanner` remains an alias for compatibility.
+and serial queue waves.
 
 ```python
 import torch

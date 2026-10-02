@@ -153,3 +153,23 @@ def test_campaign_rejects_continuation_cycle() -> None:
 
     with pytest.raises(ValueError, match="cycle"):
         CampaignSpec(runs=(first, second))
+
+
+def test_run_spec_is_hashable_and_consistent_with_equality() -> None:
+    """Runs work in sets and as dict keys, including unhashable metadata values."""
+    run = _reference("ref", 0.1)
+    same = _reference("ref", 0.1)
+    listed = RunSpec(
+        run_id="listed",
+        temperature_k=3000.0,
+        chemical_potentials_ev={79: 0.0, 78: 0.1},
+        metadata={"tags": ["a", "b"]},
+    )
+
+    assert run == same and hash(run) == hash(same)
+    assert {run, same, _reference("other", 0.1), listed} == {
+        run,
+        _reference("other", 0.1),
+        listed,
+    }
+    assert {run: 1}[same] == 1

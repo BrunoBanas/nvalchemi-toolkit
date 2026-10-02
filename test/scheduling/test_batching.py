@@ -12,20 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for hybrid MC-MD batch capacity planning."""
+"""Tests for simulation batch capacity planning."""
 
 from __future__ import annotations
 
-from nvalchemi.hybrid import (
-    BatchMeasurement,
-    HybridBatchPlanner,
-    SimulationBatchPlanner,
-)
+from nvalchemi.scheduling import BatchMeasurement, SimulationBatchPlanner
 
 
 def test_estimate_width_uses_model_and_per_walker_memory() -> None:
     """The static estimate retains the configured memory headroom."""
-    planner = HybridBatchPlanner(memory_fraction=0.9)
+    planner = SimulationBatchPlanner(memory_fraction=0.9)
 
     width = planner.estimate_width(
         total_memory_bytes=40_000,
@@ -36,14 +32,9 @@ def test_estimate_width_uses_model_and_per_walker_memory() -> None:
     assert width == 16
 
 
-def test_generic_planner_preserves_hybrid_compatibility_name() -> None:
-    """The old hybrid name remains a direct alias of the generic planner."""
-    assert HybridBatchPlanner is SimulationBatchPlanner
-
-
 def test_recommend_width_prefers_smallest_near_peak_throughput() -> None:
     """The lowest width meeting the throughput threshold is selected."""
-    planner = HybridBatchPlanner(memory_fraction=0.9, throughput_fraction=0.95)
+    planner = SimulationBatchPlanner(memory_fraction=0.9, throughput_fraction=0.95)
     measurements = [
         BatchMeasurement(1, "ok", 100.0, 1_000),
         BatchMeasurement(2, "ok", 180.0, 2_000),
@@ -62,7 +53,7 @@ def test_infer_memory_model_can_port_a_profile_to_another_gpu() -> None:
         BatchMeasurement(4, "ok", 30.0, 1_800),
     ]
 
-    estimate = HybridBatchPlanner.infer_memory_model(measurements)
+    estimate = SimulationBatchPlanner.infer_memory_model(measurements)
 
     assert estimate.model_resident_bytes == 1_000
     assert estimate.bytes_per_walker == 200
@@ -70,7 +61,7 @@ def test_infer_memory_model_can_port_a_profile_to_another_gpu() -> None:
 
 def test_assign_walkers_forms_serial_waves_per_gpu() -> None:
     """Excess walkers are queued after one full batch per requested GPU."""
-    assignments = HybridBatchPlanner.assign_runs(
+    assignments = SimulationBatchPlanner.assign_runs(
         total_runs=19, batch_width=4, gpu_ids=[2, 5]
     )
 

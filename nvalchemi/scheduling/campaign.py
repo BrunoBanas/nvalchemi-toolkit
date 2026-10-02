@@ -98,6 +98,28 @@ class RunSpec:
         object.__setattr__(self, "depends_on", dependencies)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
+    def __hash__(self) -> int:
+        """Hash the identity fields, so runs work in sets and as dict keys.
+
+        The generated dataclass hash would fail on the read-only mapping
+        views; ``metadata`` is left out since its values may be unhashable.
+        Equal runs still hash equally, as equality compares every field.
+        """
+        return hash(
+            (
+                self.run_id,
+                self.temperature_k,
+                tuple(sorted(self.chemical_potentials_ev.items())),
+                self.pressure_ev_per_a3,
+                self.parent_id,
+                self.depends_on,
+                self.model_key,
+                self.method_key,
+                self.species,
+                self.batch_group,
+            )
+        )
+
     @property
     def compatibility_key(self) -> tuple[str, str, tuple[int, ...], str]:
         """Return the properties that must agree within a batched runner."""
