@@ -68,8 +68,8 @@ class BaseMonteCarlo(BaseDynamics):
 
     Atomic masses always follow the species. Every accepted move that changes
     an atom's type also sets that atom's ``atomic_masses`` entry to the mass of
-    its new species, so any dynamics run afterwards -- in ``HybridMCMD`` or a
-    hand-written MC/MD loop -- integrates each atom with the right mass. The
+    its new species, so any dynamics run afterwards (e.g. alternating MC and
+    MD blocks) integrates each atom with the right mass. The
     per-species masses are taken from the batch the first time the sampler sees
     it (so custom masses, e.g. a deuterium mass for H, are kept and move with
     the species); a species absent from that batch uses the periodic-table mass.

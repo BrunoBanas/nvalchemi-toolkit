@@ -41,12 +41,10 @@ class SGC(BaseMonteCarlo):
     -----
     With UMA, build the model with ``InferenceSettings(compile=False,
     merge_mole=False, tf32=True, activation_checkpointing=False)`` and evaluate
-    energies only during MC (``model.model_config.active_outputs = {"energy"}``,
-    or ``HybridMCMD(..., mc_energy_only=True)`` in hybrid runs): 2.75x faster
-    per step than the ``"batch"`` preset with less memory, and the same sampled
-    chain. ``merge_mole`` assumes a fixed composition, which SGC changes every
-    step. See the "UMA settings for SGC and SGC-NPT" section of the dynamics
-    user guide for the measurements.
+    energies only during MC (``model.model_config.active_outputs = {"energy"}``):
+    2.75x faster per step than the ``"batch"`` preset with less memory, and the
+    same sampled chain. ``merge_mole`` assumes a fixed composition, which SGC
+    changes every step.
     """
 
     def __init__(
