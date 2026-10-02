@@ -193,6 +193,8 @@ be skippable with the `NVALCHEMI_SPHINX_BUILD` flag (see `docs/conf.py`)
 - `nvalchemi/hybrid/`: `HybridMCMD`, alternating MC and MD blocks on one batch.
 - `nvalchemi/hooks/`: shared hook protocol/registry/context plus reporting,
   periodic, neighbor-list, profiling, and timing hooks.
+- `nvalchemi/scheduling/`: batch-width planning and dependency-aware campaigns
+  of restartable runs (`RunSpec`, `CampaignSpec`, `FinalStateStore`).
 - `nvalchemi/training/`: CLI, strategy/spec validation, runtime, distributed
   helpers, finetuning, checkpoints, losses, optimizers, and training hooks.
 - `nvalchemi/distributed/` (package): distributed utilities used by training

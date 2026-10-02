@@ -15,6 +15,7 @@ models
 gen
 mc
 hybrid
+scheduling
 training/index
 distributed
 distributed_runtime
