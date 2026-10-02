@@ -8,7 +8,7 @@ single 40 GB A100 GPU per size.
 | --- | --- |
 | `run_campaign.py` | The app: builds the grid, profiles a batch width, runs the campaign, logs throughput. |
 | `submit_campaign.slurm` | The input script: a 3-task SLURM array job, one task per size. |
-| `debug_npt_then_sgc_mace.py` | MACE counterpart of the sibling standalone diagnostic below -- see its module docstring. |
+| `boundary_tracer.py` | T-x coexistence-line tracer driven by `run_campaign.py --mode trace-boundary` (see the `nvalchemi-sgc-phase-boundary` skill). |
 
 ## Grid
 
@@ -32,9 +32,10 @@ eV/atom on this UMA checkpoint, large enough to swamp the +-1.0 eV
 `delta_mu` (a scouting run at `delta_mu=0.0` showed exactly this
 failure).
 
-Pass `--reference-energies-json <reference_energy_calibration.py output>`
-(recommended; `--mode delta-mu-scan` can also calibrate the reference
-in-process, see `compute_reference_energies` in `run_campaign.py`) to fix this: every
+Pass `--reference-energies-json <reference_energies.json>` (recommended;
+`--mode delta-mu-scan` calibrates the reference in-process and writes
+`auto_reference_energies.json`, see `compute_reference_energies` in
+`run_campaign.py`) to fix this: every
 run's `chemical_potentials_ev` is rebuilt as `{Au: 0.0, Pt:
 reference[T]["delta_mu_ref_eV"] + delta_mu_excess}` at that run's own
 temperature, with `DELTA_MU_EV`'s per-column value reinterpreted as
@@ -70,12 +71,11 @@ atoms, 274 at 1372, 410 at 2048.
 Equilibration used to be *assumed* within the first `EQUILIBRATION_BLOCKS`
 (50) and never checked. Every block's per-graph Pt fraction and
 energy/atom are now recorded during the run, and afterward
-`_equilibration_gate` (PHASE_DIAGRAM_MANUAL.md section 7, the same
-one-shot pattern `reference_energy_calibration.py` already uses) compares
+`_equilibration_gate` compares
 the last two `EQUILIBRATION_WINDOW_BLOCKS`-block (25) windows of both
 series against twice their combined standard error. This is a single
-end-of-run check, not the manual's full three-consecutive-checks
-promotion protocol — a run that fails it is logged as unresolved, not
+end-of-run check, not a full three-consecutive-checks promotion
+protocol — a run that fails it is logged as unresolved, not
 retried or extended automatically. Recording adds one small GPU->CPU
 transfer per block; see `_run_hybrid_with_observables`'s docstring for why
 that's the cheaper option relative to the alternative of calling
@@ -109,7 +109,7 @@ uv run python benchmark/hybrid_sgc_npt/run_campaign.py \
     --checkpoint-root benchmark/hybrid_sgc_npt/checkpoints \
     --device cuda \
     --reference-energies-json \
-        /path/to/reference_energy_calibration/<job_id>/run/reference_energies.json
+        /path/to/auto_reference_energies.json
 ```
 
 Drop the `--reference-energies-json` line for the old literal, uncalibrated
@@ -148,7 +148,5 @@ walker_blocks_per_second, mc_acceptance, continuation,
 composition_gate_resolved, energy_gate_resolved, resolved`) — the
 efficiency record for this benchmark. A `checkpoints/atoms<N>_throughput.csv`
 left over from before this fix has the old 8-column header; new rows
-appended to it will have 11 columns instead (no migration -- per the
-companion repo's `phase_diagram_guide.md` status table, this campaign has
-never actually been run yet) -- delete it and let the header be rewritten
+appended to it will have 11 columns instead (no migration) -- delete it and let the header be rewritten
 if you hit this.
