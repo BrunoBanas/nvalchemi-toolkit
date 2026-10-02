@@ -192,7 +192,10 @@ def test_step_follows_the_dynamics_hook_lifecycle() -> None:
         species=[1, 2],
         chemical_potentials={1: 0.0, 2: 0.0},
         exit_status=1,
-        hooks=[Recorder(DynamicsStage.ON_ADMISSION), Recorder(DynamicsStage.BEFORE_STEP)],
+        hooks=[
+            Recorder(DynamicsStage.ON_ADMISSION),
+            Recorder(DynamicsStage.BEFORE_STEP),
+        ],
     )
 
     sampler.run(batch, n_steps=2)
