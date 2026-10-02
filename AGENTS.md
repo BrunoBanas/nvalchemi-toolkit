@@ -239,3 +239,5 @@ chains are documented in `.claude/skills/README.md`.
 | `nvalchemi-mep` | Reaction paths and minimum-energy paths: interpolation, IDPP, batched NEB |
 | `nvalchemi-dynamics-implementation` | Implementing a new integrator, optimizer, or sampler class |
 | `nvalchemi-reporting` | Progress dashboards, TensorBoard, or CSV observability |
+| `nvalchemi-uma-submission` | UMA inference settings, batch width, GPU memory and Slurm jobs for MC, MD or hybrid MC-MD |
+| `nvalchemi-sgc-phase-boundary` | Phase boundaries, coexistence Δμ or T-x lines from SGC Monte Carlo data |

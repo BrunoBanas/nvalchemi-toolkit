@@ -36,3 +36,5 @@ your project's skills directory, or your user-level one (e.g.
 | `nvalchemi-mep` | How to build reaction paths (interpolation, alignment, IDPP) and compute minimum-energy paths with batched NEB via {py:class}`~nvalchemi.dynamics.mep.NEB` or by building it manually with hooks. | {ref}`dynamics_mep_guide` |
 | `nvalchemi-dynamics-hooks` | How to use and write dynamics hooks --- callbacks that observe or modify batch state at specific points during each simulation step. | {ref}`hooks_guide` |
 | `nvalchemi-reporting` | How to add observability with `ReportingOrchestrator`, `RichReporter`, `TensorBoardReporter`, and the dynamics `LoggingHook`. | {ref}`reporting_guide` |
+| `nvalchemi-uma-submission` | How to choose FairChem UMA inference settings, batch width and GPU memory for Monte Carlo, MD and hybrid MC-MD runs, and write the Slurm job, using the planner and calibration in `benchmark/uma_efficiency/`. | {ref}`dynamics_guide` |
+| `nvalchemi-sgc-phase-boundary` | How to turn semi-grand-canonical Monte Carlo isotherms into phase boundaries (van de Walle & Asta) and trace a T-x coexistence line, using `benchmark/phase_boundary/`. | {ref}`dynamics_guide` |

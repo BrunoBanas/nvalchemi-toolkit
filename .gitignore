@@ -111,6 +111,7 @@ wandb/
 
 # Slurm logs
 slurm-*.out
+benchmark/*/logs/
 
 # testmon files
 .testmondata*
