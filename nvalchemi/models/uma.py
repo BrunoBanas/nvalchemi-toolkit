@@ -185,11 +185,13 @@ def _fold_into_cell(
     Each atom is moved by the integer lattice shift that brings its fractional
     coordinate into ``[0, 1)`` along every periodic direction of its system
     (a coordinate of exactly 1.0 maps to 0.0); non-periodic directions are left
-    untouched. The shift is computed under ``no_grad`` and applied as a
-    constant, so gradients through *pos* pass unchanged, and *pos* itself is
-    not modified. Batched, sync-free and free of data-dependent control flow,
-    so it traces under ``torch.compile``. Systems whose cell is singular (e.g.
-    a zero placeholder cell) get no shift.
+    untouched. Only the integer image counts are detached; the shift is applied
+    through *cell*, so a strained cell (autograd stress) moves folded atoms
+    with the lattice. Gradients through *pos* pass unchanged and *pos* itself
+    is not modified.
+    Batched, sync-free and free of data-dependent control flow, so it traces
+    under ``torch.compile``. Systems whose cell is singular (e.g. a zero
+    placeholder cell) get no shift.
 
     Parameters
     ----------
@@ -217,8 +219,7 @@ def _fold_into_cell(
         n_images = torch.floor(frac)
         keep = pbc[batch_idx] & torch.isfinite(n_images).all(dim=-1, keepdim=True)
         n_images = torch.where(keep, n_images, torch.zeros_like(n_images))
-        shift = torch.einsum("ni,nij->nj", n_images, cell[batch_idx])
-    return pos - shift
+    return pos - torch.einsum("ni,nij->nj", n_images, cell[batch_idx])
 
 
 # Fixed-shape caps for compiled MD. fairchem's compiled graph needs static
@@ -1513,9 +1514,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             cell = torch.zeros(n_systems, 3, 3, dtype=target_dtype, device=device)
         else:
             cell = cell.to(target_dtype)
-        # Zero lattice vectors (1D/2D systems, molecules) would give fairchem's
-        # graph builder a zero volume and make the fold below a no-op; complete
-        # them as fairchem's own ``from_ase`` does.
+        # Zero lattice vectors (1D/2D, molecules) make the cell singular; complete
+        # them as fairchem's ``from_ase`` does.
         cell = _complete_cell(cell.reshape(n_systems, 3, 3))
 
         pbc = getattr(data, "pbc", None)
@@ -1526,17 +1526,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         else:
             pbc = pbc.to(torch.bool)
 
-        # Fold positions into the cell before fairchem builds its periodic
-        # graph. Its builder (core/graph/radius_graph_pbc.py) scans only image
-        # offsets of +-ceil(cutoff * inverse plane spacing) around the positions
-        # it is given, so it relies on wrapped input -- fairchem's own
-        # AtomicData.from_ase wraps first. MD positions here are continuous
-        # (MD integrators never fold them back; WrapPeriodicHook is opt-in),
-        # and once two atoms drift about a cell length apart their minimum image
-        # is never generated: the interaction silently vanishes and atoms can
-        # collapse onto each other. Whole-lattice-vector shifts leave energy,
-        # forces and stress unchanged; ``data.positions`` keeps its continuous
-        # coordinates.
+        # fairchem's graph builder scans only nearby images, so it needs wrapped
+        # positions; MD keeps them continuous. Fold a copy; ``data`` is untouched.
         if getattr(data, "cell", None) is not None:
             pos = _fold_into_cell(pos, cell, pbc, batch_idx)
 

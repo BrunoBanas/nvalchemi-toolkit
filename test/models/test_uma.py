@@ -55,6 +55,7 @@ from nvalchemi.dynamics.hooks._utils import kinetic_energy_per_graph  # noqa: E4
 from nvalchemi.dynamics.integrators.nve import NVE  # noqa: E402
 from nvalchemi.models import uma as uma_module  # noqa: E402
 from nvalchemi.models.base import NeighborListFormat  # noqa: E402
+from nvalchemi.models.pipeline import PipelineGroup, PipelineModelWrapper  # noqa: E402
 from nvalchemi.models.uma import (  # noqa: E402
     _UMA_TASKS,
     UMAWrapper,
@@ -559,6 +560,103 @@ class TestAdaptInputWrapping:
         assert fc.pos.requires_grad
         fc.pos.sum().backward()
         torch.testing.assert_close(batch.positions.grad, torch.ones(2, 3))
+
+    def test_pipeline_autograd_stress_ignores_lattice_shifts(self, mock_omat):
+        """An autograd pipeline strains positions and cell before ``adapt_input``.
+
+        Folded atoms must move with the strained lattice, or every atom shifted
+        by a lattice vector corrupts the stress. The mock energy depends only on
+        the folded coordinates, so shifted and pre-wrapped inputs must agree.
+        """
+        cell = TestFoldIntoCell._CELL[None]
+        wrapped = torch.tensor([[0.5, 1.0, 1.5], [3.0, 4.0, 5.0], [1.0, 0.5, 0.2]])
+        images = torch.tensor([[0.0, 0.0, 0.0], [2.0, -1.0, 0.0], [-1.0, 3.0, -2.0]])
+        pipe = PipelineModelWrapper(
+            groups=[PipelineGroup(steps=[mock_omat], use_autograd=True)]
+        )
+
+        def evaluate(pos: torch.Tensor) -> dict[str, torch.Tensor]:
+            data = AtomicData(
+                positions=pos,
+                atomic_numbers=torch.full((3,), 26),
+                cell=cell,
+                pbc=torch.tensor([[True, True, True]]),
+            )
+            out = pipe(Batch.from_data_list([data]))
+            return {k: out[k].detach() for k in ("energy", "forces", "stress")}
+
+        ref = evaluate(wrapped)
+        assert ref["stress"].abs().max() > 1e-2
+        shifted = evaluate(wrapped + images @ cell[0])
+        for key in ref:
+            torch.testing.assert_close(shifted[key], ref[key])
+
+
+def _fairchem_graph(wrapper: UMAWrapper, data: AtomicData, version: int) -> dict:
+    """Graph fairchem builds from ``adapt_input``'s output (no checkpoint needed)."""
+    from fairchem.core.graph.compute import generate_graph
+
+    fc = wrapper.adapt_input(Batch.from_data_list([data]))
+    return generate_graph(
+        fc,
+        cutoff=wrapper._cutoff,
+        max_neighbors=1000,
+        enforce_max_neighbors_strictly=False,
+        radius_pbc_version=version,
+        pbc=fc.pbc,
+    )
+
+
+def _assert_same_graph(ours: dict, ref: dict) -> None:
+    """Same edges with the same edge vectors, independent of edge order."""
+
+    def canonical(graph: dict) -> torch.Tensor:
+        vec = graph["edge_distance_vec"].to(torch.float64)
+        edges = torch.cat([graph["edge_index"].T.to(torch.float64), vec], dim=1)
+        order = np.lexsort(edges.round(decimals=4).numpy().T[::-1])
+        return edges[torch.from_numpy(order)]
+
+    torch.testing.assert_close(canonical(ours), canonical(ref), atol=1e-4, rtol=0)
+
+
+@pytest.mark.parametrize("version", [1, 2], ids=["radius_pbc_v1", "radius_pbc_v2"])
+class TestFairchemGraphInputs:
+    """The graph fairchem builds from adapted inputs, without a checkpoint."""
+
+    def test_unwrapped_atoms_get_the_wrapped_graph(
+        self, mock_omat, monkeypatch, version
+    ):
+        ref_data = _rattled_fe_333()
+        far = _shift_atoms(ref_data, {0: (2, 0, 0), 1: (0, -2, 1)})
+        ref = _fairchem_graph(mock_omat, ref_data, version)
+        _assert_same_graph(_fairchem_graph(mock_omat, far, version), ref)
+
+        # Without the fold, the builder's image scan misses pairs of far atoms.
+        monkeypatch.setattr(uma_module, "_fold_into_cell", lambda pos, *_: pos)
+        broken = _fairchem_graph(mock_omat, far, version)
+        assert broken["edge_index"].shape[1] < ref["edge_index"].shape[1]
+
+    @pytest.mark.parametrize(
+        ("pbc", "shifts"),
+        [
+            ((True, True, False), {0: (2, 0, 0), 7: (-1, 3, 0), 20: (0, -2, 0)}),
+            ((False, False, True), {0: (0, 0, 2), 9: (0, 0, -3)}),
+        ],
+        ids=["2d_slab", "1d_wire"],
+    )
+    def test_zero_vacuum_vectors_get_the_vacuum_padded_graph(
+        self, mock_omat, monkeypatch, version, pbc, shifts
+    ):
+        ref_data = _vacuum_padded(pbc, seed=11)
+        ref = _fairchem_graph(mock_omat, ref_data, version)
+        zero = _zero_vacuum_vectors(ref_data)
+        for data in (zero, _shift_atoms(zero, shifts)):
+            _assert_same_graph(_fairchem_graph(mock_omat, data, version), ref)
+
+        # Without completion, the builder divides by the zero cell volume.
+        monkeypatch.setattr(uma_module, "_complete_cell", lambda cell: cell)
+        with pytest.raises(RuntimeError):
+            _fairchem_graph(mock_omat, zero, version)
 
 
 class TestAdaptOutput:

@@ -67,11 +67,12 @@
   whole lattice vectors along its system's periodic directions, on a copy handed
   to fairchem only: `data.positions` keeps its continuous coordinates,
   non-periodic (vacuum) directions are left alone, and gradients pass through
-  unchanged. Energies, forces and stress are unchanged for correctly wrapped
-  inputs. Zero lattice vectors (1D and 2D systems, molecules) are first
-  completed with orthonormal unit vectors, as fairchem's own `from_ase` does, so
-  such systems fold along their periodic axes and fairchem gets a non-zero cell
-  volume.
+  unchanged. The shift follows a strained cell, so autograd stress (e.g. in a
+  `PipelineGroup` with `use_autograd=True`) is unaffected. Energies, forces
+  and stress are unchanged for correctly wrapped inputs. Zero lattice vectors
+  (1D and 2D systems, molecules) are first completed with orthonormal unit
+  vectors, as fairchem's own `from_ase` does, so such systems fold along their
+  periodic axes and fairchem gets a non-zero cell volume.
 - **Dynamics hook lifecycle** — fused-level hooks now fire at the
   `BEFORE_PRE_UPDATE`, `AFTER_PRE_UPDATE`, `BEFORE_POST_UPDATE`, and
   `AFTER_POST_UPDATE` boundaries, and sub-stage `BEFORE_COMPUTE` hooks now
