@@ -411,6 +411,8 @@ def test_solute_counting_does_not_sync_the_device() -> None:
     sampler = VCSGC(
         model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0
     )
+    # Built lazily once per batch (by the first model call in a real run); may sync.
+    _ = batch.batch_idx
     torch.cuda.synchronize()
 
     previous = torch.cuda.get_sync_debug_mode()
