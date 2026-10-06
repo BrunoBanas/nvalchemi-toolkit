@@ -170,15 +170,16 @@
 
 ### Fixed
 
-- **Compiled UMA no longer recompiles on every MD step.** `UMAWrapper` forced
-  `torch.compile(dynamic=False)` on fairchem's compile for every compiled run, a
-  domain-decomposition requirement (fixed-shape caps). Single-process, MD changes
-  the edge count almost every step, so turbo / `compile=True` recompiled until
-  dynamo's limit (~20 min) and then ran uncompiled. Static shapes are now forced
-  only under domain decomposition; elsewhere fairchem's `dynamic=True` compile is
-  kept. The new `compile_shapes` argument (`"auto"`, `"static"`, `"dynamic"`) of
-  `UMAWrapper` / `UMAWrapper.from_checkpoint`, or `NVALCHEMI_UMA_COMPILE_SHAPES`
-  with `"auto"`, overrides it, e.g. `"static"` for fixed-geometry MC-only runs.
+- **`UMAWrapper` forces static compile shapes only under domain
+  decomposition.** It forced `torch.compile(dynamic=False)` on fairchem's compile
+  for every compiled run, a domain-decomposition requirement (fixed-shape caps).
+  Single-process runs now keep fairchem's `dynamic=True` compile. The new
+  `compile_shapes` argument (`"auto"`, `"static"`, `"dynamic"`) of `UMAWrapper` /
+  `UMAWrapper.from_checkpoint`, or `NVALCHEMI_UMA_COMPILE_SHAPES` with `"auto"`,
+  overrides it. Dynamic shapes do not remove the MD recompiles: 500-atom NPT
+  with turbo still hits dynamo's recompile limit (~20 min in the first block)
+  and then runs at uncompiled speed, so keep `compile` off for MD. MC-only runs
+  are unaffected (identical block times with static and dynamic shapes).
 - **`UMAWrapper` folds positions into the periodic cell before every
   evaluation.** It passed raw positions to fairchem, whose periodic graph
   builder scans only image offsets of +-ceil(cutoff x inverse plane spacing)
