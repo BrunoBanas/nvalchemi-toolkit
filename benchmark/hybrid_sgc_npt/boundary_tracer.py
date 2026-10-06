@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Canonical copy of the SGC boundary tracer (version 1.1). Used by run_campaign.py
+# Canonical copy of the SGC boundary tracer (version 1.2). Used by run_campaign.py
 # --mode trace-boundary, benchmark/phase_boundary/ and the nvalchemi-sgc-phase-boundary
 # skill. After changing it, run benchmark/phase_boundary/test_boundary_tracer.py. To use
 # it with another engine, copy it with
@@ -35,7 +35,12 @@ simulation is supplied by an object with
 
     engine.run(T, mu, state_a, state_g, tag) -> (obs_a, obs_g, new_state_a, new_state_g)
 
-where obs_* are dicts with keys x, x_se, E, E_se, drift (late-minus-early window mean of x),
+and optionally, so recentering runs only the walker it moves,
+
+    engine.run_one(T, mu, state, phase, tag) -> (obs, new_state)      # phase "a" or "g"
+
+(without it, recentering calls run() and ignores the other walker). obs_* are dicts with keys
+x, x_se, E, E_se, drift (late-minus-early window mean of x),
 resolved (bool), and states are JSON-serializable handles (e.g. checkpoint ids, or lists of
 them). Both walkers must be run at the same T and dmu. An engine that runs several independent
 replicas per phase reports their mean and may add ``replica_split=True`` when the replicas of one
@@ -48,6 +53,15 @@ Algorithm (see benchmark/phase_boundary/README.md, "Boundary tracing"):
     re-running at the corrected dmu until it moves by less than --tol-mu (max --max-corr);
   * each walker is checked against its own history: a jump toward the other phase, a drift
     toward it, or a collapsed gap rejects the step, restores both walkers, and halves dT;
+  * recentering (paper Fig. 6): when exactly ONE walker has left its phase, the tracer does not
+    just shrink dT. It sweeps that walker's dmu back (alone, at the same T) until it returns to
+    its own phase (dmu_back, state S saved), then forward from S until it transforms again
+    (dmu_fwd), restarts both walkers at the midpoint (that walker from S) and continues
+    integrating from there, with dmu_se = half the bracket plus half the last sweep step. The
+    same sweep fixes a mis-centred START point when the start compositions x_a0 / x_g0 are
+    given. The midpoint assumes the two metastability limits lie symmetrically about dmu_coex;
+    strongly asymmetric hysteresis (e.g. nucleation-limited on one side only) biases it by about
+    half the asymmetry. If recentering fails, the step is rejected and dT halved as below;
   * dT grows by 1.5x after clean steps (up to --dt-max); tracing stops at --t-stop, when dT
     falls below --dt-min (walkers keep transforming: near T_c, a spinodal, or a new phase),
     or when x_g - x_a drops below --min-gap (critical point approached).
@@ -68,7 +82,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 KB_EV = 8.617333262e-5
-TRACER_VERSION = "1.1"
+TRACER_VERSION = "1.2"
 
 
 # ----------------------------------------------------------------------------- configuration
@@ -92,6 +106,16 @@ class TraceConfig:
     max_gap_frac: float = (
         0.15  # cap |dT| so the gap shrinks by at most this fraction per step
     )
+    recenter: bool = True  # paper Fig. 6 recentering when one walker leaves its phase
+    recenter_dmu: float = (
+        0.0025  # first sweep step (eV); doubles every 4 runs, up to 8x
+    )
+    recenter_max_runs: int = 24  # per sweep direction
+    max_recenter: int = 8  # per trace
+    x_a0: float | None = (
+        None  # start compositions: enable recentering of the start point
+    )
+    x_g0: float | None = None
 
 
 # ----------------------------------------------------------------------------- physics
@@ -124,7 +148,15 @@ def check_phases(
     cfg: TraceConfig, hist: list[dict], T: float, a: dict, g: dict
 ) -> list[str]:
     """Reasons to reject a step: a walker left (or is leaving) its phase, or the gap closed."""
-    problems = []
+    p = phase_problems(cfg, hist, T, a, g)
+    return p["a"] + p["g"] + p["gap"]
+
+
+def phase_problems(
+    cfg: TraceConfig, hist: list[dict], T: float, a: dict, g: dict
+) -> dict:
+    """check_phases' reasons, split by walker: {"a": [...], "g": [...], "gap": [...]}."""
+    problems = {"a": [], "g": [], "gap": []}
     gap = g["x"] - a["x"]
     for key, obs, toward in (
         ("a", a, +1.0),
@@ -133,12 +165,12 @@ def check_phases(
         se = obs.get("x_se") or 0.0
         drift = obs.get("drift") or 0.0
         if toward * drift > cfg.z * max(se, 1e-6) and abs(drift) > 0.5 * cfg.min_jump:
-            problems.append(
+            problems[key].append(
                 f"{'alpha' if key == 'a' else 'gamma'} still drifting toward the other phase "
                 f"(window drift {drift:+.4f})"
             )
         if obs.get("replica_split"):
-            problems.append(
+            problems[key].append(
                 f"{'alpha' if key == 'a' else 'gamma'} replicas disagree "
                 f"(x = {obs.get('x_replicas')}): one may have switched phase"
             )
@@ -148,13 +180,33 @@ def check_phases(
             if toward * dev > max(cfg.z * se, cfg.min_jump) and abs(dev) > 0.25 * max(
                 gap, 1e-9
             ):
-                problems.append(
+                problems[key].append(
                     f"{'alpha' if key == 'a' else 'gamma'} jumped toward the other phase "
                     f"(x {obs['x']:.3f} vs own trend {pred:.3f})"
                 )
     if gap < cfg.min_gap:
-        problems.append(f"gap x_g - x_a = {gap:.3f} < min_gap {cfg.min_gap}")
+        problems["gap"].append(f"gap x_g - x_a = {gap:.3f} < min_gap {cfg.min_gap}")
     return problems
+
+
+def verdict(cfg: TraceConfig, obs: dict, pred_a: float, pred_g: float) -> str | None:
+    """Which phase a walker is in: "a", "g", or None (in between, replicas split, or still moving
+    toward the other phase).
+
+    In alpha if x is not displaced toward gamma by more than check_phases' jump tolerance from
+    alpha's expected x (mirror for gamma). As in check_phases, only drift TOWARD the other phase
+    disqualifies; relaxing deeper into its own phase does not."""
+    se = obs.get("x_se") or 0.0
+    drift = obs.get("drift") or 0.0
+    if obs.get("replica_split"):
+        return None
+    tol = max(cfg.z * se, cfg.min_jump, 0.25 * abs(pred_g - pred_a))
+    moving = abs(drift) > cfg.z * max(se, 1e-6) and abs(drift) > 0.5 * cfg.min_jump
+    if obs["x"] - pred_a < tol:
+        return None if moving and drift > 0 else "a"
+    if pred_g - obs["x"] < tol:
+        return None if moving and drift < 0 else "g"
+    return None
 
 
 # ----------------------------------------------------------------------------- tracer
@@ -201,14 +253,47 @@ class BoundaryTracer:
         direction = 1.0 if cfg.t_stop > cfg.t0 else -1.0
 
         if not pts:  # anchor point: verify both walkers at (T0, mu0)
+            mu0, mu0_se, rc_info = cfg.mu0, cfg.mu0_se, None
             a, g, sa, sg = self.engine.run(
-                cfg.t0, cfg.mu0, state_a, state_g, tag=f"T{cfg.t0:g}.start"
+                cfg.t0, mu0, state_a, state_g, tag=f"T{cfg.t0:g}.start"
             )
-            problems = [
-                p
-                for p in check_phases(cfg, [], cfg.t0, a, g)
-                if "gap" in p or "drifting" in p
-            ]
+            bad = self._start_problems(a, g)
+            failing = self._one_walker_out(bad, a, g, cfg.x_a0, cfg.x_g0)
+            if failing and self._can_recenter():
+                k = failing
+                rc = self._recenter(
+                    cfg.t0,
+                    mu0,
+                    k,
+                    sa if k == "a" else sg,
+                    sg if k == "a" else sa,
+                    cfg.x_a0,
+                    cfg.x_g0,
+                    f"T{cfg.t0:g}.start.rc",
+                )
+                if rc:
+                    s_k, s_o = rc["state"], (sg if k == "a" else sa)
+                    a, g, sa, sg = self.engine.run(
+                        cfg.t0,
+                        rc["mu"],
+                        s_k if k == "a" else s_o,
+                        s_o if k == "a" else s_k,
+                        tag=f"T{cfg.t0:g}.start.rc.both",
+                    )
+                    bad = self._start_problems(a, g)
+                    mu0, mu0_se, rc_info = (
+                        rc["mu"],
+                        rc["half"],
+                        {x: rc[x] for x in ("mu_back", "mu_fwd", "half", "n_runs")},
+                    )
+                    self._event(
+                        T=cfg.t0,
+                        kind="recentered-start",
+                        walker=k,
+                        mu_in=cfg.mu0,
+                        **rc_info,
+                    )
+            problems = bad["a"] + bad["g"] + bad["gap"]
             if problems:
                 self.trace.update(
                     status="failed",
@@ -216,12 +301,12 @@ class BoundaryTracer:
                 )
                 self._save()
                 return self.trace
-            f, fse = slope(cfg.t0, cfg.mu0, a, g)
+            f, fse = slope(cfg.t0, mu0, a, g)
             pts.append(
                 dict(
                     T=cfg.t0,
-                    mu=cfg.mu0,
-                    mu_se=cfg.mu0_se,
+                    mu=mu0,
+                    mu_se=mu0_se,
                     a=a,
                     g=g,
                     f=f,
@@ -229,15 +314,16 @@ class BoundaryTracer:
                     dT=0.0,
                     corrector_runs=0,
                     mu_pred=cfg.mu0,
-                    mu_corr=cfg.mu0,
+                    mu_corr=mu0,
                     state_a=sa,
                     state_g=sg,
+                    recentered=rc_info,
                 )
             )
             self.trace["next_dt"] = direction * abs(cfg.dt)
             self._save()
             self.log(
-                f"[trace] start T={cfg.t0:g} mu={cfg.mu0:.4f} x_a={a['x']:.3f} x_g={g['x']:.3f} f={f:+.4f}"
+                f"[trace] start T={cfg.t0:g} mu={mu0:.4f} x_a={a['x']:.3f} x_g={g['x']:.3f} f={f:+.4f}"
             )
 
         while self.trace["status"] == "running":
@@ -270,7 +356,8 @@ class BoundaryTracer:
                     T1, mu_run, sa, sg, tag=f"T{T1:g}.run{runs}"
                 )
                 runs += 1
-                problems = check_phases(cfg, pts, T1, a, g)
+                split = phase_problems(cfg, pts, T1, a, g)
+                problems = split["a"] + split["g"] + split["gap"]
                 if problems:
                     break
                 f1, f1se = slope(T1, mu_run, a, g)
@@ -288,6 +375,21 @@ class BoundaryTracer:
                     break
                 mu_run = mu_corr
 
+            if accepted is None and self._recenter_step(
+                p0,
+                T1,
+                dT,
+                mu_run,
+                mu_pred,
+                runs,
+                split,
+                a,
+                g,
+                sa_new,
+                sg_new,
+                direction,
+            ):
+                continue
             if accepted is None:  # a walker left its phase: reject, halve the step
                 self._event(T=T1, kind="rejected", dT=dT, mu=mu_run, reasons=problems)
                 nd = dT / 2.0
@@ -343,6 +445,201 @@ class BoundaryTracer:
             )
             self._save()
         return self.trace
+
+    # -- recentering (paper Fig. 6) --------------------------------------------------
+    def _can_recenter(self) -> bool:
+        """Whether recentering is enabled, within budget, and has phase references to judge by."""
+        cfg = self.cfg
+        return (
+            cfg.recenter
+            and self.trace.get("n_recenter", 0) < cfg.max_recenter
+            and (
+                self.trace["points"] or (cfg.x_a0 is not None and cfg.x_g0 is not None)
+            )
+        )
+
+    def _start_problems(self, a: dict, g: dict) -> dict:
+        """Start-point checks: drift / replica split / gap, and, when x_a0 / x_g0 are given,
+        which phase each walker is actually in."""
+        cfg = self.cfg
+        bad = phase_problems(cfg, [], cfg.t0, a, g)
+        for k in ("a", "g"):
+            bad[k] = [p for p in bad[k] if "drifting" in p or "replicas" in p]
+        if cfg.x_a0 is not None and cfg.x_g0 is not None:
+            for k, obs in (("a", a), ("g", g)):
+                v = verdict(cfg, obs, cfg.x_a0, cfg.x_g0)
+                if v != k and not bad[k]:
+                    bad[k].append(
+                        f"{'alpha' if k == 'a' else 'gamma'} not in its phase at the start "
+                        f"(x {obs['x']:.3f}; expected near {cfg.x_a0 if k == 'a' else cfg.x_g0})"
+                    )
+        return bad
+
+    def _one_walker_out(self, problems, a, g, pred_a, pred_g) -> str | None:
+        """The one walker ("a" or "g") that left its phase while the other stayed in its own, else None.
+
+        A collapsed gap is accepted when it is explained by that walker having transformed; when
+        both walkers look wrong (or neither) it is not a case for recentering (e.g. near T_c)."""
+        if pred_a is None or pred_g is None:
+            return None
+        failing = [k for k in ("a", "g") if problems[k]]
+        if problems["gap"]:
+            va, vg = (
+                verdict(self.cfg, a, pred_a, pred_g),
+                verdict(self.cfg, g, pred_a, pred_g),
+            )
+            failing = sorted(
+                set(failing) | {k for k, v in (("a", va), ("g", vg)) if v != k}
+            )
+            if len(failing) == 1 and (va if failing[0] == "g" else vg) != (
+                "a" if failing[0] == "g" else "g"
+            ):
+                return None
+        return failing[0] if len(failing) == 1 else None
+
+    def _run_one(self, T, mu, state, phase, other_state, tag):
+        """Run one walker (engine.run_one if available, else run() with the other walker ignored)."""
+        if hasattr(self.engine, "run_one"):
+            return self.engine.run_one(T, mu, state, phase, tag=tag)
+        sa, sg = (state, other_state) if phase == "a" else (other_state, state)
+        a, g, sa2, sg2 = self.engine.run(T, mu, sa, sg, tag=tag)
+        return (a, sa2) if phase == "a" else (g, sg2)
+
+    def _recenter(
+        self, T, mu_fail, phase, state_fail, state_other, pred_a, pred_g, tagbase
+    ) -> dict | None:
+        """Fig. 6: bracket dmu_coex at T with the walker of ``phase`` that just left its phase.
+
+        (a) move its dmu back toward its own phase until it returns (dmu_back; save state S),
+        (b) from S move dmu forward until it transforms again (dmu_fwd). Returns the midpoint,
+        half-width (+ half the final sweep step) and S, or None if a sweep runs out of runs."""
+        cfg = self.cfg
+        back = (
+            -1.0 if phase == "a" else 1.0
+        )  # alpha is favoured by lower dmu, gamma by higher
+        other = "g" if phase == "a" else "a"
+        runs = []
+
+        def sweep(mu, st, sign, target, label):
+            """Step dmu by ``sign`` until the walker is in ``target``; return (dmu, state, step) or None."""
+            step = cfg.recenter_dmu
+            for k in range(cfg.recenter_max_runs):
+                if k and k % 4 == 0:
+                    step = min(2 * step, 8 * cfg.recenter_dmu)
+                mu += sign * step
+                obs, st = self._run_one(
+                    T, mu, st, phase, state_other, f"{tagbase}.{label}{k}"
+                )
+                v = verdict(cfg, obs, pred_a, pred_g)
+                runs.append(dict(sweep=label, mu=mu, x=obs["x"], verdict=v))
+                self.log(
+                    f"[trace] recenter T={T:g} {label}: mu={mu:.5f} x={obs['x']:.4f} -> {v}"
+                )
+                if v == target:
+                    return mu, st, step
+            return None, st, step
+
+        mu_b, S, step_b = sweep(mu_fail, state_fail, back, phase, "back")
+        if mu_b is None:
+            self._event(
+                T=T,
+                kind="recenter-failed",
+                walker=phase,
+                reason="never returned to its phase",
+                runs=runs,
+            )
+            return None
+        mu_f, _, step_f = sweep(mu_b, S, -back, other, "fwd")
+        if mu_f is None:
+            self._event(
+                T=T,
+                kind="recenter-failed",
+                walker=phase,
+                reason="never transformed again",
+                runs=runs,
+            )
+            return None
+        self.trace["n_recenter"] = self.trace.get("n_recenter", 0) + 1
+        lo, hi = sorted((mu_b, mu_f))
+        return dict(
+            mu=0.5 * (lo + hi),
+            half=0.5 * (hi - lo) + 0.5 * max(step_b, step_f),
+            mu_back=mu_b,
+            mu_fwd=mu_f,
+            state=S,
+            n_runs=len(runs),
+            runs=runs,
+        )
+
+    def _recenter_step(
+        self, p0, T1, dT, mu_run, mu_pred, runs, split, a, g, sa_new, sg_new, direction
+    ) -> bool:
+        """Try Fig. 6 recentering after a rejected step; on success append the point and return True."""
+        cfg, pts = self.cfg, self.trace["points"]
+        pred_a = _predict_own(pts, "a", T1)
+        pred_g = _predict_own(pts, "g", T1)
+        pred_a = p0["a"]["x"] if pred_a is None else pred_a
+        pred_g = p0["g"]["x"] if pred_g is None else pred_g
+        k = self._one_walker_out(split, a, g, pred_a, pred_g)
+        if k is None or not self._can_recenter():
+            return False
+        s_fail = sa_new if k == "a" else sg_new
+        s_other = sg_new if k == "a" else sa_new  # the other walker passed this run
+        rc = self._recenter(
+            T1,
+            mu_run,
+            k,
+            s_fail,
+            s_other,
+            pred_a,
+            pred_g,
+            f"T{T1:g}.rc{self.trace['n_recenter'] if 'n_recenter' in self.trace else 0}",
+        )
+        if rc is None:
+            return False
+        sa_in, sg_in = (rc["state"], s_other) if k == "a" else (s_other, rc["state"])
+        a2, g2, sa2, sg2 = self.engine.run(
+            T1, rc["mu"], sa_in, sg_in, tag=f"T{T1:g}.rc{self.trace['n_recenter']}.both"
+        )
+        problems = check_phases(cfg, pts, T1, a2, g2)
+        info = {x: rc[x] for x in ("mu_back", "mu_fwd", "half", "n_runs")}
+        if problems:
+            self._event(
+                T=T1,
+                kind="recenter-failed",
+                walker=k,
+                reason="rerun at the midpoint left a phase",
+                problems=problems,
+                **info,
+            )
+            return False
+        f1, f1se = slope(T1, rc["mu"], a2, g2)
+        pts.append(
+            dict(
+                T=T1,
+                mu=rc["mu"],
+                mu_se=rc["half"],
+                a=a2,
+                g=g2,
+                f=f1,
+                f_se=f1se,
+                dT=dT,
+                corrector_runs=runs,
+                mu_pred=mu_pred,
+                mu_corr=rc["mu"],
+                state_a=sa2,
+                state_g=sg2,
+                recentered=info,
+            )
+        )
+        self._event(T=T1, kind="recentered", walker=k, mu_rejected=mu_run, **info)
+        self.trace["next_dt"] = direction * min(abs(dT), cfg.dt_max)
+        self.log(
+            f"[trace] T={T1:g} recentered mu={rc['mu']:.4f}±{rc['half']:.4f} x_a={a2['x']:.3f} "
+            f"x_g={g2['x']:.3f} next dT={self.trace['next_dt']:+g}"
+        )
+        self._save()
+        return True
 
     def _finish(self, reason):
         self.trace.update(status="finished", stop_reason=reason)

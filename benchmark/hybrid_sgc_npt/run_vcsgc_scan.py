@@ -41,7 +41,7 @@ starting state and its own block count:
 Fresh walkers start at the Vegard lattice constant from the pure-element calibration.
 
 The walkers run in serial batches of ``--batch-width`` (``auto``: 4 on cards with >= 75 GB, else
-2 -- the SGC-NPT memory measurements in nvalchemi-uma-submission). Within a batch, walkers may have
+3 -- sized on peak allocated memory, see resolve_width; run with expandable_segments). Within a batch, walkers may have
 different c0 and progress. Every ``--chunk-blocks`` blocks each walker's state goes to
 ``<out>/states`` and its per-block series (c, U/atom, V/atom) to ``<out>/<run_id>.series.json``;
 a resubmission continues where the last job stopped, finishing partly-run walkers first.
@@ -218,7 +218,10 @@ def resolve_width(arg: str, device) -> int:
     if device.type != "cuda":
         return 2
     total = torch.cuda.get_device_properties(device).total_memory / 1024**3
-    return 4 if total >= 75 else 2
+    # Peak ALLOCATED SGC-NPT memory is ~1.1 + 5.2 GiB per 500-atom walker (6.3 / 11.5 / 21.8 GiB at
+    # width 1 / 2 / 4); the 48.7 GiB *reserved* at width 4 is allocator caching, which
+    # expandable_segments removes. So 3 fits a 40 GB card and 4 an 80 GB one.
+    return 4 if total >= 75 else 3
 
 
 def plan_entries(args) -> list[dict]:
@@ -267,7 +270,7 @@ def main() -> None:
     ap.add_argument("--gate-passes", type=int, default=2,
                     help="consecutive passing gate checks (one per chunk) needed to stop a walker")
     ap.add_argument("--chunk-blocks", type=int, default=25, help="blocks between checkpoints")
-    ap.add_argument("--batch-width", default="auto", help="walkers per batch, or auto (4 on >= 75 GB cards, else 2)")
+    ap.add_argument("--batch-width", default="auto", help="walkers per batch, or auto (4 on >= 75 GB cards, else 3)")
     ap.add_argument("--mc-step-fraction", type=float, default=0.6)
     ap.add_argument("--md-steps-per-block", type=int, default=50)
     ap.add_argument("--reference-energies", type=Path,

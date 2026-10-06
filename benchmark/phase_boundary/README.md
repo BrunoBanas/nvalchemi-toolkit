@@ -112,8 +112,21 @@ give the slope, and no anchor is needed after the starting point.
 - Steps are taken in β: Adams-Bashforth 2 predictor (Euler first), walkers run at
   the predicted Δμ, trapezoid corrector, rerun if the corrector moves Δμ by more
   than `tol_mu` (2 meV). The accepted Δμ is the one the walkers ran at.
-- A step is rejected (walkers restored, dT halved) if a walker jumps toward the
-  other phase, keeps drifting toward it, or the gap falls below `min_gap`.
+- A step is rejected (walkers restored) if a walker jumps toward the other phase,
+  keeps drifting toward it, or the gap falls below `min_gap`.
+- Recentering (paper Fig. 6, tracer 1.2, `recenter=True` by default): if exactly
+  one walker left its phase (a collapsed gap counts when that transformation
+  explains it), the tracer re-measures Δμ_coex at the same T:
+  1. sweep that walker's Δμ back until it returns to its phase (Δμ_back, state S);
+  2. from S, sweep forward until it transforms again (Δμ_fwd);
+  3. restart both walkers at the midpoint and continue integrating, with
+     Δμ_se = half the bracket plus half the last sweep step.
+
+  Sweeps start at 2.5 meV, double every 4 runs (up to 8×) and use the engine's
+  `run_one` if it has one. Give the start compositions (`x_a0`, `x_g0`;
+  `--trace-x-alpha0/--trace-x-gamma0`) to recenter a mis-centred start too. The
+  midpoint is biased by half any asymmetry between the two metastability limits.
+  If recentering fails, dT is halved instead.
   Tracing stops when dT would fall below `dt_min`, distinguishing "gap closed"
   (critical point) from "walkers keep transforming".
 - The step grows 1.5x after a clean step, up to `dt_max`; while the gap shrinks it
@@ -142,8 +155,11 @@ T_c = 1214 K, noise 0.003 in x and 1.5 meV in E):
 | Test | Result |
 | --- | --- |
 | Down 950 → 600 K, exact start | Δμ within 0.21 meV, x within 0.004 at all points |
-| Up from 950 K | stops at 1161 K ("gap closed"); T_c estimate 1221 K (exact 1214) |
+| Up from 950 K | stops at 1195 K ("gap closed", after recentering near T_c); T_c estimate 1214.2 K (exact 1214.3); 1.1 stopped at 1161 K |
 | Down with Δμ₀ off by +4 meV | error decays to +1.3 meV at 600 K |
+| Start off by +10 meV, nucleation window ±6 meV | recentered start within 0.0 meV, worst 1.8 meV to 600 K; without recentering the start is rejected |
+| Asymmetric window (+3 / −9 meV) | recentered start biased −2.5 meV (predicted −3.0) |
+| Trace drifting out of a ±4 meV window | 2 recenterings, reaches 600 K within 3.5 meV; without: stops at 834 K |
 
 Run both after any change to the analysis or the tracer.
 

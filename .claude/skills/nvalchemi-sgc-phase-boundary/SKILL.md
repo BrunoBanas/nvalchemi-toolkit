@@ -189,6 +189,15 @@ Direction matters (eq. 31):
   crystallinity along it.
 - Pass the start uncertainty (for example the hysteresis half-width) as `mu0_se`
   (`--trace-mu0-se` in `run_campaign.py`).
+- Recentering (van de Walle & Asta Fig. 6) is on by default (tracer 1.2):
+  - When one walker leaves its phase, the tracer sweeps its Δμ back until it returns, then
+    forward until it transforms again, and restarts both walkers at the midpoint.
+  - This keeps a trace alive when the window where both phases are metastable is narrow, as in
+    500-atom cells with nucleation-limited hysteresis.
+  - Pass the start compositions (`--trace-x-alpha0/--trace-x-gamma0`) so a mis-centred START is
+    recentered rather than rejected.
+  - The midpoint is biased by half any asymmetry between the two metastability limits. Recentered
+    points (`recentered` in trace.json) carry Δμ_se = half the bracket; report them as such.
 
 ```bash
 python benchmark/hybrid_sgc_npt/boundary_tracer.py report down/trace.json \

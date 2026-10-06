@@ -20,7 +20,18 @@ SGC walker, and reports noisy x and E. The exact coexistence line comes from the
 tangent on a dense grid. Checks:
   1. downward trace from 950 K reproduces x_alpha, x_gamma and dmu_coex at every step;
   2. upward trace stops near the exact T_c and the Ising/mean-field T_c estimate is close;
-  3. a start dmu that is off by +4 meV does not grow while tracing downward (eq. 31).
+  3. a start dmu that is off by +4 meV does not grow while tracing downward (eq. 31);
+  4-6. recentering (paper Fig. 6) with NucleationEngine, whose walkers switch phase as soon as
+     dmu leaves a narrow window dmu_coex(T) - w_g .. dmu_coex(T) + w_a (nucleation-limited
+     hysteresis, as in the 500-atom Au-Pt runs), not at the spinodals:
+     4. a start dmu 10 meV off with w = 6 meV: the alpha walker transforms at once; recentering
+        the start must land within 1.5 meV of dmu_coex and the trace must reach t_stop (and fail
+        to start without recentering);
+     5. asymmetric windows (3 / 9 meV): the recentered start is biased by (w_a - w_g)/2 = -3 meV,
+        the documented limit of the midpoint rule;
+     6. a trace that drifts (energies biased by 0.03 eV * x) out of a 4 meV window: recentering
+        keeps every point within 4 meV and reaches t_stop, where the plain tracer stops early;
+        also through an engine without run_one (the fallback path).
 
     python test_boundary_tracer.py [--out dir]
 """
@@ -95,6 +106,73 @@ class MeanFieldEngine:
         return a, g, sa2, sg2
 
 
+_MU_C = {}
+
+
+def mu_coex(T):
+    """Exact dmu_coex at *T* (cached), or None above T_c."""
+    key = round(float(T), 6)
+    if key not in _MU_C:
+        t = truth(L0, L1, EB, key)
+        _MU_C[key] = t["mu_coex"] if t else None
+    return _MU_C[key]
+
+
+class NucleationEngine(MeanFieldEngine):
+    """Walkers switch branch once dmu leaves [dmu_coex - w_g, dmu_coex + w_a] (or a spinodal)."""
+
+    def __init__(self, w_a, w_g, ebias=0.0, single=True, **kw):
+        super().__init__(**kw)
+        self.w_a, self.w_g, self.ebias, self.single, self.one_calls = (
+            w_a,
+            w_g,
+            ebias,
+            single,
+            0,
+        )
+
+    def __getattribute__(self, name):
+        """Hide run_one when ``single`` is False, to exercise the tracer's fallback path."""
+        if name == "run_one" and not object.__getattribute__(self, "single"):
+            raise AttributeError(name)  # exercise the tracer's fallback path
+        return object.__getattribute__(self, name)
+
+    def _walker(self, T, mu, state):
+        """One walker's observables: it switches branch once dmu leaves its window."""
+        low, high = branch_roots(T)
+        branch, mc = state["branch"], mu_coex(T)
+        if branch == "low" and (mu > mc + self.w_a or mu > low[1][-1]):
+            branch = "high"
+        if branch == "high" and (mu < mc - self.w_g or mu < high[1][0]):
+            branch = "low"
+        xs, mus = low if branch == "low" else high
+        x = float(np.interp(mu, mus, xs))
+        E = float(model(L0, L1, EB, T, np.array([x]))[0][0]) + self.ebias * x
+        obs = dict(
+            x=float(np.clip(x + self.rng.normal(0, self.nx), 1e-6, 1 - 1e-6)),
+            x_se=self.nx,
+            E=E + self.rng.normal(0, self.nE),
+            E_se=self.nE,
+            drift=0.0,
+            resolved=True,
+        )
+        return obs, dict(branch=branch)
+
+    def run_one(self, T, mu, state, phase, tag=""):
+        """Run a single walker (the optional engine method recentering uses)."""
+        self.one_calls += 1
+        return self._walker(T, mu, state)
+
+
+def mu_errors(trace):
+    """(T, dmu error, recentered?) for each traced point with an exact reference."""
+    return [
+        (p["T"], p["mu"] - mu_coex(p["T"]), bool(p.get("recentered")))
+        for p in trace["points"]
+        if mu_coex(p["T"]) is not None
+    ]
+
+
 def exact_tc():
     """Return the exact critical temperature by bisection on the existence of a gap."""
     lo, hi = 900.0, 1400.0
@@ -122,7 +200,7 @@ def compare(trace):
 
 
 def main():
-    """Run the downward, upward and offset-start traces and check them against the truth."""
+    """Run the downward, upward, offset-start and recentering traces and check them against the truth."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="tracer_selftest")
     args = ap.parse_args()
@@ -196,6 +274,107 @@ def main():
     print(
         f"[3] start +4 meV: dmu error {first * 1e3:+.2f} meV at {e_b[0][0]:.0f} K -> {last * 1e3:+.2f} meV at "
         f"{e_b[-1][0]:.0f} K  -> {'PASS (does not grow)' if stable else 'FAIL'}"
+    )
+
+    # 4. mis-centred start, narrow symmetric window
+    base = dict(
+        t0=T0,
+        t_stop=600.0,
+        dt=50.0,
+        mu0_se=0.004,
+        x_a0=t0["x_alpha"],
+        x_g0=t0["x_gamma"],
+    )
+    cfg = TraceConfig(mu0=t0["mu_coex"] + 0.010, **base)
+    tr4 = BoundaryTracer(
+        cfg,
+        NucleationEngine(0.006, 0.006, seed=4),
+        out / "recenter_start.json",
+        log=quiet,
+    ).run(dict(branch="low"), dict(branch="high"))
+    tr4n = BoundaryTracer(
+        TraceConfig(mu0=t0["mu_coex"] + 0.010, recenter=False, **base),
+        NucleationEngine(0.006, 0.006, seed=4),
+        out / "recenter_start_off.json",
+        log=quiet,
+    ).run(dict(branch="low"), dict(branch="high"))
+    e4 = mu_errors(tr4)
+    good4 = (
+        tr4["stop_reason"] == "reached t_stop"
+        and bool(e4)
+        and e4[0][2]
+        and abs(e4[0][1]) < 0.0015
+        and max(abs(d) for _, d, _ in e4) < 0.004
+        and tr4n["status"] == "failed"
+    )
+    ok &= good4
+    print(
+        f"[4] start +10 meV, window +-6 meV: recentered start error {e4[0][1] * 1e3:+.2f} meV, worst "
+        f"{max(abs(d) for _, d, _ in e4) * 1e3:.2f} meV over {len(e4)} points, stop='{tr4['stop_reason']}'; "
+        f"without recentering: {tr4n['status']}  -> {'PASS' if good4 else 'FAIL'}"
+    )
+
+    # 5. asymmetric window: the midpoint is biased by (w_a - w_g)/2
+    tr5 = BoundaryTracer(
+        TraceConfig(mu0=t0["mu_coex"] + 0.010, **base),
+        NucleationEngine(0.003, 0.009, seed=5),
+        out / "recenter_asym.json",
+        log=quiet,
+    ).run(dict(branch="low"), dict(branch="high"))
+    e5 = mu_errors(tr5)
+    good5 = bool(e5) and e5[0][2] and abs(e5[0][1] - (0.003 - 0.009) / 2) < 0.0015
+    ok &= good5
+    print(
+        f"[5] asymmetric window (+3 / -9 meV): recentered start error {e5[0][1] * 1e3:+.2f} meV vs expected bias "
+        f"{(0.003 - 0.009) / 2 * 1e3:+.1f} meV  -> {'PASS' if good5 else 'FAIL'}"
+    )
+
+    # 6. a drifting trace (biased energies) leaves a 4 meV window mid-way
+    res6 = {}
+    for label, kw, eng in (
+        ("recenter", {}, NucleationEngine(0.004, 0.004, ebias=0.03, seed=7)),
+        (
+            "plain",
+            dict(recenter=False),
+            NucleationEngine(0.004, 0.004, ebias=0.03, seed=7),
+        ),
+        (
+            "fallback",
+            {},
+            NucleationEngine(0.004, 0.004, ebias=0.03, single=False, seed=7),
+        ),
+    ):
+        tr6 = BoundaryTracer(
+            TraceConfig(mu0=t0["mu_coex"], **base, **kw),
+            eng,
+            out / f"recenter_drift_{label}.json",
+            log=quiet,
+        ).run(dict(branch="low"), dict(branch="high"))
+        e6 = mu_errors(tr6)
+        res6[label] = (
+            tr6,
+            e6,
+            min(T for T, _, _ in e6),
+            max(abs(d) for _, d, _ in e6),
+            tr6.get("n_recenter", 0),
+        )
+    good6 = (
+        all(
+            res6[k][0]["stop_reason"] == "reached t_stop"
+            and res6[k][4] >= 1
+            and res6[k][3] < 0.004
+            for k in ("recenter", "fallback")
+        )
+        and res6["plain"][2] > 700
+    )
+    ok &= good6
+    print(
+        "[6] drifting trace, window +-4 meV: "
+        + "; ".join(
+            f"{k}: down to {v[2]:.0f} K, worst {v[3] * 1e3:.2f} meV, {v[4]} recentering(s)"
+            for k, v in res6.items()
+        )
+        + f"  -> {'PASS' if good6 else 'FAIL'}"
     )
 
     report(

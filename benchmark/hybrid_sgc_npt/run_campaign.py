@@ -409,11 +409,14 @@ def _make_batch(
     """Build a batch of fresh states or restored continuation states."""
     if len(runs) != len(parent_states):
         raise ValueError("runs and parent_states must have equal lengths")
+    # mc_accepted (per-graph MC bookkeeping) exists only on states saved after an MC run; drop it
+    # so saved and freshly built states can share a batch. The sampler re-creates it on first use.
     return Batch.from_data_list(
         [
             _walker(template, run, SEED + index, parent_state, device)
             for index, (run, parent_state) in enumerate(zip(runs, parent_states))
-        ]
+        ],
+        exclude_keys=["mc_accepted"],
     )
 
 
@@ -1598,7 +1601,45 @@ class NvalchemiTraceEngine:
     def run(self, T, mu, state_a, state_g, tag=""):
         """Equilibrate both phases at ``(T, mu)`` and return their observables and final states."""
         tag = f"{self.label}.{tag}".replace("+", "")
-        phases = ("alpha", "gamma")
+        obs, new_states = self._execute(
+            T, mu, tag, {"alpha": state_a, "gamma": state_g}
+        )
+        with self.log_path.open("a") as fh:
+            fh.write(
+                json.dumps(
+                    dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])
+                )
+                + "\n"
+            )
+        a, g = obs["alpha"], obs["gamma"]
+        print(
+            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
+            f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={a['acceptance']:.3f} width={a['width']} {a['wall_seconds']:.0f}s",
+            flush=True,
+        )
+        return a, g, new_states["alpha"], new_states["gamma"]
+
+    def run_one(self, T, mu, state, phase, tag=""):
+        """One phase's replicas only, for the tracer's Fig. 6 recentering sweeps (half the batch)."""
+        tag = f"{self.label}.{tag}".replace("+", "")
+        name = "alpha" if phase == "a" else "gamma"
+        obs, new_states = self._execute(T, mu, tag, {name: state})
+        o = obs[name]
+        with self.log_path.open("a") as fh:
+            fh.write(
+                json.dumps(dict(tag=tag, T=T, mu=mu, recentering=name, **{name: o}))
+                + "\n"
+            )
+        print(
+            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={o['x']:.4f}{o['x_replicas']} (recentering) "
+            f"acc={o['acceptance']:.3f} width={o['width']} {o['wall_seconds']:.0f}s",
+            flush=True,
+        )
+        return o, new_states[name]
+
+    def _execute(self, T, mu, tag, phase_states):
+        """Run ``replicas`` walkers per phase in ``phase_states`` at ``(T, mu)`` in one batch."""
+        phases = tuple(phase_states)
         runs = tuple(
             RunSpec(
                 run_id=f"{tag}.{phase}.r{k}",
@@ -1613,7 +1654,7 @@ class NvalchemiTraceEngine:
             for k in range(self.replicas)
         )
         parents = tuple(
-            self._load(st) for st in self._states(state_a) + self._states(state_g)
+            self._load(st) for p in phases for st in self._states(phase_states[p])
         )
         width = len(runs)
         hybrid, batch = make_workload(
@@ -1650,20 +1691,7 @@ class NvalchemiTraceEngine:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
             torch.cuda.empty_cache()
-        with self.log_path.open("a") as fh:
-            fh.write(
-                json.dumps(
-                    dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])
-                )
-                + "\n"
-            )
-        a, g = obs["alpha"], obs["gamma"]
-        print(
-            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
-            f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={acceptance:.3f} width={width} {elapsed:.0f}s",
-            flush=True,
-        )
-        return a, g, new_states["alpha"], new_states["gamma"]
+        return obs, new_states
 
 
 def _run_trace(
@@ -1685,6 +1713,10 @@ def _run_trace(
         dt_max=args.trace_dt_max,
         tol_mu=args.trace_tol_mu,
         min_gap=args.trace_min_gap,
+        recenter=not args.trace_no_recenter,
+        recenter_dmu=args.trace_recenter_dmu,
+        x_a0=args.trace_x_alpha0,
+        x_g0=args.trace_x_gamma0,
     )
     engine = NvalchemiTraceEngine(
         model,
@@ -1944,6 +1976,30 @@ def main() -> None:
         type=float,
         default=0.05,
         help="stop when x_gamma - x_alpha drops below",
+    )
+    trace.add_argument(
+        "--trace-x-alpha0",
+        type=float,
+        default=None,
+        help="x of the alpha (low-x) phase at the start; with --trace-x-gamma0 it lets the tracer "
+        "recenter a mis-centred start point (Fig. 6) instead of rejecting it",
+    )
+    trace.add_argument(
+        "--trace-x-gamma0",
+        type=float,
+        default=None,
+        help="x of the gamma phase at the start",
+    )
+    trace.add_argument(
+        "--trace-no-recenter",
+        action="store_true",
+        help="disable the tracer's Fig. 6 recentering (reject + halve dT only, as in tracer 1.1)",
+    )
+    trace.add_argument(
+        "--trace-recenter-dmu",
+        type=float,
+        default=0.0025,
+        help="first dmu step (eV) of a recentering sweep; doubles every 4 runs up to 8x",
     )
     trace.add_argument(
         "--trace-replicas",
