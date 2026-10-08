@@ -31,7 +31,9 @@ tangent on a dense grid. Checks:
         the documented limit of the midpoint rule;
      6. a trace that drifts (energies biased by 0.03 eV * x) out of a 4 meV window: recentering
         keeps every point within 4 meV and reaches t_stop, where the plain tracer stops early;
-        also through an engine without run_one (the fallback path).
+        also through an engine without run_one (the fallback path);
+  7. an engine that reports phase_ok=False for the alpha walker above 1100 K (it "melts"): the
+     upward trace must stop below 1100 K with "a new phase appeared", without recentering.
 
     python test_boundary_tracer.py [--out dir]
 """
@@ -375,6 +377,32 @@ def main():
             for k, v in res6.items()
         )
         + f"  -> {'PASS' if good6 else 'FAIL'}"
+    )
+
+    # 7. a walker that melts (engine reports phase_ok=False): stop, no recentering
+    class MeltingEngine(MeanFieldEngine):
+        """Mean-field walkers, but alpha reports phase_ok=False above 1100 K."""
+
+        def run(self, T, mu, sa, sg, tag=""):
+            """As MeanFieldEngine.run, flagging alpha as melted above 1100 K."""
+            a, g, sa2, sg2 = super().run(T, mu, sa, sg, tag)
+            if T > 1100:
+                a = dict(a, phase_ok=False, phase_note="solid fraction 0.1")
+            return a, g, sa2, sg2
+
+    cfg = TraceConfig(t0=T0, mu0=t0["mu_coex"], t_stop=1400.0, dt=50.0, dt_min=2.0)
+    tr7 = BoundaryTracer(cfg, MeltingEngine(seed=8), out / "melt.json", log=quiet).run(
+        dict(branch="low"), dict(branch="high")
+    )
+    top7 = max(p["T"] for p in tr7["points"])
+    good7 = (
+        top7 <= 1100
+        and "new phase appeared" in (tr7["stop_reason"] or "")
+        and not tr7.get("n_recenter")
+    )
+    ok &= good7
+    print(
+        f"[7] walker 'melts' above 1100 K: highest traced T {top7:.1f} K, stop='{tr7['stop_reason']}'  -> {'PASS' if good7 else 'FAIL'}"
     )
 
     report(

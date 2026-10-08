@@ -187,6 +187,7 @@ Direction matters (eq. 31):
   estimate.
 - An upward relaxed-lattice trace can end at melting rather than T_c; check
   crystallinity along it.
+- Since tracer 1.3 an engine can report `phase_ok=False` (with `phase_note`) when a walker left its crystal phase, e.g. melted. The step is rejected without recentering and the trace ends with "a new phase appeared". The nvalchemi campaign driver (`run_phase_campaign.py`) sets it from each walker's solid-like fraction (`min_solid_fraction`, 0.5). It also runs van de Walle & Asta's full sequence: an upward trace, then a `retrace_from` trace back down from the top point with closure.json against the start. Each accepted point's structures are written to `traces/<name>/structures/`.
 - Pass the start uncertainty (for example the hysteresis half-width) as `mu0_se`
   (`--trace-mu0-se` in `run_campaign.py`).
 - Recentering (van de Walle & Asta Fig. 6) is on by default (tracer 1.2):

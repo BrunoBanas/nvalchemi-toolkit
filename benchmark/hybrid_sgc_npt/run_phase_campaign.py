@@ -22,6 +22,11 @@ A campaign (JSON spec) mixes four kinds of work, all at any number of temperatur
              state (single-phase regions, where continuation is optional).
 ``vcsgc``    variance-constrained walkers at fixed target composition c0 (inside a gap).
 ``traces``   boundary tracing (eq. 29 of van de Walle & Asta 2002) with ``boundary_tracer.py``,
+             faithful to their section 3.3 when paired with a retrace: an upward trace finds the
+             end of the two-phase region with recentering, then a trace with
+             ``"retrace_from": "<upward trace>"`` restarts at its highest point whose gap is still
+             >= ``retrace_min_gap`` (0.15) and integrates back DOWN (the stable direction) to its
+             own t_stop, reporting how well it closes on the upward trace's start;
              including its Fig. 6 recentering (sweeps run only the moved phase's replicas; give
              x_a0 / x_g0 so a mis-centred start is recentered too). Each tracer runs in its own
              thread and submits its walkers to the same pool, so several traces and any other
@@ -51,11 +56,20 @@ the last committed states (nothing is lost).
 Resumable: every walker's spec, progress and latest state are saved after each chunk; traces
 resume from their own trace.json. A resubmission continues exactly where the last job stopped.
 
+Trace runs also check structure: every walker's final state must keep a solid-like fraction
+(atoms with exactly 12 neighbours inside the fcc first shell) of at least ``min_solid_fraction``
+(0.5); otherwise that phase is reported with ``phase_ok=False`` and the tracer stops there with
+"a new phase appeared" (e.g. melting of the Au-rich phase). Every accepted trace point's
+structures are written to ``traces/<name>/structures/`` (.pt checkpoint + .extxyz per walker,
+indexed in ``index.csv``) as soon as the point is accepted.
+
 Outputs under ``--out`` (all in the formats the existing analysis tools read):
   ladders/<name>/*.equilibration.json     -> sgc_phase_boundary.py
   points/<name>/*.equilibration.json      -> sgc_phase_boundary.py
   vcsgc/<name>/*.series.json              -> vcsgc_analysis.py
   traces/<name>/trace.json                -> boundary_tracer.py report
+  traces/<name>/structures/               accepted points: step<NN>_T<T>_<phase>_r<k>.{pt,extxyz}
+  traces/<name>/closure.json              retrace only: arrival vs the upward trace's start
   throughput.csv (one row per chunk), walkers/<id>.json, states/
 
     python run_phase_campaign.py --spec campaign.json --out <dir> [--smoke]
@@ -70,6 +84,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -77,6 +92,7 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
 import torch
 from run_campaign import (
     BAROSTAT_TIME_FS,
@@ -209,6 +225,73 @@ class Pool:
             return [self.walkers[i] for i in wids]
 
 
+def solid_fraction(data) -> float:
+    """Fraction of atoms with exactly 12 neighbours inside the fcc first shell (minimum image).
+
+    The cutoff sits midway between the first and second fcc shells of the cell's own mean
+    lattice constant. Solid fcc at 700 K gives about 0.85-1.0 (scan_700_hybrid_tf32eo: 0.85-0.96 for
+    the Au-rich phase); a melt falls far below 0.5."""
+    pos = data.positions.detach().cpu().double().numpy().reshape(-1, 3)
+    cell = data.cell.detach().cpu().double().numpy().reshape(3, 3)
+    n = len(pos)
+    a = (4 * abs(np.linalg.det(cell)) / n) ** (1 / 3)
+    rc = 0.5 * (1 / np.sqrt(2) + 1) * a
+    frac = pos @ np.linalg.inv(cell)
+    d = frac[:, None, :] - frac[None, :, :]
+    d -= np.round(d)
+    dist = np.linalg.norm(d @ cell, axis=-1)
+    np.fill_diagonal(dist, np.inf)
+    return float(np.mean((dist < rc).sum(axis=1) == 12))
+
+
+def write_extxyz(data, path: Path, comment: str = "") -> None:
+    """Minimal extended-XYZ writer (species, positions, cell) for OVITO / ASE."""
+    from ase.data import chemical_symbols
+
+    z = data.atomic_numbers.detach().cpu().numpy().reshape(-1)
+    pos = data.positions.detach().cpu().double().numpy().reshape(-1, 3)
+    cell = data.cell.detach().cpu().double().numpy().reshape(3, 3)
+    lat = " ".join(f"{v:.8f}" for v in cell.reshape(-1))
+    lines = [str(len(z)), f'Lattice="{lat}" Properties=species:S:1:pos:R:3 pbc="T T T" {comment}'.rstrip()]
+    lines += [f"{chemical_symbols[int(zi)]} {x:.6f} {y:.6f} {w:.6f}" for zi, (x, y, w) in zip(z, pos)]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def make_exporting_tracer(base, store: FinalStateStore, tdir: Path):
+    """BoundaryTracer subclass that writes each accepted point's structures when it is saved."""
+
+    class ExportingTracer(base):
+        """Exports traces/<name>/structures/ after every trace.json save (idempotent)."""
+
+        def _save(self):
+            super()._save()
+            sdir = tdir / "structures"
+            sdir.mkdir(exist_ok=True)
+            index = sdir / "index.csv"
+            new = not index.is_file()
+            with index.open("a") as fh:
+                if new:
+                    fh.write("step,T_K,mu_eV,mu_se_eV,phase,replica,x_run_mean,solid_fraction,recentered,file\n")
+                for i, pt in enumerate(self.trace["points"]):
+                    for key, phase in (("a", "alpha"), ("g", "gamma")):
+                        states = pt.get(f"state_{key}") or []
+                        states = [states] if isinstance(states, str) else states
+                        for k, sid in enumerate(states):
+                            stem = f"step{i:02d}_T{pt['T']:g}_{phase}_r{k}"
+                            dst = sdir / f"{stem}.pt"
+                            if dst.is_file() or not store.exists(sid):
+                                continue
+                            shutil.copyfile(store.path_for(sid), dst)
+                            data = store.load(sid, device="cpu")
+                            sf = solid_fraction(data)
+                            write_extxyz(data, sdir / f"{stem}.extxyz",
+                                         f'T={pt["T"]:g} mu={pt["mu"]:.6f} phase={phase} replica={k}')
+                            fh.write(f"{i},{pt['T']:g},{pt['mu']:.6f},{pt['mu_se']:.6f},{phase},{k},"
+                                     f"{pt[key]['x']:.5f},{sf:.3f},{bool(pt.get('recentered'))},{stem}.pt\n")
+
+    return ExportingTracer
+
+
 class PoolTraceEngine(NvalchemiTraceEngine):
     """boundary_tracer engine whose walkers run in the shared pool (called from a tracer thread).
 
@@ -216,7 +299,9 @@ class PoolTraceEngine(NvalchemiTraceEngine):
     means, batch-means SEs, drift, gate) and replica combination (_combine, incl. replica_split).
     Walker ids are deterministic in the tracer's tag, so an interrupted run resumes mid-step."""
 
-    def __init__(self, pool, name, cls, replicas, min_blocks, max_blocks, gate_passes, log_path):
+    def __init__(self, pool, name, cls, replicas, min_blocks, max_blocks, gate_passes, log_path,
+                 min_solid_fraction=0.5):
+        self.min_solid_fraction = min_solid_fraction
         self.pool, self.name, self.cls = pool, name, cls
         self.replicas, self.z, self.min_jump = replicas, 2.576, 0.03
         self.min_blocks, self.max_blocks, self.gate_passes = min_blocks, max_blocks, gate_passes
@@ -235,13 +320,23 @@ class PoolTraceEngine(NvalchemiTraceEngine):
                 wids.append(w.wid)
         return self.pool.wait(wids)
 
+    def _crystal(self, ws: list[Walker], obs: dict) -> dict:
+        """Add each replica's solid-like fraction; flag the phase if any replica lost its crystal."""
+        sf = [solid_fraction(self.pool.store.load(f"{w.wid}.final", device="cpu")) for w in ws]
+        obs = dict(obs, solid_fraction=[round(v, 3) for v in sf])
+        if min(sf) < self.min_solid_fraction:
+            obs.update(phase_ok=False, phase_note=f"solid-like fraction {min(sf):.2f} < {self.min_solid_fraction}")
+        return obs
+
     def run_one(self, T, mu, state, phase, tag=""):
         """One phase's replicas only (used by the tracer's Fig. 6 recentering sweeps)."""
         tag = f"{self.name}.{tag}".replace("+", "")
         name, branch = ("alpha", "Arich") if phase == "a" else ("gamma", "Brich")
         ws = self._submit(T, mu, tag, ((name, state, branch),))
         obs = self._combine([self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"]) for w in ws])
-        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={obs['x']:.4f}{obs['x_replicas']} (recentering)",
+        obs = self._crystal(ws, obs)
+        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={obs['x']:.4f}{obs['x_replicas']} "
+              f"solid {obs['solid_fraction']} (recentering)",
               flush=True)
         return obs, [f"{w.wid}.final" for w in ws]
 
@@ -253,13 +348,14 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         obs, new_states = {}, {}
         for j, phase in enumerate(("alpha", "gamma")):
             sl = slice(j * self.replicas, (j + 1) * self.replicas)
-            obs[phase] = self._combine(per_run[sl])
+            obs[phase] = self._crystal(ws[sl], self._combine(per_run[sl]))
             new_states[phase] = [f"{w.wid}.final" for w in ws[sl]]
         with self.log_path.open("a") as fh:
             fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])) + "\n")
         a, g = obs["alpha"], obs["gamma"]
         print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} "
-              f"x_g={g['x']:.4f}{g['x_replicas']} E_a={a['E']:.4f} E_g={g['E']:.4f}", flush=True)
+              f"x_g={g['x']:.4f}{g['x_replicas']} E_a={a['E']:.4f} E_g={g['E']:.4f} "
+              f"solid a {a['solid_fraction']} g {g['solid_fraction']}", flush=True)
         return a, g, new_states["alpha"], new_states["gamma"]
 
 
@@ -400,7 +496,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     n_atoms, chunk = int(spec["n_atoms"]), int(spec.get("chunk_blocks", EQUILIBRATION_WINDOW_BLOCKS))
     classes = spec["classes"]
     temps = {float(i["T"]) for k in ("ladders", "points", "vcsgc") for i in spec.get(k, [])}
-    temps |= {float(t["t0"]) for t in spec.get("traces", [])}
+    temps |= {float(t["t0"]) for t in spec.get("traces", []) if "t0" in t}   # a retrace has no t0 of its own
     ref = references(spec, model, temps, out, device)
     store = FinalStateStore(out / "states")
     pool = Pool(out, store)
@@ -413,21 +509,63 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     from boundary_tracer import BoundaryTracer, TraceConfig
 
     errors: list[str] = []
-    threads = []
+    threads: dict[str, threading.Thread] = {}
+    cfg_keys = ("mu0_se", "dt", "dt_min", "dt_max", "tol_mu", "min_gap", "max_corr", "max_gap_frac", "z", "min_jump",
+                "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0")
+    names = {t["name"] for t in traces}
+    for t in traces:
+        src = t.get("retrace_from")
+        if src and src not in names:
+            raise SystemExit(f"trace {t['name']}: retrace_from {src!r} is not a trace in this spec")
+
+    def retrace_start(t):
+        """Highest point of the source trace whose gap is still >= retrace_min_gap (None if only the start)."""
+        src = json.loads((out / "traces" / t["retrace_from"] / "trace.json").read_text())
+        pts = src["points"]
+        ok = [p for p in pts if p["g"]["x"] - p["a"]["x"] >= float(t.get("retrace_min_gap", 0.15))]
+        top = max(ok, key=lambda p: p["T"]) if ok else None
+        if top is None or top["T"] == pts[0]["T"]:
+            return None, src
+        return top, src
+
     for t in traces:
         tdir = out / "traces" / t["name"]
         tdir.mkdir(parents=True, exist_ok=True)
-        cfg = TraceConfig(**{k: t[k] for k in ("t0", "mu0", "t_stop")}, **{k: t[k] for k in (
-            "mu0_se", "dt", "dt_min", "dt_max", "tol_mu", "min_gap", "max_corr", "max_gap_frac", "z", "min_jump",
-            "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0") if k in t})
         engine = PoolTraceEngine(pool, f"trace.{t['name']}", t["class"], int(t.get("replicas", 1)),
                                  int(t.get("min_blocks", spec.get("defaults", {}).get("min_blocks", 100))),
                                  int(t.get("max_blocks", spec.get("defaults", {}).get("max_blocks", 300))),
-                                 int(t.get("gate_passes", 2)), tdir / "runs.jsonl")
+                                 int(t.get("gate_passes", 2)), tdir / "runs.jsonl",
+                                 float(t.get("min_solid_fraction", 0.5)))
+        Tracer = make_exporting_tracer(BoundaryTracer, store, tdir)
 
-        def target(cfg=cfg, engine=engine, t=t, tdir=tdir):
+        def target(engine=engine, t=t, tdir=tdir, Tracer=Tracer):
             try:
-                result = BoundaryTracer(cfg, engine, tdir / "trace.json").run(t["alpha_state"], t["gamma_state"])
+                if t.get("retrace_from"):
+                    threads[t["retrace_from"]].join()
+                    top, src = retrace_start(t)
+                    if top is None:
+                        print(f"[trace] {t['name']}: {t['retrace_from']} never got above its start with an open gap; "
+                              "nothing to retrace", flush=True)
+                        return
+                    t0 = src["points"][0]
+                    kw = {k: t[k] for k in cfg_keys if k in t}
+                    kw.update(mu0_se=top["mu_se"], x_a0=top["a"]["x"], x_g0=top["g"]["x"])
+                    cfg = TraceConfig(t0=top["T"], mu0=top["mu"], t_stop=float(t.get("t_stop", t0["T"])), **kw)
+                    print(f"[trace] {t['name']}: retracing DOWN from {t['retrace_from']}'s top point T={top['T']:g} K "
+                          f"mu={top['mu']:.5f}+-{top['mu_se']:.4f} (gap {top['g']['x'] - top['a']['x']:.3f}) "
+                          f"to {cfg.t_stop:g} K", flush=True)
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(top["state_a"], top["state_g"])
+                    end = min(result["points"], key=lambda p: abs(p["T"] - t0["T"]))
+                    closure = dict(start_T=t0["T"], start_mu=t0["mu"], start_mu_se=t0["mu_se"], retrace_T=end["T"],
+                                   retrace_mu=end["mu"], retrace_mu_se=end["mu_se"], dmu_meV=1e3 * (end["mu"] - t0["mu"]),
+                                   x_alpha=[t0["a"]["x"], end["a"]["x"]], x_gamma=[t0["g"]["x"], end["g"]["x"]],
+                                   stop_reason=result["stop_reason"])
+                    (tdir / "closure.json").write_text(json.dumps(closure, indent=2) + "\n")
+                    print(f"[trace] {t['name']}: closure at {end['T']:g} K: retrace mu {end['mu']:.5f}+-{end['mu_se']:.4f} "
+                          f"vs start {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)", flush=True)
+                else:
+                    cfg = TraceConfig(**{k: t[k] for k in ("t0", "mu0", "t_stop")}, **{k: t[k] for k in cfg_keys if k in t})
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(t["alpha_state"], t["gamma_state"])
                 print(f"[trace] {t['name']}: {result['status']}: {result['stop_reason']} "
                       f"({len(result['points'])} points)", flush=True)
             except Exception:  # surfaced at the end; the pool keeps serving the other work
@@ -436,9 +574,9 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                 with pool.cond:
                     pool.cond.notify_all()
 
-        th = threading.Thread(target=target, name=t["name"], daemon=True)
+        threads[t["name"]] = threading.Thread(target=target, name=t["name"], daemon=True)
+    for th in threads.values():
         th.start()
-        threads.append(th)
 
     log = out / "throughput.csv"
     new_log = not log.is_file()
@@ -452,7 +590,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
         while True:
             ready = pool.ready()
             if not ready:
-                if any(th.is_alive() for th in threads):
+                if any(th.is_alive() for th in threads.values()):
                     with pool.cond:
                         pool.cond.wait(timeout=2.0)
                     continue
@@ -545,7 +683,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
                 torch.cuda.empty_cache()
-    for th in threads:
+    for th in threads.values():
         th.join()
     for err in errors:
         print(f"[campaign] ERROR {err}", flush=True)
@@ -578,7 +716,7 @@ def smoke_spec(spec: dict) -> dict:
             for k in ("mu_excess", "mu", "c0"):
                 if k in it:
                     it[k] = it[k][:1]
-            if key == "traces":
+            if key == "traces" and "t0" in it:     # a retrace inherits its start from the source trace
                 step = it.get("dt_min", 5.0)
                 it["t_stop"] = it["t0"] + (step if it["t_stop"] > it["t0"] else -step)
                 it["dt"] = step

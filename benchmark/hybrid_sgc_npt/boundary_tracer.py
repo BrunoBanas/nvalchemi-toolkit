@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Canonical copy of the SGC boundary tracer (version 1.2). Used by run_campaign.py
+# Canonical copy of the SGC boundary tracer (version 1.3). Used by run_campaign.py
 # --mode trace-boundary, benchmark/phase_boundary/ and the nvalchemi-sgc-phase-boundary
 # skill. After changing it, run benchmark/phase_boundary/test_boundary_tracer.py. To use
 # it with another engine, copy it with
@@ -39,8 +39,11 @@ and optionally, so recentering runs only the walker it moves,
 
     engine.run_one(T, mu, state, phase, tag) -> (obs, new_state)      # phase "a" or "g"
 
-(without it, recentering calls run() and ignores the other walker). obs_* are dicts with keys
-x, x_se, E, E_se, drift (late-minus-early window mean of x),
+(without it, recentering calls run() and ignores the other walker). An engine may also report
+``phase_ok=False`` (with an optional ``phase_note``) when a walker has left its crystal phase
+altogether, e.g. melted: that is a NEW phase, so the step is rejected without recentering and the
+trace ends there ("a new phase appeared"), van de Walle & Asta's end-of-two-phase case (a).
+obs_* are dicts with keys x, x_se, E, E_se, drift (late-minus-early window mean of x),
 resolved (bool), and states are JSON-serializable handles (e.g. checkpoint ids, or lists of
 them). Both walkers must be run at the same T and dmu. An engine that runs several independent
 replicas per phase reports their mean and may add ``replica_split=True`` when the replicas of one
@@ -82,7 +85,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 KB_EV = 8.617333262e-5
-TRACER_VERSION = "1.2"
+TRACER_VERSION = "1.3"
 
 
 # ----------------------------------------------------------------------------- configuration
@@ -173,6 +176,11 @@ def phase_problems(
             problems[key].append(
                 f"{'alpha' if key == 'a' else 'gamma'} replicas disagree "
                 f"(x = {obs.get('x_replicas')}): one may have switched phase"
+            )
+        if obs.get("phase_ok") is False:
+            problems[key].append(
+                f"{'alpha' if key == 'a' else 'gamma'} left its crystal phase "
+                f"({obs.get('phase_note', 'reported by the engine')})"
             )
         pred = _predict_own(hist, key, T)
         if pred is not None:
@@ -395,9 +403,12 @@ class BoundaryTracer:
                 nd = dT / 2.0
                 if abs(nd) < cfg.dt_min:
                     crit = any("gap" in p for p in problems)
+                    melt = any("crystal phase" in p for p in problems)
                     self._finish(
                         (
-                            "gap closed: critical point approached"
+                            "a new phase appeared (a walker lost its crystal phase)"
+                            if melt
+                            else "gap closed: critical point approached"
                             if crit
                             else "walkers keep transforming at the minimum step (near T_c, a spinodal, "
                             "or a new phase)"
@@ -464,7 +475,11 @@ class BoundaryTracer:
         cfg = self.cfg
         bad = phase_problems(cfg, [], cfg.t0, a, g)
         for k in ("a", "g"):
-            bad[k] = [p for p in bad[k] if "drifting" in p or "replicas" in p]
+            bad[k] = [
+                p
+                for p in bad[k]
+                if "drifting" in p or "replicas" in p or "crystal phase" in p
+            ]
         if cfg.x_a0 is not None and cfg.x_g0 is not None:
             for k, obs in (("a", a), ("g", g)):
                 v = verdict(cfg, obs, cfg.x_a0, cfg.x_g0)
@@ -482,6 +497,8 @@ class BoundaryTracer:
         both walkers look wrong (or neither) it is not a case for recentering (e.g. near T_c)."""
         if pred_a is None or pred_g is None:
             return None
+        if a.get("phase_ok") is False or g.get("phase_ok") is False:
+            return None  # a new phase (e.g. melt): nothing to recentre onto
         failing = [k for k in ("a", "g") if problems[k]]
         if problems["gap"]:
             va, vg = (

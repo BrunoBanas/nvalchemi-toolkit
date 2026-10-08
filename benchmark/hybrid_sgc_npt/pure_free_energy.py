@@ -91,7 +91,10 @@ DEFAULT_TEMPERATURES = tuple(float(t) for t in range(100, 701, 50))
 
 # ----------------------------------------------------------------------------- GPU stages
 def _template(symbol: str, a: float, n_atoms: int):
-    return bulk(symbol, crystalstructure=CRYSTAL_STRUCTURE, a=a, cubic=True) * SIZE_REPEATS[n_atoms]
+    return (
+        bulk(symbol, crystalstructure=CRYSTAL_STRUCTURE, a=a, cubic=True)
+        * SIZE_REPEATS[n_atoms]
+    )
 
 
 def _evaluate(model, templates, device):
@@ -151,10 +154,12 @@ def stage_hessian(model, symbol, n_atoms, a0, device, chunk: int) -> dict:
             pos[0, ax] += sgn * d
             t.set_positions(pos)
             structures.append(t)
-        forces = []
-        for k in range(0, len(structures), chunk):
-            forces.append(_evaluate(model, structures[k : k + chunk], device)[1])
-        forces = np.concatenate(forces)
+        forces = np.concatenate(
+            [
+                _evaluate(model, structures[k : k + chunk], device)[1]
+                for k in range(0, len(structures), chunk)
+            ]
+        )
     finally:
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = flags
         torch.set_float32_matmul_precision(precision)
@@ -171,7 +176,9 @@ def stage_hessian(model, symbol, n_atoms, a0, device, chunk: int) -> dict:
     return out
 
 
-def stage_ladder(model, symbol, n_atoms, a0, temperatures, n_blocks, md_steps, width, device, done):
+def stage_ladder(
+    model, symbol, n_atoms, a0, temperatures, n_blocks, md_steps, width, device, done
+):
     """NPT at each temperature not yet in ``done``; yields the updated per-T results after each
     batch (<U>/atom, <V>/atom with batch-means SEs over the last two thirds of the run)."""
     results = dict(done)
@@ -234,15 +241,31 @@ def stage_ladder(model, symbol, n_atoms, a0, temperatures, n_blocks, md_steps, w
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--element", required=True, choices=["Au", "Pt"])
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n-atoms", type=int, default=500)
-    ap.add_argument("--temperatures", type=float, nargs="+", default=list(DEFAULT_TEMPERATURES))
-    ap.add_argument("--n-blocks", type=int, default=300, help="NPT blocks per ladder temperature (first third discarded)")
+    ap.add_argument(
+        "--temperatures", type=float, nargs="+", default=list(DEFAULT_TEMPERATURES)
+    )
+    ap.add_argument(
+        "--n-blocks",
+        type=int,
+        default=300,
+        help="NPT blocks per ladder temperature (first third discarded)",
+    )
     ap.add_argument("--md-steps-per-block", type=int, default=50)
-    ap.add_argument("--batch-width", type=int, default=7, help="ladder temperatures per NPT batch")
-    ap.add_argument("--hessian-chunk", type=int, default=4, help="displaced structures per force batch")
+    ap.add_argument(
+        "--batch-width", type=int, default=7, help="ladder temperatures per NPT batch"
+    )
+    ap.add_argument(
+        "--hessian-chunk",
+        type=int,
+        default=4,
+        help="displaced structures per force batch",
+    )
     ap.add_argument("--inference-settings", default=DEFAULT_SETTINGS)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
@@ -263,8 +286,13 @@ def main() -> None:
         md_steps_per_block=args.md_steps_per_block,
         dt_fs=DT_FS,
     )
-    if state and state.get("meta", {}).get("inference_settings") != args.inference_settings:
-        raise SystemExit(f"{path} was made with other inference settings; use a fresh --out")
+    if (
+        state
+        and state.get("meta", {}).get("inference_settings") != args.inference_settings
+    ):
+        raise SystemExit(
+            f"{path} was made with other inference settings; use a fresh --out"
+        )
     state["meta"] = meta
 
     def save() -> None:
@@ -273,13 +301,23 @@ def main() -> None:
         tmp.replace(path)
 
     model = UMAWrapper.from_checkpoint(
-        CHECKPOINT, task_name=TASK, device=str(device), inference_settings=args.inference_settings
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=args.inference_settings,
     )
-    print(f"[pure-G] {args.element}: settings {args.inference_settings!r}, out {path}", flush=True)
+    print(
+        f"[pure-G] {args.element}: settings {args.inference_settings!r}, out {path}",
+        flush=True,
+    )
 
     if "lattice" not in state:
-        a_guess = bulk(args.element, crystalstructure=CRYSTAL_STRUCTURE, cubic=True).cell[0, 0]
-        state["lattice"] = stage_lattice(model, args.element, args.n_atoms, a_guess, device)
+        a_guess = bulk(
+            args.element, crystalstructure=CRYSTAL_STRUCTURE, cubic=True
+        ).cell[0, 0]
+        state["lattice"] = stage_lattice(
+            model, args.element, args.n_atoms, a_guess, device
+        )
         save()
     lat = state["lattice"]
     print(
@@ -288,7 +326,9 @@ def main() -> None:
     )
 
     if "hessian" not in state:
-        state["hessian"] = stage_hessian(model, args.element, args.n_atoms, lat["a0"], device, args.hessian_chunk)
+        state["hessian"] = stage_hessian(
+            model, args.element, args.n_atoms, lat["a0"], device, args.hessian_chunk
+        )
         save()
     for d, h in state["hessian"]["deltas"].items():
         print(
@@ -312,7 +352,10 @@ def main() -> None:
     ):
         state["ladder"] = ladder
         save()
-    print(f"[pure-G] {args.element}: complete ({len(state.get('ladder', {}))} ladder temperatures)", flush=True)
+    print(
+        f"[pure-G] {args.element}: complete ({len(state.get('ladder', {}))} ladder temperatures)",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
