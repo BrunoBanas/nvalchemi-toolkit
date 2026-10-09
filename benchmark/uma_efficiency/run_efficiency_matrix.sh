@@ -40,6 +40,11 @@
 #                   compiled MD with dynamic shapes (turbo; compile w/o merge) vs
 #                   the eager best, widths 1 4 (UMAWrapper keeps fairchem's dynamic
 #                   compile single-process since 2026-09-30)
+#   npt_compile_recheck / kawasaki_npt_compile_recheck
+#                   npt_compile / kawasaki_npt_compile at width 1 (Kawasaki-NPT also 4)
+#                   with TORCH_LOGS=recompiles on every compiled case and versions.txt
+#                   recording the code that ran; npt adds turbo_static, to test whether
+#                   static shapes alone reproduce the MD recompiles.
 #   Config names ending in _static / _dynamic set NVALCHEMI_UMA_COMPILE_SHAPES.
 #   mole_profile    profile_mole_overhead.py
 #
@@ -102,6 +107,17 @@ for KERNEL in ${KERNELS}; do
 root="${base}/${KERNEL}"
 mkdir -p "${root}"
 printf '%s\n' "${gpu_info}" > "${root}/gpu.txt"
+# Which code ran: versions, the nvalchemi source and commit, and whether UMAWrapper
+# has the compile_shapes option.
+"${PYTHON}" - > "${root}/versions.txt" 2>&1 <<'PY' || true
+import pathlib, subprocess, torch, fairchem.core, nvalchemi
+from nvalchemi.models.uma import UMAWrapper
+src = pathlib.Path(nvalchemi.__file__).resolve().parent
+commit = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(src), "rev-parse", "--short", "HEAD"],
+                        capture_output=True, text=True).stdout.strip() or "unknown"
+print(f"torch={torch.__version__}\nfairchem_core={fairchem.core.__version__}\nnvalchemi_src={src}\n"
+      f"nvalchemi_commit={commit}\numa_compile_shapes_option={hasattr(UMAWrapper, '_static_compile')}")
+PY
 widths="${WIDTHS}"
 echo "$(stamp) === kernel ${KERNEL} ==="
 
@@ -233,7 +249,7 @@ case "${KERNEL}" in
         compile_energy_only) echo "--inference-settings compile=true,merge_mole=false,tf32=true,activation_checkpointing=false --energy-only" ;;
       esac
     } ;;
-  npt_wide|kawasaki_npt_wide|sgc_npt_ckpt|sgc_npt_108|sgc_npt_256|npt_2048|kawasaki_npt_2048|sgc_npt_2048|npt_compile|kawasaki_npt_compile|sgc_npt_compile)
+  npt_wide|kawasaki_npt_wide|sgc_npt_ckpt|sgc_npt_108|sgc_npt_256|npt_2048|kawasaki_npt_2048|sgc_npt_2048|npt_compile|kawasaki_npt_compile|sgc_npt_compile|npt_compile_recheck|kawasaki_npt_compile_recheck)
     script="${TESTS}/benchmark_hybrid_sgc_npt_single_point.py"
     width_flag=--n-walkers
     sgc_common=(--n-blocks 20 --temperature-k 1200.0 --delta-mu-ev 0.5)
@@ -273,6 +289,12 @@ case "${KERNEL}" in
       sgc_npt_compile)
         common=(--n-atoms 500 "${sgc_common[@]}")
         configs=(nomerge_nocompile compile_nomerge_dynamic); widths="1 4" ;;
+      npt_compile_recheck)
+        common=(--md-only --n-atoms 500 --n-blocks 20 --temperature-k 1200.0); mc_flag=()
+        configs=(merge_nocompile turbo_dynamic turbo_static); widths="1" ;;
+      kawasaki_npt_compile_recheck)
+        common=("${kaw_common[@]}" --n-atoms 500 --n-blocks 20)
+        configs=(merge_nocompile turbo_dynamic); widths="1 4" ;;
     esac
     config_args() {
       local spec
@@ -298,6 +320,9 @@ for config in "${configs[@]}"; do
     case "${config}" in
       *_static) shape_env=(NVALCHEMI_UMA_COMPILE_SHAPES=static) ;;
       *_dynamic) shape_env=(NVALCHEMI_UMA_COMPILE_SHAPES=dynamic) ;;
+    esac
+    case "${KERNEL}:${config}" in
+      *_recheck:turbo*|*_recheck:compile*) shape_env+=(TORCH_LOGS=recompiles) ;;
     esac
     read -r -a extra <<< "$(config_args "${config_base}")"
     echo "$(stamp) ${KERNEL} ${config} width=${width}"
