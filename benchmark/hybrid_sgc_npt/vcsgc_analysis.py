@@ -33,7 +33,11 @@ Errors by parametric bootstrap over the walkers' dmu SEs. Also written:
 ``pure_free_energies_vcsgc.json`` ({"T": {"A": 0, "B": dF_pure}}) for
 sgc_phase_boundary.py --pure-free-energies (only F_B - F_A matters there).
 
-    python vcsgc_analysis.py <vcsgc root> --out <dir> [--sgc-dir <scan atoms500 dir>] [--discard 0.33]
+    python vcsgc_analysis.py <vcsgc root> [<more roots> ...] --out <dir> [--sgc-dir <scan atoms500 dir>] [--discard 0.33]
+
+Several roots at one T are merged (e.g. a first scan and a targeted rerun with another kappa or
+per-walker dmu_ref): every walker's dmu is absolute, and "excess" is relative to the most common
+dmu_ref.
 """
 
 from __future__ import annotations
@@ -85,10 +89,11 @@ def walker_table(paths: list[Path], discard: float) -> list[dict]:
             continue
         T, kappa, n = s["temperature_K"], s["kappa"], s["n_atoms"]
         # Production: from the start of the windows the live gate first found stationary (the
-        # driver stopped the walker after enough consecutive passes); otherwise drop --discard.
+        # driver stopped the walker after enough consecutive passes), never inside the burn-in the
+        # driver excluded from its gate (``burn_in_blocks``, 0 if absent); otherwise drop --discard.
         passes = [g for g in s.get("gate", []) if g["passed"]]
         if s.get("stopped") == "equilibrated" and passes:
-            start = max(passes_run_start(s["gate"]) - 2 * WINDOW, 0)
+            start = max(passes_run_start(s["gate"]) - 2 * WINDOW, int(s.get("burn_in_blocks", 0)))
         else:
             start = int(discard * len(c))
         prod = c[start:]
@@ -118,10 +123,13 @@ def walker_table(paths: list[Path], discard: float) -> list[dict]:
 
 
 def combine_same_c0(rows: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """One (c, dmu_excess, se) per c0: inverse-variance mean over starting states."""
+    """One (c, dmu_excess, se) per (c0, kappa, dmu_ref): inverse-variance mean over starting states.
+
+    Walkers with the same c0 but a different kappa or dmu_ref settle at different c_bar, so they
+    stay separate points on the curve."""
     by = {}
     for r in rows:
-        by.setdefault(round(r["c0"], 4), []).append(r)
+        by.setdefault((round(r["c0"], 4), r["kappa"], round(r["dmu_ref"], 6)), []).append(r)
     out = []
     for group in by.values():
         w = np.array([1 / max(r["dmu_se"], 1e-5) ** 2 for r in group])
@@ -199,7 +207,8 @@ def load_sgc(directory: Path) -> list[tuple[float, float, bool]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("root", type=Path)
+    ap.add_argument("root", type=Path, nargs="+",
+                    help="one or more walker directories (*.series.json); runs at one T may differ in kappa and dmu_ref")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--discard", type=float, default=1 / 3, help="fraction of each walker's blocks discarded")
     ap.add_argument("--sgc-dir", type=Path, help="SGC scan *.equilibration.json directory, overlaid for comparison")
@@ -209,13 +218,18 @@ def main() -> None:
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    rows = walker_table(sorted(args.root.glob("*.series.json")), args.discard)
+    rows = walker_table(sorted(p for root in args.root for p in root.glob("*.series.json")), args.discard)
     if not rows:
         raise SystemExit(f"no *.series.json with >= {2 * WINDOW} blocks under {args.root}")
     Ts, refs, kappas = {r["T"] for r in rows}, {r["dmu_ref"] for r in rows}, {r["kappa"] for r in rows}
-    if len(Ts) != 1 or len(refs) != 1:
-        raise SystemExit("walkers mix temperatures or dmu_ref; analyse one (T, dmu_ref) set at a time")
-    T, ref = Ts.pop(), refs.pop()
+    if len(Ts) != 1:
+        raise SystemExit("walkers mix temperatures; analyse one T at a time")
+    T = Ts.pop()
+    # Each walker's dmu = dmu_ref + 2 kappa (c0 - c_bar) is absolute, so walkers with different
+    # dmu_ref (or kappa) combine on one common reference: the most frequent dmu_ref.
+    ref = max(sorted(refs), key=lambda v: sum(r["dmu_ref"] == v for r in rows))
+    for r in rows:
+        r["dmu_excess"] = r["dmu"] - ref
     kt = KB_EV * T
     used = [r for r in rows if r["init"] not in args.exclude_init]
     c, m, se = combine_same_c0(used)
@@ -237,7 +251,7 @@ def main() -> None:
     hysteresis = {k: 1e3 * (v["slab"] - v["random"]) for k, v in inits.items() if {"slab", "random"} <= set(v)}
 
     summary = dict(
-        T=T, delta_mu_ref=ref, kappas=sorted(kappas), n_walkers=len(rows),
+        T=T, delta_mu_ref=ref, delta_mu_refs=sorted(refs), kappas=sorted(kappas), n_walkers=len(rows),
         dF_pure=res["dF_pure"], dF_pure_boot_16_50_84=res["dF_pure_boot"],
         dF_pure_excess=res["dF_pure"] - ref,
         common_tangent=None if res["tangent"] is None else dict(
@@ -250,7 +264,7 @@ def main() -> None:
     (args.out / "vcsgc_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     (args.out / "pure_free_energies_vcsgc.json").write_text(json.dumps({f"{T:g}": {"A": 0.0, "B": res["dF_pure"]}}, indent=2) + "\n")
 
-    print(f"T={T:g} K  dmu_ref={ref:.5f} eV  {len(rows)} walkers (kappa {sorted(kappas)})")
+    print(f"T={T:g} K  common dmu_ref={ref:.5f} eV ({len(refs)} distinct walker dmu_ref)  {len(rows)} walkers (kappa {sorted(kappas)})")
     print(" c0     init    blocks(prod)  c_bar    +-      dmu_excess(meV) +-    std(c)/unimodal  BC    resolved  acc")
     for r in rows:
         print(f" {r['c0']:.3f}  {r['init']:10s}  {r['blocks']:4d}({r['production_blocks']:3d})  {r['c_bar']:.4f} {r['c_se']:.4f}  {1e3 * r['dmu_excess']:+8.2f} {1e3 * r['dmu_se']:5.2f}"
