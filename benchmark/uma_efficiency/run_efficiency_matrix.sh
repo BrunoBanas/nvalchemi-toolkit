@@ -113,8 +113,11 @@ printf '%s\n' "${gpu_info}" > "${root}/gpu.txt"
 import pathlib, subprocess, torch, fairchem.core, nvalchemi
 from nvalchemi.models.uma import UMAWrapper
 src = pathlib.Path(nvalchemi.__file__).resolve().parent
-commit = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(src), "rev-parse", "--short", "HEAD"],
-                        capture_output=True, text=True).stdout.strip() or "unknown"
+try:  # compute nodes may have no git
+    commit = subprocess.run(["git", "-c", "safe.directory=*", "-C", str(src), "rev-parse", "--short", "HEAD"],
+                            capture_output=True, text=True).stdout.strip() or "unknown"
+except OSError:
+    commit = "unknown (no git)"
 print(f"torch={torch.__version__}\nfairchem_core={fairchem.core.__version__}\nnvalchemi_src={src}\n"
       f"nvalchemi_commit={commit}\numa_compile_shapes_option={hasattr(UMAWrapper, '_static_compile')}")
 PY
@@ -322,7 +325,7 @@ for config in "${configs[@]}"; do
       *_dynamic) shape_env=(NVALCHEMI_UMA_COMPILE_SHAPES=dynamic) ;;
     esac
     case "${KERNEL}:${config}" in
-      *_recheck:turbo*|*_recheck:compile*) shape_env+=(TORCH_LOGS=recompiles) ;;
+      *_recheck:turbo*|*_recheck:compile*|sgc_npt_compile:compile*) shape_env+=(TORCH_LOGS=recompiles) ;;
     esac
     read -r -a extra <<< "$(config_args "${config_base}")"
     echo "$(stamp) ${KERNEL} ${config} width=${width}"
