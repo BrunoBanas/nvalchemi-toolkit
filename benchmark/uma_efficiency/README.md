@@ -89,9 +89,11 @@ Pure NPT (`--md-only`, median s/block):
 | merge, no compile, checkpointing | 5.32 / 2.0 / 714 / 1.39 | 9.53 / 4.1 / 500 / 1.99 | 17.82 / 7.5 / 434 / 2.29 |
 | turbo | 2.65 / 4.1 / 5370 / 0.19 | 4.28 / 7.8 / 2776 / 0.36 | 7.57 / 15.5 / 1465 / 0.68 |
 
-Under MD, turbo recompiles on every change of the graph's edge count (32
-recompiles, 1146-1181 s in the first block) and then runs at merge-no-compile
-speed, so compile never pays when MD is involved.
+These turbo runs compiled with static shapes, which `UMAWrapper` then forced: under
+MD they recompiled on every change of the graph's edge count (32 recompiles,
+1146-1181 s in the first block) and then ran at merge-no-compile speed. With
+dynamic shapes (now the single-process default) compiled MD stays compiled; see
+"Compiled MD with dynamic shapes" below.
 
 ### Follow-up: wider batches, other sizes, checkpointing, compile
 
@@ -121,6 +123,28 @@ width) and total peak GiB:
 SGC MC with compile (no merge, energy-only) is slower than without at both widths
 (width 1: 9.72 vs 7.17 s/block, 2.9 vs 2.2 GiB).
 
+
+### Compiled MD with dynamic shapes
+
+Kernels `npt_compile_recheck`, `kawasaki_npt_compile_recheck` and `sgc_npt_compile`
+(torch 2.13, fairchem-core 2.22, A100-SXM4-80GB, 500 atoms, 20 blocks), each
+compiled case against its uncompiled best in the same job. Steady state = median
+MD + MC phase per block; compile = one-time extra at the start of the run.
+
+| Run | Uncompiled best | Compiled (dynamic shapes) | Peak GiB | Compile |
+|---|---|---|---|---|
+| NPT w1 | merge 2.92 | turbo **2.05 (1.42x)** | 4.1 / 2.9 | ~280 s |
+| NPT w1, static shapes | merge 2.92 | turbo 2.99 (recompile limit hit) | 4.1 / 4.0 | ~1700 s |
+| Kawasaki-NPT w1 | merge 5.67 | turbo **4.26 (1.33x)** | 4.1 / 2.9 | ~210 s |
+| Kawasaki-NPT w4 | merge 14.44 | turbo **10.92 (1.32x)** | 16.0 / 11.2 | ~200 s |
+| SGC-NPT w1 | no merge 12.60 | compile, no merge **11.73 (1.07x)** | 9.0 / 8.0 | ~110 s |
+| SGC-NPT w4 | no merge 42.59 | compile, no merge **40.36 (1.06x)** | 48.7 / 42.9 | ~100 s |
+
+Static shapes recompile on the `edge_index` size; dynamic shapes recompile only
+in the first block (one variant each for energy-only MC and full-output MD).
+Acceptance and final energies match the uncompiled runs. In `calibration.json`
+these are `relative_to` factors on the eager fits plus `compile_overhead_s`,
+which `plan_run.py` spreads over `--n-blocks`.
 ## Model
 
 Per batched model call on the reference card:

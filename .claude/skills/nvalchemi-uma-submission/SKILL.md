@@ -52,9 +52,9 @@ wrapper see `nvalchemi-model-wrapping`.
 |---|---|---|---|---|
 | `kawasaki` | species swaps | fixed | fixed | turbo, merged, unmerged |
 | `sgc`, `vcsgc` | transmutations | changes | fixed | unmerged |
-| `npt`, `nvt` | positions (+ cell) | fixed | changes | merged, unmerged, checkpointed variants |
-| `kawasaki-npt`, `kawasaki-nvt` | swaps + MD | fixed | changes | merged, unmerged, checkpointed variants |
-| `sgc-npt`, `vcsgc-npt`, `-nvt` | transmutations + MD | changes | changes | unmerged, checkpointed unmerged |
+| `npt`, `nvt` | positions (+ cell) | fixed | changes | merged, turbo (long runs), unmerged, checkpointed variants |
+| `kawasaki-npt`, `kawasaki-nvt` | swaps + MD | fixed | changes | merged, turbo (long runs), unmerged, checkpointed variants |
+| `sgc-npt`, `vcsgc-npt`, `-nvt` | transmutations + MD | changes | changes | unmerged, compiled unmerged (long runs), checkpointed unmerged |
 
 Every kind with MC runs its MC energy-only; MD always needs forces (and stress for
 NPT). "Merged" classes drop out whenever batched walkers differ in composition.
@@ -63,13 +63,23 @@ NPT). "Merged" classes drop out whenever batched walkers differ in composition.
 
 Each knob pays under exactly one condition.
 
-- `compile` only when both geometry and composition are fixed (MC-only
-  Kawasaki). torch.compile specializes on graph shape; MD changes the edge count
-  almost every step, which caused 32 recompiles (~20 min) and then a fallback to
-  uncompiled speed. In a Kawasaki-NPT hybrid, turbo lost to merge-without-compile
-  at every width; for SGC MC, compile is slower than no compile (9.7 vs 7.2
-  s/block). Even for Kawasaki MC, a single 2048-atom system runs faster merged
-  without compile (28.2 vs 32.4 s/block): compile wins only batched.
+- `compile` when the run is long enough to repay a one-time compile, with
+  fairchem's dynamic compile shapes (`UMAWrapper`'s single-process default).
+  Measured at 500 atoms on A100-SXM, steady state against the same settings
+  uncompiled:
+  - NPT: 1.42x (2.05 vs 2.92 s per 50 steps), ~30% less memory, ~280 s compile.
+  - Kawasaki-NPT: 1.32x at widths 1 and 4, ~30% less memory, ~210 s compile.
+  - SGC-NPT (compile, no merge): 1.06x, 11-12% less memory, ~110 s compile.
+  - SGC MC: slower compiled (9.7 vs 7.2 s/block).
+  - Kawasaki MC: turbo wins batched. A single 2048-atom system runs faster
+    merged without compile (28.2 vs 32.4 s/block).
+
+  Break-even is ~300 blocks for NPT at width 1, ~150 for Kawasaki-NPT (~55 at
+  width 4), ~125 for SGC-NPT (~45 at width 4). The planner spreads the compile
+  over `--n-blocks`, so give it the real run length. Never force static shapes
+  (`compile_shapes="static"` / `NVALCHEMI_UMA_COMPILE_SHAPES=static`) with MD:
+  every edge-count change then recompiles (32 recompiles, ~20 min lost, then
+  uncompiled speed). Static shapes are only for domain decomposition.
 - `merge_mole` only when composition is fixed. Merging folds UMA's 32 experts
   into one plain model for one composition, and fairchem asserts that every graph
   in a batch has that reduced composition. Batch with merge only when all walkers
@@ -95,6 +105,7 @@ Settings classes and the spec strings `UMAWrapper.from_checkpoint` accepts:
 | Class | `inference_settings` |
 |---|---|
 | `compiled_merged` | `"turbo"` |
+| `compiled_unmerged` | `"compile=true,merge_mole=false,tf32=true,activation_checkpointing=false"` |
 | `eager_merged` | `"compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"` |
 | `eager_unmerged` | `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"` |
 | `checkpointed_merged` | `"compile=false,merge_mole=true,tf32=true,activation_checkpointing=true"` |
@@ -114,7 +125,8 @@ model.model_config.active_outputs = {"energy"}  # MC-only runs
 ```
 
 MC and MD normally share one model, so its settings must be valid for both phases:
-compile is out with MD, merge is out if either phase changes composition.
+merge is out if either phase changes composition, and compile is worth it only for
+long runs.
 `HybridMCMD` also accepts two models of the same checkpoint and task that differ
 only in settings; each MC block then re-evaluates its energy with the MC model,
 and `before_md_block(batch)` runs before each MD block's first force call.
@@ -139,9 +151,9 @@ Measured (500-atom Au-Pt, A100-SXM4-80GB):
 | Kawasaki MC, 500 atoms | turbo, width 12 (2.13x per walker vs width 1) | turbo ≈ merge, no compile (2.57 vs 2.63 s/block) |
 | Kawasaki MC, 2048 atoms | turbo ≈ merge, no compile at width 2 | merge, no compile (28.2 vs 32.4 s/block) |
 | SGC MC | no merge, no compile, width 8 (1.26x) | no merge, no compile |
-| NPT; Kawasaki-NPT, same composition | merge, no compile, width 8-12 (1.58x; 1.84x) | merge, no compile |
+| NPT; Kawasaki-NPT, same composition | merge, no compile, width 8-12 (1.58x; 1.84x); turbo for long runs (1.3-1.4x more) | merge, no compile; turbo for long runs |
 | NPT or Kawasaki-NPT, mixed compositions | no merge, no compile | merge, no compile (model per system) |
-| SGC-NPT | no merge, no compile; width 4 at 500 atoms (1.18x), 4 at 256 (1.41x), 8 at 108 (2.47x) | no merge, no compile; checkpointing if it does not fit (~4% slower) |
+| SGC-NPT | no merge, no compile; width 4 at 500 atoms (1.18x), 4 at 256 (1.41x), 8 at 108 (2.47x); compile on for long runs (1.06x) | no merge, no compile (compile on for long runs); checkpointing if it does not fit (~4% slower) |
 | Width 2 does not fit | - | fastest class that fits at width 1 |
 
 ## Planning
@@ -167,7 +179,9 @@ dense oxide more. Time per batched call is `c1 * (N0 + width * (N_eff + Nw))`,
 where `N0` is the per-call overhead batching amortizes (130-820 atom-equivalents
 for merged and compiled paths, 115-210 unmerged) and `Nw` a per-walker overhead it
 does not (0 eager merged, 76 compiled, 17-78 unmerged); compiled runs also pay a
-measured slowdown on large single graphs. Memory is linear in batch atoms,
+measured slowdown on large single graphs. Compiled MD classes are measured
+factors on the eager fits (MD 0.70 merged, 0.92 unmerged), plus a one-time
+compile spread over `--n-blocks`. Memory is linear in batch atoms,
 `base + a * width * N_eff / 500`, limited to 85% of the card; SGC-NPT adds a term
 that grows with the number of walkers and plans against 70% of the card.
 
@@ -194,7 +208,8 @@ Trust. Fitted to 62 measured cells (108-2048 atoms, widths 1-16): median error
 ±20%) and SGC-NPT memory at 500 atoms x 4 walkers (-21%, hence its 70% budget).
 Outside 100-2500 atoms, a neighbour ratio off by more than 50%, or widths above 12
 at 500 atoms, treat numbers as ±30%: say so, and propose a short width profile
-(`run_efficiency_matrix.sh`) before a long campaign. Not measured: NVT (assumed
+(`run_efficiency_matrix.sh`) before a long campaign. Compiled MD is measured at
+500 atoms only (widths 1 and 4; NPT width 1), within 5% of the model. Not measured: NVT (assumed
 equal to NPT), VC-SGC (assumed equal to SGC), SGC MC above 500 atoms, unmerged
 Kawasaki MC.
 
@@ -202,7 +217,9 @@ Kawasaki MC.
 
 - Au-Pt SGC-NPT phase-diagram campaigns (Δμ scans, boundary tracing, reference
   energies): `benchmark/hybrid_sgc_npt/run_campaign.py`. Its defaults are the
-  measured best (unmerged, energy-only MC) and it profiles the width itself;
+  measured best (energy-only MC; `--inference-settings auto` = compile without
+  merge for hybrids, uncompiled for pure SGC) and it profiles the width itself;
+  pass the uncompiled spec explicitly for processes under ~100 blocks;
   write a job around it rather than a new driver. Analysis of its output:
   `nvalchemi-sgc-phase-boundary`.
 - Efficiency questions: `benchmark/uma_efficiency/run_efficiency_matrix.sh`
@@ -265,8 +282,8 @@ Physics:
 
 Performance:
 
-- Settings match the class table (no compile with MD, no merge when composition
-  changes or batched walkers differ).
+- Settings match the class table (no merge when composition changes or batched
+  walkers differ; compile with MD only for long runs, never with static shapes).
 - Width x memory fits the smallest card the job can land on.
 - The time limit is the planner's (1.5x the estimate on the slowest card, rounded
   up to 15 min); long campaigns get a 2-block smoke test first.

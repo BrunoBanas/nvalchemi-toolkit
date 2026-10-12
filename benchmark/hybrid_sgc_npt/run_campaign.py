@@ -190,7 +190,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 
 import torch
 import torch._inductor.config
@@ -227,14 +227,46 @@ from nvalchemi.scheduling import (
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
 # SGC changes atomic composition every step, so no MoLE merge (it assumes a
-# fixed composition) and no compile (MD's changing neighbor counts force
-# static-shape recompiles in SGC-NPT). Activation checkpointing off and tf32 on:
-# 1.9x faster per step than the old "batch" preset, same sampled chain -- see
-# "UMA settings for SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md.
-# A key=value spec, which UMAWrapper.from_checkpoint parses into InferenceSettings.
+# fixed composition). Activation checkpointing off and tf32 on: 1.9x faster per
+# step than the old "batch" preset, same sampled chain -- see "UMA settings for
+# SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md. Key=value specs,
+# which UMAWrapper.from_checkpoint parses into InferenceSettings.
+#
+# INFERENCE_SETTINGS is the uncompiled spec (also imported by other scripts here).
+# --inference-settings auto (the default) uses INFERENCE_SETTINGS_COMPILED for
+# hybrid runs: with UMAWrapper's dynamic compile shapes, SGC-NPT runs 1.06x faster
+# with ~12% less memory after a ~2 min one-time compile per process (500 atoms,
+# A100-SXM), which campaign processes of hundreds of blocks repay (break-even ~125
+# blocks at width 1, ~45 at width 4). Pure SGC (--md-steps-per-block 0) stays
+# uncompiled: compile measured slower there.
 INFERENCE_SETTINGS = (
     "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
 )
+INFERENCE_SETTINGS_COMPILED = (
+    "compile=true,merge_mole=false,tf32=true,activation_checkpointing=false"
+)
+
+
+def resolve_inference_settings(spec: str, md_steps_per_block: int) -> str:
+    """Resolve ``--inference-settings auto``: compiled for hybrids, eager for pure SGC.
+
+    Parameters
+    ----------
+    spec : str
+        ``"auto"``, a fairchem preset name or a key=value spec.
+    md_steps_per_block : int
+        MD steps per block; 0 is pure SGC MC.
+
+    Returns
+    -------
+    str
+        The spec passed to ``UMAWrapper.from_checkpoint``.
+    """
+    if spec != "auto":
+        return spec
+    return INFERENCE_SETTINGS_COMPILED if md_steps_per_block > 0 else INFERENCE_SETTINGS
+
+
 # Inductor's pad_mm pass benchmarks real, padded copies of large batched
 # matmul operands while compiling (a ~20 GiB one-shot allocation at wide
 # batches), so a compiled model can OOM during compilation at a batch width
@@ -346,6 +378,48 @@ def _wrap_batch_positions(batch: Batch) -> None:
         wrap_positions_into_cell(
             batch.positions, cell, pbc.to(torch.bool), batch.batch_idx
         )
+
+
+def relax_cell_volume(
+    md: NPT,
+    batch: Batch,
+    *,
+    bulk_modulus_ev_per_a3: float = 1.2,
+    tolerance_ev_per_a3: float = 2e-4,
+    max_iterations: int = 4,
+    target_pressure_ev_per_a3: float = 0.0,
+) -> torch.Tensor:
+    """Relax each graph's volume at fixed fractional coordinates (rigid-lattice MC).
+
+    Scales cell and positions together, isotropically, so every atom keeps its lattice site and
+    only the lattice constant follows the composition: one Newton step on V per iteration,
+    ``V <- V (1 + (P - P_target) / B)`` with P = -tr(stress)/3 from the last ``md.compute`` (stress
+    is tensile-positive, see NPT), re-evaluating after each step until every graph has
+    ``|P - P_target| < tolerance``. A rough B only slows convergence (error shrinks by
+    ``|1 - B_true/B|`` per step); B ~ 1.1-1.4 eV/A^3 for Au-Pt. Static lattice: no kinetic term.
+    Expects ``batch.stress`` from a compute at the current geometry; leaves energy/forces/stress
+    evaluated at the relaxed geometry. Returns the final per-graph pressure (eV/A^3).
+    """
+    n_graphs = batch.num_graphs
+    for iteration in range(max_iterations + 1):
+        pressure = -batch.stress.reshape(n_graphs, 3, 3).diagonal(dim1=-2, dim2=-1).sum(-1) / 3.0
+        excess = pressure - target_pressure_ev_per_a3
+        if iteration == max_iterations or bool((excess.abs() < tolerance_ev_per_a3).all()):
+            return pressure.detach()
+        scale = (1.0 + excess / bulk_modulus_ev_per_a3).clamp(0.85, 1.15) ** (1.0 / 3.0)
+        with torch.no_grad():
+            batch.cell.mul_(scale.view(-1, *([1] * (batch.cell.dim() - 1))))
+            batch.positions.mul_(scale[batch.batch_idx].unsqueeze(-1))
+        md.compute(batch)
+    return pressure.detach()
+
+
+def lattice_constant_per_graph(batch: Batch, atoms_per_cubic_cell: int = 4) -> list[float]:
+    """Cubic-equivalent lattice constant (4 atoms per fcc cube) of each graph's cell."""
+    n_graphs = batch.num_graphs
+    volumes = torch.linalg.det(batch.cell.reshape(n_graphs, 3, 3)).abs()
+    counts = torch.bincount(batch.batch_idx, minlength=n_graphs).to(volumes.dtype)
+    return (atoms_per_cubic_cell * volumes / counts).pow(1.0 / 3.0).tolist()
 
 
 def build_ase_structure(
@@ -1224,6 +1298,7 @@ def _run_hybrid_with_observables(
     n_blocks: int,
     n_graphs: int,
     pt_number: int,
+    cell_hook: Callable[[Batch], None] | None = None,
 ) -> tuple[Batch, list[list[float]], list[list[float]]]:
     """Run n_blocks hybrid MC-MD blocks, recording each block's per-graph Pt
     fraction and energy/atom -- the observable series _equilibration_gate
@@ -1240,6 +1315,12 @@ def _run_hybrid_with_observables(
     method's cost, at the price of one extra small GPU->CPU transfer per
     block for the recorded series (the same per-block-transfer pattern
     reference_energy_calibration.py already uses).
+
+    ``cell_hook(batch)``, if given, runs after the initial compute and after
+    every block's MD sub-step, before ``mc.synchronize`` adopts the energy --
+    e.g. ``relax_cell_volume`` for rigid-lattice SGC (``md_steps=0``) whose
+    lattice constant follows the composition. It must leave ``batch.energy``
+    evaluated at the geometry it leaves behind.
     """
     if n_blocks < 1:
         raise ValueError("n_blocks must be positive")
@@ -1257,6 +1338,8 @@ def _run_hybrid_with_observables(
     device = batch.device
     with hybrid.md:
         hybrid.md.compute(batch)
+        if cell_hook is not None:
+            cell_hook(batch)
         hybrid.mc.synchronize(batch)
         for block_index in range(n_blocks):
             if device.type == "cuda":
@@ -1266,6 +1349,8 @@ def _run_hybrid_with_observables(
             )  # not hybrid.mc.run: that would bypass mc_energy_only
             hybrid.md.compute(batch)
             hybrid.md.run(batch, n_steps=hybrid.md_steps)
+            if cell_hook is not None:
+                cell_hook(batch)
             hybrid.mc.synchronize(batch)
             _record()
             if device.type == "cuda":
@@ -1772,9 +1857,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--inference-settings",
-        default=INFERENCE_SETTINGS,
-        help="UMA inference settings: a fairchem preset name or a key=value InferenceSettings "
-        "spec. Defaults to the SGC-safe spec in INFERENCE_SETTINGS.",
+        default="auto",
+        help="UMA inference settings: 'auto' (default), a fairchem preset name or a key=value "
+        "InferenceSettings spec. auto = INFERENCE_SETTINGS_COMPILED (compile, no merge) for "
+        "hybrid runs and INFERENCE_SETTINGS (no compile, no merge) for pure SGC "
+        "(--md-steps-per-block 0). Pass INFERENCE_SETTINGS' spec explicitly for short runs "
+        "(under ~100 blocks per process), which do not repay the ~2 min compile.",
     )
     parser.add_argument(
         "--md-steps-per-block",
@@ -2042,10 +2130,24 @@ def main() -> None:
     args = parser.parse_args()
     torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
     MC_ENERGY_ONLY = args.mc_energy_only
+    md_steps_per_block = (
+        args.md_steps_per_block
+        if args.md_steps_per_block is not None
+        else MD_STEPS_PER_BLOCK
+    )
+    args.inference_settings = resolve_inference_settings(
+        args.inference_settings, md_steps_per_block
+    )
     print(
         f"[hybrid] mc_energy_only={MC_ENERGY_ONLY} inference_settings={args.inference_settings!r}",
         flush=True,
     )
+    if "compile=true" in args.inference_settings and args.batch_width is None:
+        print(
+            "[hybrid] compiled model + batch-width auto-profiling: each profiled width "
+            "compiles its own graphs once (a few minutes in total); pass --batch-width to skip.",
+            flush=True,
+        )
 
     device = torch.device(args.device)
     n_atoms = args.n_atoms
@@ -2070,11 +2172,6 @@ def main() -> None:
         task_name=TASK,
         device=str(device),
         inference_settings=args.inference_settings,
-    )
-    md_steps_per_block = (
-        args.md_steps_per_block
-        if args.md_steps_per_block is not None
-        else MD_STEPS_PER_BLOCK
     )
     print(
         f"[hybrid] md_steps_per_block={md_steps_per_block}"

@@ -223,39 +223,59 @@ changes the sampling.
   recompiles (block times stayed flat), and one compile cost about 5 s. The only
   compiled run landed on a slower A100-PCIE-40GB, where it ran 5% faster than
   uncompiled SXM at width 1 and 3% slower at width 4, with about 35% more
-  memory, so its per-step gain on matched hardware is unmeasured. In SGC-NPT,
-  MD changes the neighbor count and therefore the graph shape, which forced
-  recompiles with static and with dynamic compile shapes alike; leave
-  `compile` off for hybrid runs. For long fixed-geometry SGC, benchmark `compile=True` on your own
-  hardware first.
+  memory, so its per-step gain on matched hardware is unmeasured. For long
+  fixed-geometry SGC, benchmark `compile=True` on your own hardware first.
+  In SGC-NPT, compile without merge pays a little for long runs. Measured with
+  dynamic compile shapes (the single-process default; 500 atoms, A100-SXM4-80GB,
+  20 blocks), steady state per block:
+
+  | Width | No merge, no compile | No merge, compile | Peak GiB (no compile / compile) |
+  |---|---|---|---|
+  | 1 | 12.60 s | 11.73 s (1.07x) | 9.0 / 8.0 |
+  | 4 | 42.59 s | 40.36 s (1.06x) | 48.7 / 42.9 |
+
+  The extra recompiles (energy-only MC and full-output MD each compile once) all
+  fall in the first block. The ~110 s one-time compile pays back after ~125
+  blocks at width 1 and ~45 at width 4. The sampled chain is unchanged (identical
+  acceptance, energies within 0.4 meV/atom).
 - **Batch width: 2-4.** SGC saturates the GPU early: energy-only gains 20%
   from width 1 to 4, and full outputs gain 7-10%.
 
 ### UMA settings for fixed-composition runs (Kawasaki, Kawasaki-NPT, MD)
 
 When composition cannot change, `merge_mole=True` folds the mixture-of-experts
-weights into one plain model and is the largest single speed-up. The turbo rows
-below were measured while `UMAWrapper` forced static compile shapes: MD changes
-the graph's edge count almost every step, so each new count recompiled (32
-recompiles, ~20 min, then a fallback to uncompiled speed). fairchem's
-dynamic-shape compile (`compile_shapes="dynamic"`, the single-process default)
-does not fix this: turbo NPT still hit the recompile limit (~21 min in the first
-block, then 4.85 s/block against 4.78 for merge without compile at width 1), so
-leave `compile` off for MD. Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median
-s/block (50 MD steps; Kawasaki-NPT adds 100 energy-only MC steps):
+weights into one plain model and is the largest single speed-up. Compiling on top
+of it (`"turbo"`) pays for long runs, provided the compile keeps fairchem's dynamic
+shapes, the single-process default of `UMAWrapper`. With static shapes
+(`compile_shapes="static"`, which earlier toolkit versions forced), MD's changing
+edge count recompiles on every step (32 recompiles, ~20 min, then uncompiled
+speed). Measured on Au-Pt, 500 atoms, A100-SXM4-80GB, median s/block (50 MD
+steps; Kawasaki-NPT adds 100 energy-only MC steps):
 
 | Run | Settings | width 1 | width 4 | Peak GiB, width 4 |
 |---|---|---|---|---|
-| pure NPT | **merge, no compile** | **2.65** | **7.55** | 16.0 |
+| pure NPT | merge, no compile | 2.65 | 7.55 | 16.0 |
 | pure NPT | no merge, no compile | 4.74 | 16.82 | 23.5 |
 | pure NPT | merge, no compile, checkpointing | 5.32 | 17.82 | 7.5 |
 | pure NPT | `"batch"` | 8.66 | 31.91 | 9.2 |
-| Kawasaki-NPT | **merge, no compile** | **5.95** | **14.57** | 16.0 |
+| Kawasaki-NPT | merge, no compile | 5.95 | 14.57 | 16.0 |
 | Kawasaki-NPT | no merge, no compile | 12.35 | 41.30 | 23.5 |
 
+Turbo against merge without compile, steady state, in the same job on the same
+node (a later job, so the uncompiled numbers differ slightly from the table above):
+
+| Run | merge, no compile | turbo (dynamic shapes) | Peak GiB | One-time compile |
+|---|---|---|---|---|
+| pure NPT, width 1 | 2.92 | **2.05 (1.42x)** | 4.1 / 2.9 | ~280 s |
+| Kawasaki-NPT, width 1 | 5.67 | **4.26 (1.33x)** | 4.1 / 2.9 | ~210 s |
+| Kawasaki-NPT, width 4 | 14.44 | **10.92 (1.32x)** | 16.0 / 11.2 | ~200 s |
+
+The compile pays back after ~300 blocks for pure NPT and ~150 for Kawasaki-NPT
+at width 1 (~55 at width 4).
+
 Use `inference_settings="compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"`
-for Kawasaki-NPT and MD, `"turbo"` (compile + merge) only for Kawasaki MC with
-no MD, and merge + `activation_checkpointing=true` when memory is short.
+for short Kawasaki-NPT and MD runs and `"turbo"` for long ones and for Kawasaki
+MC. When memory is short, use merge with `activation_checkpointing=true`.
 
 **A merged model is valid for one composition only.** fairchem merges on the
 first structure the model evaluates and then requires every later structure,

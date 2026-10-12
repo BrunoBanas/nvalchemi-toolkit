@@ -126,6 +126,13 @@
 
 ### Changed
 
+- **`benchmark/hybrid_sgc_npt/run_campaign.py` compiles hybrid runs by default.**
+  `--inference-settings` now defaults to `auto`: compile without merge
+  (`INFERENCE_SETTINGS_COMPILED`) when the run has MD blocks, and the uncompiled
+  `INFERENCE_SETTINGS` for pure SGC (`--md-steps-per-block 0`), where compile
+  measured slower. SGC-NPT runs 1.06x faster with ~12% less memory after a ~2 min
+  compile per process. `INFERENCE_SETTINGS` itself, which other scripts import,
+  is unchanged.
 - **`UMAWrapper` computes only the derivatives `active_outputs` asks for.**
   `model_config.active_outputs = {"energy"}` now switches off fairchem's
   forces/stress autograd (the `regress_config` flags plus the matching entries
@@ -176,10 +183,16 @@
   Single-process runs now keep fairchem's `dynamic=True` compile. The new
   `compile_shapes` argument (`"auto"`, `"static"`, `"dynamic"`) of `UMAWrapper` /
   `UMAWrapper.from_checkpoint`, or `NVALCHEMI_UMA_COMPILE_SHAPES` with `"auto"`,
-  overrides it. Dynamic shapes do not remove the MD recompiles: 500-atom NPT
-  with turbo still hits dynamo's recompile limit (~20 min in the first block)
-  and then runs at uncompiled speed, so keep `compile` off for MD. MC-only runs
-  are unaffected (identical block times with static and dynamic shapes).
+  overrides it. Static shapes made compiled MD recompile on every edge-count
+  change (32 recompiles, ~20 min, then uncompiled speed). With dynamic shapes,
+  compiled MD stays compiled. At 500 atoms on A100-SXM, steady state:
+  - turbo NPT 1.42x and Kawasaki-NPT 1.32x faster than merge without compile,
+    with ~30% less memory;
+  - SGC-NPT compile without merge 1.06x faster, with ~12% less memory;
+  - each pays a 2-5 min compile per run.
+
+  MC-only runs are unaffected: identical block times with static and dynamic
+  shapes.
 - **`UMAWrapper` folds positions into the periodic cell before every
   evaluation.** It passed raw positions to fairchem, whose periodic graph
   builder scans only image offsets of +-ceil(cutoff x inverse plane spacing)

@@ -36,6 +36,10 @@ Two regimes rank the settings differently. Throughput (many small, independent
 walkers): batch them and pick the settings with the most walker-blocks per second
 per GPU at their best width. Single (one system, or too large to batch): width 1,
 pick the shortest time per block.
+
+Compiled settings pay a one-time compile per process (calibration
+compile_overhead_s), which the planner spreads over --n-blocks: short runs keep
+the uncompiled settings, long ones switch to compile.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ MEASURED_MAX_WIDTH = (
 
 SPECS = {
     "compiled_merged": "turbo",
+    "compiled_unmerged": "compile=true,merge_mole=false,tf32=true,activation_checkpointing=false",
     "eager_merged": "compile=false,merge_mole=true,tf32=true,activation_checkpointing=false",
     "eager_unmerged": "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false",
     "checkpointed_merged": "compile=false,merge_mole=true,tf32=true,activation_checkpointing=true",
@@ -144,15 +149,23 @@ def size_factor(n_atoms: int) -> float:
 
 def valid_classes(kind: str, merge_ok: bool) -> list[str]:
     """Settings classes that are correct for this kind (the planner ranks these)."""
-    has_mc, has_md, _, geom_fixed, _, _ = KINDS[kind]
+    has_mc, has_md, _, geom_fixed, family, _ = KINDS[kind]
     classes = []
     if merge_ok and geom_fixed and not has_md:
         classes.append(
             "compiled_merged"
-        )  # compile only when neither graph shape nor composition changes
+        )  # MC-only Kawasaki: fixed graph, compile wins outright
     if merge_ok:
         classes.append("eager_merged")
     classes.append("eager_unmerged")
+    # Compiled MD (fairchem's dynamic-shape compile; static shapes recompile every MD step).
+    # Listed after the eager classes so a tie (within 3%, e.g. a short run that cannot repay
+    # the compile) keeps the uncompiled setting. Measured for NPT, Kawasaki-NPT (merged) and
+    # SGC-NPT (unmerged); SGC MC-only compile measured slower, so it is not offered.
+    if has_md and merge_ok:
+        classes.append("compiled_merged")
+    if has_md and family == "sgc_npt":
+        classes.append("compiled_unmerged")
     if has_md:  # checkpointing only saves memory in a backward pass: MC-only energy calls have none
         if merge_ok:
             classes.append("checkpointed_merged")
@@ -162,12 +175,17 @@ def valid_classes(kind: str, merge_ok: bool) -> list[str]:
 
 def forced_class_notes(kind: str, cls: str, merge_ok: bool) -> list[str]:
     """Return warnings for a forced settings class that the run kind cannot use well."""
-    _, _, _, geom_fixed, _, _ = KINDS[kind]
+    _, has_md, _, _, family, _ = KINDS[kind]
     notes = []
-    if cls == "compiled_merged" and not geom_fixed:
+    if cls.startswith("compiled") and has_md:
         notes.append(
-            "WARNING: compile with changing geometry (MD/NPT) recompiles every step: "
-            "measured ~20 min lost per process, then falls back to uncompiled speed."
+            "compile with MD needs fairchem's dynamic compile shapes (UMAWrapper's single-process "
+            "default): never set NVALCHEMI_UMA_COMPILE_SHAPES=static / compile_shapes='static' here, "
+            "which recompiles every MD step (~20 min lost, then uncompiled speed)."
+        )
+    if cls == "compiled_unmerged" and family != "sgc_npt":
+        notes.append(
+            "compiled_unmerged is measured for SGC-NPT only; its coefficients here are SGC-NPT's."
         )
     if "merged" in cls and "unmerged" not in cls and not merge_ok:
         notes.append(
@@ -186,8 +204,21 @@ def _lookup(table: dict, cls: str) -> tuple[dict, str] | None:
 
 
 def phase_coeffs(table: str, cls: str) -> dict:
-    """Return time-model coefficients of *cls* from calibration table *table*."""
-    return _lookup(CAL["time_model"][table], cls)[0]
+    """Return time-model coefficients of *cls* from calibration table *table*.
+
+    An entry with ``relative_to`` reuses that class's fit with ``c1`` scaled by
+    ``factor``; the result carries ``relative=True``.
+    """
+    hit = _lookup(CAL["time_model"][table], cls)
+    if hit is None and cls == "compiled_unmerged" and table == "mc_full_outputs":
+        hit = _lookup(CAL["time_model"][table], "eager_unmerged")
+    coef = hit[0]
+    if "relative_to" in coef:
+        base = dict(phase_coeffs(table, coef["relative_to"]))
+        base["c1_ms_per_atom"] *= coef["factor"]
+        base["relative"] = True
+        return base
+    return coef
 
 
 def memory_coeffs(family: str, cls: str) -> tuple[dict, str]:
@@ -230,8 +261,17 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
     """Width table (memory, s/block, throughput) for one settings class."""
     has_mc, has_md = ctx["has_mc"], ctx["has_md"]
     n_eff, n_atoms, gpu = ctx["n_eff"], ctx["n_atoms"], ctx["gpu"]
-    compiled = cls == "compiled_merged"
+    compiled = cls.startswith("compiled")
     notes = []
+    # One-time compile per process, spread over the run's blocks.
+    compile_s = CAL["compile_overhead_s"].get(ctx["family"], 0.0) if compiled else 0.0
+    compile_per_block = compile_s / max(1, ctx["n_blocks"])
+    # A compiled hybrid's energy-only MC phase has its own measured factor (MC-only fits differ).
+    mc_cls = (
+        cls + "_hybrid"
+        if has_md and (cls + "_hybrid") in CAL["time_model"]["mc_energy_only"]
+        else cls
+    )
     mem_c, mem_key = memory_coeffs(ctx["family"], cls)
     if mem_key not in (cls, "checkpointed"):
         notes.append(f"memory for {cls}: using {mem_key}")
@@ -250,19 +290,23 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
         mc = md = handoff = 0.0
         if has_mc:
             mc = ctx["mc_steps"] * step_ms(
-                phase_coeffs("mc_energy_only", cls), width, n_eff, compiled, n_atoms
+                phase_coeffs("mc_energy_only", mc_cls), width, n_eff, compiled, n_atoms
             )
         if has_md:
             md_coef = phase_coeffs("md_full_outputs", cls)
-            md = ctx["md_steps"] * step_ms(md_coef, width, n_eff, False, n_atoms)
+            # Compiled MD is measured at 500 atoms only; the compiled large-graph ramp
+            # (measured on Kawasaki MC) is applied to it too, conservatively.
+            md = ctx["md_steps"] * step_ms(md_coef, width, n_eff, compiled, n_atoms)
             if has_mc:  # force/energy recompute after each MC block
-                handoff = step_ms(md_coef, width, n_eff, False, n_atoms)
+                handoff = step_ms(md_coef, width, n_eff, compiled, n_atoms)
         f = gpu["time_factor"] / 1000.0
+        compile_b = compile_per_block * gpu["time_factor"]
         return {
             "mc": mc * f,
             "md": md * f,
             "handoff": handoff * f,
-            "total": (mc + md + handoff) * f,
+            "compile": compile_b,
+            "total": (mc + md + handoff) * f + compile_b,
         }
 
     widths = []
@@ -276,6 +320,7 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
                 "block_s": b["total"],
                 "mc_s": b["mc"],
                 "md_s": b["md"],
+                "compile_s_per_block": b["compile"],
                 "walker_blocks_per_s": w / b["total"],
             }
         )
@@ -350,6 +395,7 @@ def plan(args) -> dict:
         if args.mc_steps is not None
         else (round(0.2 * n_atoms) if has_mc else 0),
         "md_steps": args.md_steps if has_md else 0,
+        "n_blocks": args.n_blocks,
         "gpu": gpu_spec(args.gpu),
         "efficiency": args.efficiency,
     }
@@ -413,10 +459,23 @@ def plan(args) -> dict:
                 "step, ~2-3x less memory per walker. Unmerged energy-only MC is unaffected; with merge_mole "
                 "it slows MC ~3.4x too. A larger card keeps the faster settings."
             )
-        if cls == "compiled_merged":
+        if cls.startswith("compiled"):
+            oh = CAL["compile_overhead_s"].get(family, 0)
             notes.append(
-                "compiled (turbo): expect a ~10-20 s compile on the first block; valid only because "
-                "geometry and composition are both fixed (MC-only Kawasaki)."
+                f"compiled: ~{oh:.0f} s one-time compile per process (measured, A100-SXM, 500 atoms), "
+                f"included above spread over {args.n_blocks} blocks; "
+                + (
+                    "valid with MD only under dynamic compile shapes (the default)."
+                    if has_md
+                    else "geometry and composition are both fixed (MC-only Kawasaki)."
+                )
+            )
+        elif has_md and any(
+            e["settings_class"].startswith("compiled") for e in evaluated
+        ):
+            notes.append(
+                "compile not chosen: its one-time compile does not pay back over "
+                f"{args.n_blocks} blocks (see the comparison); rerun with the real --n-blocks."
             )
         if family == "sgc_npt" and regime.startswith("single"):
             notes.append(
@@ -608,6 +667,7 @@ def main() -> None:
         choices=[
             "auto",
             "compiled_merged",
+            "compiled_unmerged",
             "eager_merged",
             "eager_unmerged",
             "checkpointed",
