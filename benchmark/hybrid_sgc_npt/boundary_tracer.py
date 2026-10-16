@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Canonical copy of the SGC boundary tracer (version 1.3). Used by run_campaign.py
+# Canonical copy of the SGC boundary tracer (version 1.4). Used by run_campaign.py
 # --mode trace-boundary, benchmark/phase_boundary/ and the nvalchemi-sgc-phase-boundary
 # skill. After changing it, run benchmark/phase_boundary/test_boundary_tracer.py. To use
 # it with another engine, copy it with
@@ -71,6 +71,31 @@ Algorithm (see benchmark/phase_boundary/README.md, "Boundary tracing"):
 Integrating toward LOWER T is stable (eq. 31: the gap widens); toward T_c it is not, which is
 why step rejection and the gap/critical checks matter most going up.
 
+Dilute (anchored) mode, version 1.4. With the pure phases' free-energy difference
+dG(T) = G_B(T) - G_A(T) (``dilute_dG``, e.g. pure_free_energy_analysis.py --dg-table), and both
+phases dilute (non-interacting solutes: x_a small, 1 - x_g small), coexistence follows from the
+single-flip low-temperature expansion of each phase's potential,
+
+    phi_a = G_A + kT ln(1 - x_a),   phi_g = G_B - dmu + kT ln x_g
+    =>  dmu_coex(T) = dG(T) + kT ln[x_g / (1 - x_a)],
+
+with x_a, x_g the walkers' own compositions (so the solute free energies, vibrations included,
+never need computing). The tracer then starts at t0 with mu0 = None (taken from this formula),
+and while the dilute regime holds every point is ANCHORED: dmu from the formula, re-run until it
+is self-consistent within tol_mu, with an independent error (no accumulation, any step size).
+At each anchored step it also integrates eq. (29) from the previous point; the formula is left
+for good (event "dilute-exit", trace["dilute_exit_T"] = last anchored T) as soon as the two
+disagree by more than ``dilute_tol`` (solute-solute interactions, ~W x^2, have become
+noticeable: van de Walle & Asta's LTE-vs-mean-field test, done with the simulation itself), a
+phase's solute fraction exceeds ``dilute_x_max``, or dG is not tabulated at the next T. From
+there on the trace is plain eq. (29) from the last anchored point, i.e. it starts at the highest
+temperature where the low-temperature limit still holds. A retrace only needs to come back down
+to dilute_exit_T: below it every point is anchored.
+
+``dt_floor``: until the first rejected step, steps never shrink below it (the gap-shrink cap and
+corrector-driven growth are overridden), for a fast upward pass whose top is then refined by the
+rejection halving and by a downward retrace.
+
 Command line (analysis only; tracing itself is driven by an engine adapter):
     python boundary_tracer.py report trace_down.json [trace_up.json ...] --out dir
 """
@@ -85,7 +110,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 KB_EV = 8.617333262e-5
-TRACER_VERSION = "1.3"
+TRACER_VERSION = "1.4"
 
 
 # ----------------------------------------------------------------------------- configuration
@@ -94,7 +119,7 @@ class TraceConfig:
     """Settings for one boundary trace: start point, target temperature, step control and test thresholds."""
 
     t0: float  # starting temperature (K), a known coexistence point
-    mu0: float  # coexistence dmu at t0 (eV)
+    mu0: float | None  # coexistence dmu at t0 (eV); None = from the dilute formula (needs dilute_dG)
     t_stop: float  # trace toward this temperature (either direction)
     dt: float = 50.0  # initial |dT| (K)
     dt_min: float = 5.0  # give up below this |dT|
@@ -119,6 +144,10 @@ class TraceConfig:
         None  # start compositions: enable recentering of the start point
     )
     x_g0: float | None = None
+    dilute_dG: dict | None = None  # {T: dG or {"dG": .., "se": ..}}: G_B - G_A of the pure phases (eV/atom)
+    dilute_tol: float = 0.003  # leave anchored mode when formula and eq. 29 differ by more (eV)
+    dilute_x_max: float = 0.15  # ... or when x_a or 1 - x_g exceeds this
+    dt_floor: float = 0.0  # minimum step until the first rejection (K); 0 = off
 
 
 # ----------------------------------------------------------------------------- physics
@@ -132,6 +161,38 @@ def slope(T: float, mu: float, a: dict, g: dict) -> tuple[float, float]:
     sx = math.hypot(a.get("x_se") or 0.0, g.get("x_se") or 0.0)
     f_se = math.hypot(sE / (beta * dx), dE * sx / (beta * dx * dx))
     return f, f_se
+
+
+def dilute_dG_at(cfg: TraceConfig, T: float) -> tuple[float, float] | None:
+    """(dG, se) of the pure phases at T, linearly interpolated in cfg.dilute_dG; None outside it."""
+    if not cfg.dilute_dG:
+        return None
+    rows = []
+    for t, v in cfg.dilute_dG.items():
+        v = v if isinstance(v, dict) else {"dG": v, "se": 0.0}
+        rows.append((float(t), float(v["dG"]), float(v.get("se") or 0.0)))
+    rows.sort()
+    for (t0, g0, s0), (t1, g1, s1) in zip(rows, rows[1:] + [rows[-1]]):
+        if abs(T - t0) < 1e-6:
+            return g0, s0
+        if t0 < T < t1:
+            w = (T - t0) / (t1 - t0)
+            return g0 + w * (g1 - g0), max(s0, s1)
+    return None
+
+
+def dilute_mu(T: float, dG: float, xa: float, xg: float) -> float:
+    """dmu_coex = dG + kT ln[x_g / (1 - x_a)] (both phases dilute, non-interacting solutes)."""
+    xa = min(max(xa, 0.0), 0.5)
+    xg = min(max(xg, 0.5), 1.0)
+    return dG + KB_EV * T * math.log(xg / (1.0 - xa))
+
+
+def dilute_se(T: float, dG_se: float, a: dict, g: dict) -> float:
+    """Independent 1-sigma error of an anchored point: dG plus the x terms of the formula."""
+    xa, xg = min(max(a["x"], 0.0), 0.5), min(max(g["x"], 0.5), 1.0)
+    sx = math.hypot((g.get("x_se") or 0.0) / xg, (a.get("x_se") or 0.0) / (1.0 - xa))
+    return math.hypot(dG_se, KB_EV * T * sx)
 
 
 def _predict_own(hist: list[dict], key: str, T: float) -> float | None:
@@ -231,6 +292,7 @@ class BoundaryTracer:
             status="running",
             stop_reason=None,
             next_dt=None,
+            mode="dilute" if cfg.dilute_dG else "eq29",
         )
 
     # -- persistence ---------------------------------------------------------------
@@ -260,7 +322,13 @@ class BoundaryTracer:
         pts = self.trace["points"]
         direction = 1.0 if cfg.t_stop > cfg.t0 else -1.0
 
+        if not pts and self.trace.get("mode") == "dilute":  # anchored start from the pure phases
+            self._dilute_start(state_a, state_g, direction)
+            if self.trace["status"] != "running":
+                return self.trace
         if not pts:  # anchor point: verify both walkers at (T0, mu0)
+            if cfg.mu0 is None:
+                raise ValueError("mu0 is required unless dilute_dG is given")
             mu0, mu0_se, rc_info = cfg.mu0, cfg.mu0_se, None
             a, g, sa, sg = self.engine.run(
                 cfg.t0, mu0, state_a, state_g, tag=f"T{cfg.t0:g}.start"
@@ -321,7 +389,7 @@ class BoundaryTracer:
                     f_se=fse,
                     dT=0.0,
                     corrector_runs=0,
-                    mu_pred=cfg.mu0,
+                    mu_pred=mu0 if cfg.mu0 is None else cfg.mu0,
                     mu_corr=mu0,
                     state_a=sa,
                     state_g=sg,
@@ -348,6 +416,11 @@ class BoundaryTracer:
                 T1, dT = cfg.t_stop, cfg.t_stop - p0["T"]
             b0, b1 = 1 / (KB_EV * p0["T"]), 1 / (KB_EV * T1)
             db = b1 - b0
+            if self.trace.get("mode") == "dilute":
+                done = self._dilute_step(p0, T1, dT, db, direction)
+                if done == "rejected-end":
+                    break
+                continue
             if len(pts) >= 2:  # Adams-Bashforth 2 in beta (variable step)
                 pm = pts[-2]
                 bm = 1 / (KB_EV * pm["T"])
@@ -399,25 +472,8 @@ class BoundaryTracer:
             ):
                 continue
             if accepted is None:  # a walker left its phase: reject, halve the step
-                self._event(T=T1, kind="rejected", dT=dT, mu=mu_run, reasons=problems)
-                nd = dT / 2.0
-                if abs(nd) < cfg.dt_min:
-                    crit = any("gap" in p for p in problems)
-                    melt = any("crystal phase" in p for p in problems)
-                    self._finish(
-                        (
-                            "a new phase appeared (a walker lost its crystal phase)"
-                            if melt
-                            else "gap closed: critical point approached"
-                            if crit
-                            else "walkers keep transforming at the minimum step (near T_c, a spinodal, "
-                            "or a new phase)"
-                        )
-                        + f" between {p0['T']:g} and {T1:g} K"
-                    )
+                if self._reject(p0, T1, dT, mu_run, problems):
                     break
-                self.trace["next_dt"] = nd
-                self._save()
                 continue
 
             a, g, f1, f1se, mu_corr, sa_new, sg_new = accepted
@@ -449,6 +505,7 @@ class BoundaryTracer:
             dgap_dT = (gap1 - gap0) / (T1 - q["T"])
             if direction * dgap_dT < 0:
                 nxt = min(nxt, max(cfg.max_gap_frac * gap1 / abs(dgap_dT), cfg.dt_min))
+            nxt = self._floored(nxt)
             self.trace["next_dt"] = direction * nxt
             self.log(
                 f"[trace] T={T1:g} mu={mu_run:.4f}±{pts[-1]['mu_se']:.4f} x_a={a['x']:.3f} x_g={g['x']:.3f} "
@@ -456,6 +513,132 @@ class BoundaryTracer:
             )
             self._save()
         return self.trace
+
+    def _reject(self, p0, T1, dT, mu_run, problems) -> bool:
+        """Record a rejected step and halve dT; True if the trace ended (dT below dt_min)."""
+        cfg = self.cfg
+        self._event(T=T1, kind="rejected", dT=dT, mu=mu_run, reasons=problems)
+        nd = dT / 2.0
+        if abs(nd) < cfg.dt_min:
+            crit = any("gap" in p for p in problems)
+            melt = any("crystal phase" in p for p in problems)
+            self._finish(
+                (
+                    "a new phase appeared (a walker lost its crystal phase)"
+                    if melt
+                    else "gap closed: critical point approached"
+                    if crit
+                    else "walkers keep transforming at the minimum step (near T_c, a spinodal, "
+                    "or a new phase)"
+                )
+                + f" between {p0['T']:g} and {T1:g} K"
+            )
+            return True
+        self.trace["next_dt"] = nd
+        self._save()
+        return False
+
+    def _floored(self, nxt: float) -> float:
+        """Apply dt_floor (only until the first rejection) and dt_max to a proposed |dT|."""
+        cfg = self.cfg
+        if cfg.dt_floor and not any(e.get("kind") == "rejected" for e in self.trace["events"]):
+            nxt = max(nxt, cfg.dt_floor)
+        return min(nxt, cfg.dt_max)
+
+    # -- dilute (anchored) mode -------------------------------------------------------
+    def _dilute_runs(self, T, mu_run, sa, sg, tag):
+        """Run both walkers at the dilute-formula dmu until it is self-consistent.
+
+        Returns (a, g, sa, sg, mu_run, mu_formula, runs, problems, dG_se); problems non-empty means
+        a walker left its phase (the caller rejects)."""
+        cfg, pts = self.cfg, self.trace["points"]
+        dG, dG_se = dilute_dG_at(cfg, T)
+        runs = 0
+        while True:
+            a, g, sa_new, sg_new = self.engine.run(T, mu_run, sa, sg, tag=f"{tag}{runs}")
+            runs += 1
+            split = phase_problems(cfg, pts, T, a, g)
+            problems = split["a"] + split["g"] + split["gap"]
+            mu_f = dilute_mu(T, dG, a["x"], g["x"])
+            if problems or abs(mu_f - mu_run) <= cfg.tol_mu or runs > cfg.max_corr:
+                return a, g, sa_new, sg_new, mu_run, mu_f, runs, problems, dG_se
+            mu_run, sa, sg = mu_f, sa_new, sg_new
+
+    def _dilute_start(self, state_a, state_g, direction):
+        """Anchored start: dmu from dG(t0) (pure phases), corrected with the measured x."""
+        cfg, pts = self.cfg, self.trace["points"]
+        if dilute_dG_at(cfg, cfg.t0) is None:
+            raise ValueError(f"dilute_dG has no entry covering t0 = {cfg.t0:g} K")
+        dG = dilute_dG_at(cfg, cfg.t0)[0]
+        mu_guess = dG if cfg.mu0 is None else cfg.mu0
+        a, g, sa, sg, mu_run, mu_f, runs, problems, dG_se = self._dilute_runs(
+            cfg.t0, mu_guess, state_a, state_g, f"T{cfg.t0:g}.start.dil"
+        )
+        if problems:
+            self.trace.update(status="failed", stop_reason="dilute start invalid: " + "; ".join(problems))
+            self._save()
+            return
+        f, fse = slope(cfg.t0, mu_run, a, g)
+        pts.append(dict(T=cfg.t0, mu=mu_run, mu_se=math.hypot(dilute_se(cfg.t0, dG_se, a, g), mu_f - mu_run), a=a, g=g, f=f, f_se=fse,
+                        dT=0.0, corrector_runs=runs, mu_pred=mu_guess, mu_corr=mu_f, mu_dilute=mu_f,
+                        anchored=True, state_a=sa, state_g=sg, recentered=None))
+        self.trace["next_dt"] = direction * abs(cfg.dt)
+        self._save()
+        self.log(f"[trace] dilute start T={cfg.t0:g} mu={mu_run:.4f} (dG {dG:.4f}) x_a={a['x']:.4f} "
+                 f"x_g={g['x']:.4f} runs={runs}")
+
+    def _dilute_step(self, p0, T1, dT, db, direction):
+        """One anchored step; switches the trace to eq. (29) when the dilute regime ends."""
+        cfg, pts = self.cfg, self.trace["points"]
+
+        def leave(reason):
+            # Leaving at the very first step means t0 itself may already be outside the dilute
+            # regime (the check compares consecutive points): flag it; restart lower to be safe.
+            first = len(pts) == 1
+            self.trace.update(mode="eq29", dilute_exit_T=p0["T"])
+            self._event(T=T1, kind="dilute-exit", last_anchored_T=p0["T"], reason=reason,
+                        start_suspect=first)
+            if first:
+                self.log(f"[trace] WARNING: dilute regime left at the first step from t0={p0['T']:g} K; "
+                         "the start may be biased, restart from a lower t0")
+            self._save()
+
+        if dilute_dG_at(cfg, T1) is None:
+            leave(f"dG not tabulated at {T1:g} K")
+            return "switched"
+        dG = dilute_dG_at(cfg, T1)[0]
+        pa, pg = _predict_own(pts, "a", T1), _predict_own(pts, "g", T1)
+        pa = p0["a"]["x"] if pa is None else pa
+        pg = p0["g"]["x"] if pg is None else pg
+        mu_pred = dilute_mu(T1, dG, pa, pg)
+        a, g, sa, sg, mu_run, mu_f, runs, problems, dG_se = self._dilute_runs(
+            T1, mu_pred, p0["state_a"], p0["state_g"], f"T{T1:g}.dil"
+        )
+        if problems:
+            return "rejected-end" if self._reject(p0, T1, dT, mu_run, problems) else "rejected"
+        f1, f1se = slope(T1, mu_run, a, g)
+        mu29 = p0["mu"] + 0.5 * (p0["f"] + f1) * db
+        x_solute = max(a["x"], 1.0 - g["x"])
+        if abs(mu_f - mu29) > cfg.dilute_tol or x_solute > cfg.dilute_x_max:
+            reason = (f"formula {mu_f:.5f} vs eq. 29 {mu29:.5f} eV ({1e3 * (mu_f - mu29):+.2f} meV)"
+                      if abs(mu_f - mu29) > cfg.dilute_tol else f"solute fraction {x_solute:.3f} > {cfg.dilute_x_max}")
+            leave(reason)
+            if abs(mu29 - mu_run) <= cfg.tol_mu:  # this run is already a valid eq. 29 point: keep it
+                step_se = 0.5 * abs(db) * math.hypot(p0["f_se"], f1se)
+                pts.append(dict(T=T1, mu=mu_run, mu_se=math.hypot(p0["mu_se"], step_se), a=a, g=g, f=f1,
+                                f_se=f1se, dT=dT, corrector_runs=runs, mu_pred=mu_pred, mu_corr=mu29,
+                                mu_dilute=mu_f, anchored=False, state_a=sa, state_g=sg))
+                self.trace["next_dt"] = direction * self._floored(abs(dT))
+                self._save()
+            return "switched"  # otherwise the main loop redoes T1 with eq. (29) from p0
+        pts.append(dict(T=T1, mu=mu_run, mu_se=math.hypot(dilute_se(T1, dG_se, a, g), mu_f - mu_run), a=a, g=g, f=f1, f_se=f1se, dT=dT,
+                        corrector_runs=runs, mu_pred=mu_pred, mu_corr=mu_f, mu_dilute=mu_f, mu_eq29=mu29,
+                        anchored=True, state_a=sa, state_g=sg))
+        self.trace["next_dt"] = direction * self._floored(min(abs(dT) * 1.5, cfg.dt_max))
+        self._save()
+        self.log(f"[trace] T={T1:g} anchored mu={mu_run:.4f} (eq. 29 {mu29:.4f}, {1e3 * (mu_f - mu29):+.2f} meV) "
+                 f"x_a={a['x']:.4f} x_g={g['x']:.4f} runs={runs} next dT={self.trace['next_dt']:+g}")
+        return "accepted"
 
     # -- recentering (paper Fig. 6) --------------------------------------------------
     def _can_recenter(self) -> bool:

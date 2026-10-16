@@ -284,6 +284,12 @@ def main() -> None:
     ap.add_argument("--log-every-steps", type=int, default=50)
     ap.add_argument("--seed", type=int, default=20260921)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument(
+        "--inference-settings",
+        default=INFERENCE_SETTINGS,
+        help="UMA settings; a pure element has fixed composition, so merge_mole=true is valid "
+        "(~2x faster MD); add activation_checkpointing=true for large cells on small cards",
+    )
     args = ap.parse_args()
 
     device = torch.device(args.device)
@@ -303,7 +309,7 @@ def main() -> None:
         CHECKPOINT,
         task_name=TASK,
         device=str(device),
-        inference_settings=INFERENCE_SETTINGS,
+        inference_settings=args.inference_settings,
     )
 
     # --- 1. solid NPT
@@ -544,7 +550,7 @@ def main() -> None:
         experimental_tm_k=EXPERIMENTAL_TM_K[el],
         checkpoint=CHECKPOINT,
         task=TASK,
-        inference_settings=INFERENCE_SETTINGS,
+        inference_settings=args.inference_settings,
         n_atoms=int(len(numbers)),
         nx=args.nx,
         nz_per_phase=args.nz,

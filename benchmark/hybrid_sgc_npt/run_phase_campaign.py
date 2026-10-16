@@ -31,6 +31,15 @@ A campaign (JSON spec) mixes four kinds of work, all at any number of temperatur
              x_a0 / x_g0 so a mis-centred start is recentered too). Each tracer runs in its own
              thread and submits its walkers to the same pool, so several traces and any other
              work share the GPU.
+             Fast route (tracer 1.4): give ``"dilute_dG": "<pure_dG.json>"`` (from
+             pure_free_energy_analysis.py --internal-reference --dg-table) and omit mu0: the trace
+             then starts at t0 from the pure phases (``"alpha_state": {"fresh": "random", "x0": 0}``,
+             ``"gamma_state": {"fresh": "random", "x0": 1}`` need no checkpoints), every point is
+             anchored while both phases stay dilute, and plain eq. 29 takes over at the highest
+             temperature where the dilute limit holds (``dilute_exit_T``). ``dt_floor`` keeps the
+             upward steps >= that size until the first rejection. A retrace without ``t_stop``
+             comes back down to the source trace's dilute_exit_T (else its start) and closes on the
+             source point there.
 
 All walkers use ``nvalchemi.mc.VCSGC``: an SGC walker is VC-SGC with kappa = 0 and phi = -dmu
 (identical move for move, test/mc/test_vcsgc.py), so ladder, fan-out, trace and VC-SGC walkers can
@@ -307,6 +316,13 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         self.min_blocks, self.max_blocks, self.gate_passes = min_blocks, max_blocks, gate_passes
         self.log_path = log_path
 
+    def _states(self, state) -> list:
+        """A start may also be a fresh-crystal dict ({"fresh": "random", "x0": 0}): one per replica."""
+        if isinstance(state, dict):
+            return [state] * self.replicas
+        states = [state] if isinstance(state, str) else list(state)
+        return states[: self.replicas] if len(states) > self.replicas else super()._states(states)
+
     def _submit(self, T, mu, tag, phases) -> list[Walker]:
         """Queue one walker per replica for each (phase name, states, branch) and wait for all."""
         wids = []
@@ -314,7 +330,8 @@ class PoolTraceEngine(NvalchemiTraceEngine):
             for k, s in enumerate(self._states(states)):
                 w = self.pool.add(Walker(
                     wid=f"{tag}.{phase}.r{k}", kind="trace", cls=self.cls, T=float(T), mus=[float(mu)],
-                    start={"state_ref": s}, min_blocks=self.min_blocks, max_blocks=self.max_blocks,
+                    start=dict(s) if isinstance(s, dict) else {"state_ref": s},
+                    min_blocks=self.min_blocks, max_blocks=self.max_blocks,
                     gate_passes=self.gate_passes, branch=branch,
                 ))
                 wids.append(w.wid)
@@ -496,7 +513,11 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     n_atoms, chunk = int(spec["n_atoms"]), int(spec.get("chunk_blocks", EQUILIBRATION_WINDOW_BLOCKS))
     classes = spec["classes"]
     temps = {float(i["T"]) for k in ("ladders", "points", "vcsgc") for i in spec.get(k, [])}
-    temps |= {float(t["t0"]) for t in spec.get("traces", []) if "t0" in t}   # a retrace has no t0 of its own
+    # traces only need the pure references (lattice constants) for a fresh start without "lattice_a"
+    def fresh_needs_ref(t):
+        return any(isinstance(t.get(k), dict) and "lattice_a" not in t[k] for k in ("alpha_state", "gamma_state"))
+
+    temps |= {float(t["t0"]) for t in spec.get("traces", []) if "t0" in t and fresh_needs_ref(t)}
     ref = references(spec, model, temps, out, device)
     store = FinalStateStore(out / "states")
     pool = Pool(out, store)
@@ -511,7 +532,16 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     errors: list[str] = []
     threads: dict[str, threading.Thread] = {}
     cfg_keys = ("mu0_se", "dt", "dt_min", "dt_max", "tol_mu", "min_gap", "max_corr", "max_gap_frac", "z", "min_jump",
-                "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0")
+                "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0",
+                "dilute_tol", "dilute_x_max", "dt_floor")
+
+    def dilute_table(t):
+        """The trace's dilute_dG: a pure_dG.json path (its "table") or an inline {T: dG} dict."""
+        d = t.get("dilute_dG")
+        if isinstance(d, str):
+            d = json.loads(Path(d).read_text())
+            d = d.get("table", d)
+        return d
     names = {t["name"] for t in traces}
     for t in traces:
         src = t.get("retrace_from")
@@ -547,24 +577,27 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                         print(f"[trace] {t['name']}: {t['retrace_from']} never got above its start with an open gap; "
                               "nothing to retrace", flush=True)
                         return
-                    t0 = src["points"][0]
+                    t_end = float(t.get("t_stop", src.get("dilute_exit_T") or src["points"][0]["T"]))
+                    t0 = min(src["points"], key=lambda p: abs(p["T"] - t_end))  # the source point it closes on
                     kw = {k: t[k] for k in cfg_keys if k in t}
                     kw.update(mu0_se=top["mu_se"], x_a0=top["a"]["x"], x_g0=top["g"]["x"])
-                    cfg = TraceConfig(t0=top["T"], mu0=top["mu"], t_stop=float(t.get("t_stop", t0["T"])), **kw)
+                    cfg = TraceConfig(t0=top["T"], mu0=top["mu"], t_stop=t_end, **kw)
                     print(f"[trace] {t['name']}: retracing DOWN from {t['retrace_from']}'s top point T={top['T']:g} K "
                           f"mu={top['mu']:.5f}+-{top['mu_se']:.4f} (gap {top['g']['x'] - top['a']['x']:.3f}) "
                           f"to {cfg.t_stop:g} K", flush=True)
                     result = Tracer(cfg, engine, tdir / "trace.json").run(top["state_a"], top["state_g"])
                     end = min(result["points"], key=lambda p: abs(p["T"] - t0["T"]))
-                    closure = dict(start_T=t0["T"], start_mu=t0["mu"], start_mu_se=t0["mu_se"], retrace_T=end["T"],
+                    closure = dict(start_T=t0["T"], start_mu=t0["mu"], start_mu_se=t0["mu_se"],
+                                   start_anchored=bool(t0.get("anchored")), retrace_T=end["T"],
                                    retrace_mu=end["mu"], retrace_mu_se=end["mu_se"], dmu_meV=1e3 * (end["mu"] - t0["mu"]),
                                    x_alpha=[t0["a"]["x"], end["a"]["x"]], x_gamma=[t0["g"]["x"], end["g"]["x"]],
                                    stop_reason=result["stop_reason"])
                     (tdir / "closure.json").write_text(json.dumps(closure, indent=2) + "\n")
                     print(f"[trace] {t['name']}: closure at {end['T']:g} K: retrace mu {end['mu']:.5f}+-{end['mu_se']:.4f} "
-                          f"vs start {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)", flush=True)
+                          f"vs source point {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)", flush=True)
                 else:
-                    cfg = TraceConfig(**{k: t[k] for k in ("t0", "mu0", "t_stop")}, **{k: t[k] for k in cfg_keys if k in t})
+                    cfg = TraceConfig(t0=t["t0"], mu0=t.get("mu0"), t_stop=t["t_stop"], dilute_dG=dilute_table(t),
+                                      **{k: t[k] for k in cfg_keys if k in t})
                     result = Tracer(cfg, engine, tdir / "trace.json").run(t["alpha_state"], t["gamma_state"])
                 print(f"[trace] {t['name']}: {result['status']}: {result['stop_reason']} "
                       f"({len(result['points'])} points)", flush=True)

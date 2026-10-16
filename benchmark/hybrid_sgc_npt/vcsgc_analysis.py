@@ -52,6 +52,7 @@ import numpy as np
 
 KB_EV = 8.617333262e-5
 WINDOW = 25
+MIN_OWN_PRODUCTION = 20  # blocks, for series that carry their own production_start
 
 
 def batch_means_se(x: np.ndarray, n_batches: int = 5) -> float:
@@ -85,14 +86,21 @@ def walker_table(paths: list[Path], discard: float) -> list[dict]:
     for p in paths:
         s = json.loads(p.read_text())
         c = np.array(s["c"])
-        if len(c) < 2 * WINDOW:
+        # A driver with its own equilibration rule (np_canonical_handoff_benchmark.py) states where its
+        # production starts; such series may be shorter than two windows.
+        own_start = s.get("production_start")
+        if own_start is None and len(c) < 2 * WINDOW:
+            continue
+        if own_start is not None and len(c) - int(own_start) < MIN_OWN_PRODUCTION:
             continue
         T, kappa, n = s["temperature_K"], s["kappa"], s["n_atoms"]
         # Production: from the start of the windows the live gate first found stationary (the
         # driver stopped the walker after enough consecutive passes), never inside the burn-in the
         # driver excluded from its gate (``burn_in_blocks``, 0 if absent); otherwise drop --discard.
         passes = [g for g in s.get("gate", []) if g["passed"]]
-        if s.get("stopped") == "equilibrated" and passes:
+        if own_start is not None:
+            start = int(own_start)
+        elif s.get("stopped") == "equilibrated" and passes:
             start = max(passes_run_start(s["gate"]) - 2 * WINDOW, int(s.get("burn_in_blocks", 0)))
         else:
             start = int(discard * len(c))
@@ -100,9 +108,10 @@ def walker_table(paths: list[Path], discard: float) -> list[dict]:
         u = np.array(s["u"])[start:]
         v = np.array(s["v"])[start:]
         cbar, se = float(prod.mean()), batch_means_se(prod)
-        last, prev = c[-WINDOW:], c[-2 * WINDOW : -WINDOW]
+        win = min(WINDOW, len(c) // 2)
+        last, prev = c[-win:], c[-2 * win : -win]
         drift = float(last.mean() - prev.mean())
-        comb = math.hypot(last.std() / math.sqrt(WINDOW), prev.std() / math.sqrt(WINDOW))
+        comb = math.hypot(last.std() / math.sqrt(win), prev.std() / math.sqrt(win))
         stopped = s.get("stopped")
         rows.append(
             dict(

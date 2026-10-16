@@ -21,6 +21,12 @@
   cutoff neighbor search independent of the energy model's own interaction
   neighbor list, so it stays valid on the disordered geometry produced by a
   finite-temperature MD block.
+- GPU-resident canonical `NonlocalSwap` Monte Carlo: exchanges the species of
+  two unlike atoms anywhere in a graph (no neighbour graph), so one accepted
+  move carries a solute across the system, e.g. between a nanoparticle's core
+  and surface. The draw (a uniform atom, then a uniform atom of another
+  species) is symmetric at fixed composition, so plain Metropolis is exact;
+  device-only, with an exact-enumeration detailed-balance test.
 - GPU-resident binary variance-constrained semi-grand-canonical (`VCSGC`)
   Monte Carlo (Sadigh et al., Phys. Rev. B 85, 184203, 2012). It reuses `SGC`'s
   single-site transmutations with a quadratic concentration constraint, so a

@@ -330,9 +330,19 @@ Per-element energy offsets put the system's own `mu_B - mu_A` electronvolts
 away from zero, while the constraint can supply at most `2 kappa`, so without
 the calibrated reference (the same one an SGC scan is centred on) the walker
 runs to the favoured end member instead of sampling near the target.
-Composition-conserving Kawasaki sampling will be added as a separate MC style;
-it is intentionally not exposed until its local proposal graph and detailed
-balance tests are complete.
+Two canonical (fixed-composition) samplers swap species instead of
+transmuting them. `Kawasaki` exchanges a nearest-neighbour unlike pair drawn
+from a short-range proposal graph, so solutes move one bond at a time.
+`NonlocalSwap` exchanges two unlike atoms anywhere in the graph, so one
+accepted move can take a solute from a nanoparticle's core to its surface.
+Neither needs a chemical potential or a reference, and with a fixed
+composition both can run on a merged UMA model:
+
+```python
+from nvalchemi.mc import NonlocalSwap
+
+mc = NonlocalSwap(model=model, temperature=400.0, random_seed=1)
+```
 
 ## Hybrid MC-MD blocks
 

@@ -33,7 +33,13 @@ tangent on a dense grid. Checks:
         keeps every point within 4 meV and reaches t_stop, where the plain tracer stops early;
         also through an engine without run_one (the fallback path);
   7. an engine that reports phase_ok=False for the alpha walker above 1100 K (it "melts"): the
-     upward trace must stop below 1100 K with "a new phase appeared", without recentering.
+     upward trace must stop below 1100 K with "a new phase appeared", without recentering;
+  8. fast upward pass in dilute (anchored) mode: start at 500 K with mu0 = None from the pure
+     phases' dG (here e_B, T-independent), 100 K steps (dt_floor), one walker per phase. Anchored
+     points must match the exact dmu_coex and x, the trace must leave the dilute regime by itself
+     (dilute-exit) below T_c and then reach the top of the gap with eq. (29);
+  9. retrace DOWN from that trace's top with a loosened corrector (tol_mu 4 meV) to its
+     dilute_exit_T: within 5 meV of the anchored point there, every point within 5 meV of exact.
 
     python test_boundary_tracer.py [--out dir]
 """
@@ -404,6 +410,46 @@ def main():
     print(
         f"[7] walker 'melts' above 1100 K: highest traced T {top7:.1f} K, stop='{tr7['stop_reason']}'  -> {'PASS' if good7 else 'FAIL'}"
     )
+
+    # 8. fast upward pass, anchored (dilute) start
+    dG_table = {float(T): EB for T in range(300, 1501, 50)}  # pure phases: G_A = 0, G_B = e_B
+    eng8 = MeanFieldEngine(seed=9)
+    cfg8 = TraceConfig(t0=500.0, mu0=None, t_stop=1400.0, dt=100.0, dt_floor=100.0, dt_max=200.0, dt_min=12.5,
+                       dilute_dG=dG_table)
+    tr8 = BoundaryTracer(cfg8, eng8, out / "fast_up.json", log=quiet).run(dict(branch="low"), dict(branch="high"))
+    anch = [p for p in tr8["points"] if p.get("anchored")]
+    e8 = [(p["T"], p["mu"] - mu_coex(p["T"]), p["a"]["x"] - truth(L0, L1, EB, p["T"])["x_alpha"],
+           p["g"]["x"] - truth(L0, L1, EB, p["T"])["x_gamma"]) for p in anch]
+    worst8 = max(abs(d) for r in e8 for d in r[1:])
+    exit_T = tr8.get("dilute_exit_T")
+    top8 = max(p["T"] for p in tr8["points"])
+    good8 = (len(anch) >= 2 and worst8 < 0.01 and exit_T is not None and exit_T < tc - 100
+             and top8 > tc - 120 and top8 < tc)
+    ok &= good8
+    print(f"[8] fast dilute-anchored upward pass: {len(anch)} anchored points "
+          + ", ".join(f"{T:.0f} K ({d * 1e3:+.2f} meV)" for T, d, _, _ in e8)
+          + f"; dilute exit after {exit_T} K ({[e.get('reason') for e in tr8['events'] if e['kind'] == 'dilute-exit']}); "
+          f"top {top8:.1f} K vs T_c {tc:.1f} K, {eng8.calls} engine calls, stop='{tr8['stop_reason']}'"
+          f"  -> {'PASS' if good8 else 'FAIL'}")
+
+    # 9. retrace down from the fast pass's top, loosened corrector, to its dilute_exit_T
+    tops = [p for p in tr8["points"] if p["g"]["x"] - p["a"]["x"] >= 0.15]
+    top = max(tops, key=lambda p: p["T"])
+    eng9 = MeanFieldEngine(seed=10)
+    cfg9 = TraceConfig(t0=top["T"], mu0=top["mu"], mu0_se=top["mu_se"], t_stop=exit_T, dt=50.0, dt_max=100.0,
+                       tol_mu=0.004, max_corr=1)
+    tr9 = BoundaryTracer(cfg9, eng9, out / "fast_retrace.json", log=quiet).run(
+        dict(branch="low"), dict(branch="high"))
+    end = min(tr9["points"], key=lambda p: abs(p["T"] - exit_T))
+    anchor = min(anch, key=lambda p: abs(p["T"] - exit_T))
+    closure = end["mu"] - anchor["mu"]
+    e9 = mu_errors(tr9)
+    worst9 = max(abs(d) for _, d, _ in e9)
+    good9 = abs(closure) < 0.005 and worst9 < 0.005 and tr9["stop_reason"] == "reached t_stop"
+    ok &= good9
+    print(f"[9] retrace {top['T']:.0f} -> {exit_T:.0f} K (tol_mu 4 meV): closure on the anchored point "
+          f"{closure * 1e3:+.2f} meV, worst error vs exact {worst9 * 1e3:.2f} meV over {len(e9)} points, "
+          f"{eng9.calls} engine calls  -> {'PASS' if good9 else 'FAIL'}")
 
     report(
         [str(out / "down.json"), str(out / "up.json")],

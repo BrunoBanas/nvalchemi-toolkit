@@ -134,6 +134,14 @@ give the slope, and no anchor is needed after the starting point.
 - Error stability (eq. 31): errors decay where the gap widens (usually downward in
   T) and grow toward T_c. T_c is estimated from gap = A(T_c − T)^β_c fitted to
   the last points (β_c = 0.326 for 3D Ising, 0.5 for mean-field models).
+- Dilute anchoring (tracer 1.4, `dilute_dG`, `mu0=None`): while both phases are
+  dilute, Δμ_coex = dG(T) + kT ln[x_γ/(1 − x_α)] from the pure phases' free-energy
+  difference (pure_free_energy_analysis.py --dg-table) and the walkers' own x, so the
+  trace needs no starting coexistence point and its low-T points carry independent
+  errors. It switches to eq. 29 when formula and eq. 29 differ by > `dilute_tol`
+  (3 meV) or a solute fraction exceeds `dilute_x_max` (0.15), recording
+  `dilute_exit_T`. `dt_floor` holds a minimum step until the first rejection.
+  Self-test checks 8 and 9 cover the anchored upward pass and the retrace to it.
 
 ## Validation
 

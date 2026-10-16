@@ -37,13 +37,24 @@ The number the phase boundary depends on is
 i.e. how far the free-energy difference sits from the energy-only delta_mu_ref. In the dilute
 limit dmu_excess,coex ~ dG_excess + kT [x_Pt(alpha) - x_Au(gamma)].
 
+--internal-reference puts each element on its own NPT ladder's energy zero: dh(T) is refitted with
+a free constant, which is added to e0 (the static e0 comes from a single-cell evaluation that can
+sit a few tenths of a meV off the batched ladder/SGC evaluation path; for Au-Pt at 700 K this
+moved dG_excess from +65.0 to +70.1 meV). Use it for anything compared with SGC chemical potentials.
+
+--dg-table writes pure_dG.json, {"<T>": {"dG": g_Pt - g_Au, "se": ...}} (eV/atom) at the ladder
+temperatures plus --temperature: the pure-phase anchor of boundary_tracer.py's dilute mode
+(dmu_coex = dG + kT ln[x_gamma / (1 - x_alpha)] while both phases stay dilute). Only temperatures
+inside the ladder range are written (the anharmonic fit is not extrapolated).
+
     python pure_free_energy_analysis.py <dir with Au.json, Pt.json> --out <dir> \
-        [--temperature 700] [--calibration auto_reference_energies.json]
+        [--temperature 700] [--calibration auto_reference_energies.json] [--internal-reference] [--dg-table]
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 from pathlib import Path
@@ -200,6 +211,16 @@ def analyse_element(state: dict, order: int, delta: str | None) -> dict:
     )
 
 
+def analyse_internal(state: dict, order: int, delta: str | None) -> dict:
+    """analyse_element with e0 shifted onto the ladder's own zero (the free T -> 0 limit of dh)."""
+    el = analyse_element(state, order, delta)
+    shifted = copy.deepcopy(state)
+    shifted["lattice"]["e0"] += el["dh_T0_limit_if_free"]
+    out = analyse_element(shifted, order, delta)
+    out["e0_shift_internal"] = el["dh_T0_limit_if_free"]
+    return out
+
+
 def harmonic_ts(el: dict, T: float) -> float:
     """g_harm - h_harm + P v0 = -T s_harm (+ the common constant): the harmonic-only excess."""
     e0, pv0, sum_ln, n, kb = el["_consts"]
@@ -230,10 +251,15 @@ def main() -> None:
     ap.add_argument("--order", type=int, default=4, choices=[3, 4, 5], help="highest power in the dh(T) fit")
     ap.add_argument("--delta", default=None, help="finite-difference displacement to use (default: smallest)")
     ap.add_argument("--calibration", type=Path, help="auto_reference_energies.json from the SGC scan, for comparison")
+    ap.add_argument("--internal-reference", action="store_true",
+                    help="shift each e0 onto its NPT ladder's zero (free constant in the dh fit); see above")
+    ap.add_argument("--dg-table", action="store_true",
+                    help="also write pure_dG.json (g_Pt - g_Au per T) for boundary_tracer.py's dilute mode")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    els = {s: analyse_element(json.loads((args.root / f"{s}.json").read_text()), args.order, args.delta) for s in SPECIES}
+    analyse = analyse_internal if args.internal_reference else analyse_element
+    els = {s: analyse(json.loads((args.root / f"{s}.json").read_text()), args.order, args.delta) for s in SPECIES}
     cal = json.loads(args.calibration.read_text())["reference"] if args.calibration else {}
 
     pure, table = {}, []
@@ -262,6 +288,18 @@ def main() -> None:
         table.append(row)
 
     (args.out / "pure_free_energies.json").write_text(json.dumps(pure, indent=2) + "\n")
+    if args.dg_table:
+        lo = max(min(e["ladder_T"]) for e in els.values())
+        hi = min(max(e["ladder_T"]) for e in els.values())
+        grid = sorted({t for e in els.values() for t in e["ladder_T"]} | set(args.temperature))
+        dg = {}
+        for T in (t for t in grid if lo <= t <= hi):
+            (ga, ga_se), (gb, gb_se) = g_of_T(els["Au"], T), g_of_T(els["Pt"], T)
+            dg[f"{T:g}"] = {"dG": gb - ga, "se": math.hypot(ga_se, gb_se)}
+        (args.out / "pure_dG.json").write_text(json.dumps(dict(
+            convention="dG = g_Pt - g_Au (eV/atom), classical Gibbs energy at the run pressure"
+            + (", each element on its NPT ladder's energy zero" if args.internal_reference else ""),
+            internal_reference=bool(args.internal_reference), table=dg), indent=2) + "\n")
     summary = dict(
         elements={s: {k: v for k, v in e.items() if not k.startswith("_")} for s, e in els.items()},
         temperatures=table,
