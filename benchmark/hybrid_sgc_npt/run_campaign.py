@@ -293,6 +293,10 @@ SIZE_REPEATS: dict[int, tuple[int, int, int]] = {
     108: (3, 3, 3),
     256: (4, 4, 4),
     500: (5, 5, 5),
+    # 1000: the 500-atom cell doubled along z (the only fcc supercell with exactly 1000 atoms);
+    # 20 A x 20 A x 40 A, so a slab of the other phase across the short axes costs the same
+    # interface area as at 500 atoms while the volume doubles.
+    1000: (5, 5, 10),
     1372: (7, 7, 7),
     2048: (8, 8, 8),
     4000: (10, 10, 10),
