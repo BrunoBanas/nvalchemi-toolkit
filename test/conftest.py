@@ -15,10 +15,17 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pytest
 import torch
 import torch.distributed as dist
+
+from nvalchemi.data import atomic_data
+
+if TYPE_CHECKING:
+    from nvalchemi.data.batch import Batch
 
 
 def _cueq_ops_registered() -> bool:
@@ -51,24 +58,26 @@ def _fairchem_installed() -> bool:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Auto-skip environment-gated tests so they skip (not fail) where a
-    capability is absent:
+    """Skip tests when required hardware or dependencies are unavailable.
 
-    * ``@pytest.mark.multigpu`` — needs >=2 CUDA GPUs (override with
-      ``NVALCHEMI_FORCE_MULTIGPU=1`` to see the underlying error).
-    * ``@pytest.mark.requires_cueq`` — needs the ``cuequivariance`` torch ops
-      *registered* (not merely the package installed).
-    * ``@pytest.mark.requires_uma`` — needs ``fairchem-core`` installed.
+    Parameters
+    ----------
+    config : pytest.Config
+        Pytest configuration for this collection run.
+    items : list[pytest.Item]
+        Collected test items to mark for skipping.
+
+    Notes
+    -----
+    ``@pytest.mark.multigpu`` accepts integer ``min_gpus`` >= 2 (default 2).
+    ``NVALCHEMI_FORCE_MULTIGPU=1`` bypasses the device-count gate.
+    ``requires_cueq`` needs registered cuequivariance ops, and ``requires_uma``
+    needs ``fairchem-core`` installed.
     """
     import os
 
     force_multigpu = os.environ.get("NVALCHEMI_FORCE_MULTIGPU") == "1"
-    have_multigpu = torch.cuda.is_available() and torch.cuda.device_count() >= 2
-    skip_multigpu = (
-        None
-        if (force_multigpu or have_multigpu)
-        else pytest.mark.skip(reason="requires >=2 CUDA GPUs (mark: multigpu)")
-    )
+    available_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     skip_cueq = (
         None
         if _cueq_ops_registered()
@@ -80,8 +89,27 @@ def pytest_collection_modifyitems(
         else pytest.mark.skip(reason="fairchem-core not installed")
     )
     for item in items:
-        if skip_multigpu is not None and "multigpu" in item.keywords:
-            item.add_marker(skip_multigpu)
+        multigpu_marker = item.get_closest_marker("multigpu")
+        if multigpu_marker is not None:
+            min_gpus = multigpu_marker.kwargs.get("min_gpus", 2)
+            if (
+                isinstance(min_gpus, bool)
+                or not isinstance(min_gpus, int)
+                or min_gpus < 2
+            ):
+                raise pytest.UsageError(
+                    f"{item.nodeid}: multigpu min_gpus must be an integer >= 2; "
+                    f"got {min_gpus!r}"
+                )
+            if not force_multigpu and available_gpus < min_gpus:
+                marker_name = (
+                    "multigpu" if min_gpus == 2 else f"multigpu(min_gpus={min_gpus})"
+                )
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason=f"requires >={min_gpus} CUDA GPUs (mark: {marker_name})"
+                    )
+                )
         if skip_cueq is not None and "requires_cueq" in item.keywords:
             item.add_marker(skip_cueq)
         if skip_uma is not None and "requires_uma" in item.keywords:
@@ -105,6 +133,17 @@ def _dist_leak_guard():
             dist.destroy_process_group()
 
 
+@pytest.fixture(autouse=True)
+def _reset_fp_cast_warned() -> None:
+    """Clear the process-global fp-cast warning cache before each test.
+
+    ``check_fp_dtype_consistency`` dedups its cast warning per ``(field, dtype)``
+    across all constructions, so without this reset warning assertions would
+    depend on test order (an earlier test could consume the only warning for a
+    given field/dtype)."""
+    atomic_data._FP_CAST_WARNED.clear()
+
+
 @pytest.fixture(params=["cpu", "cuda"])
 def device(request) -> str:
     """Return either CPU or GPU device; skips GPU if torch.cuda is unavailable."""
@@ -125,3 +164,33 @@ def gpu_device(request) -> str:
 def fixed_torch_seed() -> None:
     """Set a fixed PyTorch RNG seed for tests that compare random tensors."""
     torch.manual_seed(0)
+
+
+@pytest.fixture
+def hessian_batch_factory() -> Callable[..., Batch]:
+    """Build a Hessian-bearing Batch for lifecycle and Zarr tests."""
+    from nvalchemi.data.atomic_data import AtomicData
+    from nvalchemi.data.batch import Batch
+
+    def make_batch(*num_nodes: int, offset: float = 0.0) -> Batch:
+        data = [
+            AtomicData(
+                positions=torch.arange(count * 3, dtype=torch.float64).reshape(
+                    count, 3
+                ),
+                atomic_numbers=torch.ones(count, dtype=torch.long),
+            )
+            for count in num_nodes
+        ]
+        batch = Batch.from_data_list(data, device="cpu")
+        batch.add_product_level("atom_atom", left="atoms", right="atoms")
+        blocks = [
+            torch.arange(count * count * 9, dtype=torch.float64)
+            .reshape(count, count, 3, 3)
+            .add(offset + index * 1000.0)
+            for index, count in enumerate(num_nodes)
+        ]
+        batch.add_key("hessian", blocks, level="atom_atom")
+        return batch
+
+    return make_batch

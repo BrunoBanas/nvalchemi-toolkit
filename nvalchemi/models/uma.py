@@ -31,7 +31,7 @@ Usage
 
     from nvalchemi.models.uma import UMAWrapper
 
-    # OMol molecular potential
+    # OMol potential
     mol_wrapper = UMAWrapper.from_checkpoint(
         "uma-s-1p1", task_name="omol", device="cuda"
     )
@@ -44,13 +44,15 @@ Usage
 Notes
 -----
 * Energy is the primitive differentiable output; forces and (for
-  periodic tasks) stress are derived via autograd.
+  all UMA tasks) stress are derived via autograd. OMol stress is requested
+  automatically when its checkpoint is loaded.
 * OMol requires a total-charge field; the wrapper reads ``charge`` off
   the input ``AtomicData`` / ``Batch`` and defaults to 0 if absent.
   Spin multiplicity (``spin`` on the batch) defaults to 1 for OMol and
-  0 for periodic tasks.
-* ``active_outputs`` is task-aware: ``{"energy", "forces"}`` for
-  molecular tasks, ``{"energy", "forces", "stress"}`` for periodic.
+  0 for all other tasks.
+* ``active_outputs`` defaults to ``{"energy", "forces", "stress"}`` for
+  every task. Cell-less OMol inputs omit stress; otherwise stress has shape
+  ``[B, 3, 3]`` in FairChem's configured base precision.
 
 ``torch.compile``
 -----------------
@@ -61,13 +63,13 @@ internally: it is a field on ``fairchem.core.units.mlip_unit.api.inference.Infer
 (``compile: bool``), not a ``torch.compile(model)`` call. Reach it
 through :meth:`from_checkpoint`'s ``inference_settings`` argument:
 
-* ``inference_settings="turbo"`` — fairchem's optimized preset, which
-  sets ``compile=True`` **and** ``tf32=True`` / ``merge_mole=True`` /
-  ``activation_checkpointing=False``. Best for long simulations with
-  fixed atomic composition; it changes numerics relative to ``"default"``.
-* For a pure compile toggle, pass an ``InferenceSettings`` instance with
-  ``compile=True`` and the other fields left at their ``"default"``
-  values::
+* ``inference_settings="default"`` — fairchem 2.22's compiled, merged-MoLE
+  FP32 preset for fixed-composition inference.
+* ``inference_settings="batch"`` — eager, unmerged inference for changing
+  batch composition.
+* ``inference_settings="turbo"`` — the compiled, merged preset with TF32
+  enabled for more speed at slightly lower precision.
+* For reproducible controls, pass an ``InferenceSettings`` instance::
 
       from fairchem.core.units.mlip_unit.api.inference import (
           InferenceSettings,
@@ -77,13 +79,20 @@ through :meth:`from_checkpoint`'s ``inference_settings`` argument:
           "uma-s-1p1",
           task_name="omat",
           device="cuda",
-          inference_settings=InferenceSettings(compile=True),
+          inference_settings=InferenceSettings(
+              compile=False,
+              merge_mole=False,
+              tf32=False,
+              activation_checkpointing=False,
+              execution_mode="general",
+          ),
       )
 """
 
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import warnings
 from dataclasses import dataclass
@@ -125,9 +134,6 @@ UMATask = Literal["omol", "omat", "oc20", "odac", "omc"]
 #: Shape mode of fairchem's torch.compile (see ``UMAWrapper.from_checkpoint``).
 CompileShapes = Literal["auto", "static", "dynamic"]
 _UMA_TASKS: frozenset[str] = frozenset(get_args(UMATask))
-
-# Tasks that declare PBC (stress supported). ``omol`` is molecular — no stress.
-_PBC_TASKS: frozenset[str] = frozenset({"omat", "oc20", "odac", "omc"})
 
 # Autograd-derived fairchem task properties that UMAWrapper can skip when
 # ``active_outputs`` does not ask for them (see ``_gate_derivative_heads``).
@@ -353,7 +359,7 @@ def _pad_capped_graph(
     # graph above spans all atoms — keep only the edges whose receiver this rank
     # owns (the contiguous ``[nlo : nlo+n_owned)`` block), matching the node-wise
     # work the backbone runs on the owned slice. ``nlo`` also anchors the dead
-    # edge below so it lands on an owned row after the ``gp_node_offset`` shift.
+    # edge below so its receiver maps to row zero in the local scatter target.
     nlo = 0
     if not cap_atoms:
         from nvalchemi.distributed._core.context import (  # noqa: PLC0415
@@ -429,8 +435,8 @@ def _pad_capped_graph(
     # With dead atoms (halo): hang the edge off the two dead anchors at indices
     # [n_real, n_real+1], whose 2*cutoff separation gives a zero envelope.
     # Without dead atoms (node partition): self-loop on this rank's first owned
-    # atom ``nlo`` (so it stays an owned receiver after the ``gp_node_offset``
-    # shift) with a large cell offset so the image sits well beyond the cutoff.
+    # atom ``nlo`` (so it stays an owned receiver and maps to local row zero)
+    # with a large cell offset so the image sits well beyond the cutoff.
     if e_dead > 0:
         if n_dead >= 2:
             a, b = n_real, n_real + 1
@@ -674,8 +680,8 @@ def _distributed_partition_graph(
     rank's owned receivers (``otf_graph=False``), so ``original`` here just derives
     the per-edge distances for it. This adapter then slices the per-node inputs
     (atomic numbers, system index) to the owned ``[nlo : nlo+n_owned)`` block and
-    sets ``gp_node_offset`` so the per-layer edge→node scatter lands on the owned
-    rows. The node slice runs *after* fairchem's ``forward`` stashes
+    maps each global edge receiver to its owned-local row in ``scatter_target``.
+    The node slice runs *after* fairchem's ``forward`` stashes
     ``atomic_numbers_full`` (from the full ``atomic_numbers`` at entry), so the edge
     source/target embeddings still index global senders; the per-layer sender
     all-gather is injected at ``Edgewise`` (:func:`_distributed_edgewise_gather`).
@@ -696,7 +702,15 @@ def _distributed_partition_graph(
     nlo, n_owned = _node_partition_bounds(ctx)
     data_dict["atomic_numbers"] = data_dict["atomic_numbers"][nlo : nlo + n_owned]
     data_dict["batch"] = data_dict["batch"][nlo : nlo + n_owned]
-    data_dict["gp_node_offset"] = nlo
+    scatter_target = gd["edge_index"][1] - nlo
+    if scatter_target.numel() and (
+        (scatter_target < 0).any() or (scatter_target >= n_owned).any()
+    ):
+        raise RuntimeError(
+            "UMA graph partition contains an edge whose receiver is outside "
+            "this rank's owned atom block."
+        )
+    data_dict["scatter_target"] = scatter_target
     return gd
 
 
@@ -710,8 +724,9 @@ def _distributed_edgewise_gather(
     edge_index: "torch.Tensor",
     wigner: "torch.Tensor",
     wigner_inv_envelope: "torch.Tensor",
-    *args: Any,
-    **kwargs: Any,
+    total_atoms_across_gp_ranks: int,
+    scatter_target: "torch.Tensor | None" = None,
+    gp_ctx: Any = None,
 ) -> Any:
     """All-gather owned node features to the full set for the conv (node-partition).
 
@@ -719,15 +734,18 @@ def _distributed_edgewise_gather(
     convolution reads source features for globally-indexed edges, so all-gather
     the owned rows to the full replicated tensor (``refresh_neighbors`` → the
     policy's owned→full all-gather, reduce-scatter on the backward) and run
-    ``Edgewise.forward_chunk`` with the *owned* row count as the scatter target
-    and ``node_offset`` shifting global receivers into the owned-local range.
+    ``Edgewise.forward_chunk`` with the *owned* row count and Fairchem's
+    precomputed owned-local ``scatter_target``.
     Replaces — not wraps — ``Edgewise.forward``, bypassing the stock ``gp_utils``
     gather branch and activation-checkpoint chunking (graph parallel disables AC).
 
     ``@distributed_method`` falls back to the stock forward off any distributed
     path (single process).
     """
-    node_offset = kwargs.get("node_offset", 0)
+    if scatter_target is None:
+        raise RuntimeError(
+            "Fairchem did not provide scatter_target for UMA graph partitioning."
+        )
     n_owned = x.shape[0]
     x_full = refresh_neighbors(x)
     return edgewise_self.forward_chunk(
@@ -737,7 +755,7 @@ def _distributed_edgewise_gather(
         edge_index,
         wigner,
         wigner_inv_envelope,
-        node_offset,
+        scatter_target,
     )
 
 
@@ -956,20 +974,18 @@ def _distributed_set_mole_coefficients(
 ) -> Any:
     """Caps-aware replacement for ``eSCNMDMoeBackbone.set_MOLE_coefficients``.
 
-    The MoLE expert-mixing coefficients depend on a per-system mean of the
-    composition embedding. Under domain decomposition the input carries this rank's
-    ``owned + ghost`` atoms plus inert dead atoms (``Z=0``) from the caps padder
-    (see :func:`_pad_capped_graph`); both pollute the stock mean (dead rows add a
-    ``Z=0`` embedding, and a per-rank mean differs from the global one), shifting
-    every MoLE-linear weight by a small per-system amount.
+    Fairchem chooses the merged MoLE weights from the average atom composition.
+    In a distributed run, each rank also holds ghost atoms and ``Z=0`` padding.
+    Including those rows changes the average and can give each rank different
+    merged weights.
 
-    The fix mirrors the energy reduction: average the composition embedding over
-    this rank's **owned** real atoms only (``Scope.OWNED`` drops ghost and dead
-    rows) and all-reduce across the mesh, yielding the global per-system mean the
-    single-process model computes. The remaining routing (``routing_mlp`` +
-    coefficient norm) is unchanged. ``@distributed_method`` falls back to stock off
-    the halo path. The merged path (compiled / ``merge_mole``) runs on CPU where
-    the mesh collective is unavailable and is already exact, so it too uses stock.
+    Instead, this adapter keeps only the real atoms owned by each rank, sums their
+    composition embeddings across all ranks, and divides by the global atom count.
+    The result matches the composition average from a single-GPU run. The wrapper
+    moves Fairchem's one-time lazy merge to CUDA before this method runs, so the
+    reduction uses the existing NCCL process group without copying data to CPU.
+    Outside distributed inference, ``@distributed_method`` calls Fairchem's method
+    unchanged.
 
     Parameters
     ----------
@@ -992,31 +1008,28 @@ def _distributed_set_mole_coefficients(
         ``None`` — the coefficients are written onto
         ``backbone_self.global_mole_tensors`` in place, matching fairchem.
     """
-    import numpy as _np  # noqa: PLC0415
-
-    # No experts, no composition gating, or the CPU merge prep where the mesh
-    # collective can't run (and the merged path is already exact): use stock.
-    if (
-        backbone_self.num_experts == 0
-        or not getattr(backbone_self, "use_composition_embedding", False)
-        or not atomic_numbers_full.is_cuda
+    # With no composition-dependent experts there is nothing distribution-specific.
+    if backbone_self.num_experts == 0 or not getattr(
+        backbone_self, "use_composition_embedding", False
     ):
         return original(backbone_self, atomic_numbers_full, batch_full, csd_mixed_emb)
 
     nsys = int(csd_mixed_emb.shape[0])
+    # Distributed CUDA inference is the only path that needs this override. A CPU
+    # call cannot use the NCCL mesh, so leave it to Fairchem's local implementation.
+    if not atomic_numbers_full.is_cuda:
+        return original(backbone_self, atomic_numbers_full, batch_full, csd_mixed_emb)
+
     with torch.autocast(device_type=atomic_numbers_full.device.type, enabled=False):
-        # ``system_sum`` slices this rank's owned rows (offset-aware), dropping
-        # ghost and dead rows, so the full rows are passed here.
+        # system_sum selects owned rows before the all-reduce. Ghost atoms and the
+        # Z=0 rows used to hold compiled shapes therefore contribute nothing.
         comp_by_atom = backbone_self.composition_embedding(atomic_numbers_full)
-        # Global per-system sum + owned count, both all-reduced across the mesh.
         comp_sum = system_sum(comp_by_atom, batch_full, nsys, scope=Scope.OWNED)
         ones = comp_by_atom.new_ones(comp_by_atom.shape[0], 1)
         count = system_sum(ones, batch_full, nsys, scope=Scope.OWNED)
-        # fairchem's index_reduce(mean, include_self) seeds an extra zero row on
-        # model_version 1.0; match it so the denominator is identical.
-        include_self = (
-            1.0 if _np.isclose(backbone_self.model_version, 1.0).item() else 0.0
-        )
+
+        # UMA-S-1.2 intentionally retains Fairchem's historical zero-seeded mean.
+        include_self = 1.0 if backbone_self.model_id == "UMA-S-1.2" else 0.0
         composition = comp_sum / (count + include_self).clamp_min(1.0)
 
         embeddings = [composition.unsqueeze(0), csd_mixed_emb[None]]
@@ -1038,18 +1051,20 @@ class UMAWrapper(nn.Module, BaseModelMixin):
     Wraps a :class:`fairchem.core.units.mlip_unit.MLIPPredictUnit` — the
     level at which energy / forces / stress are computed by fairchem
     (the raw backbone only produces node embeddings). Task is fixed at
-    construction; ``active_outputs`` reflects what that task supports.
+    construction; ``active_outputs`` selects which declared outputs are returned.
 
     Parameters
     ----------
     predict_unit : fairchem.core.units.mlip_unit.MLIPPredictUnit
-        Pre-loaded UMA prediction unit. Use :meth:`from_checkpoint` for
-        the typical construction path that resolves a registered
-        checkpoint name and downloads via HuggingFace Hub.
+        Pre-loaded UMA prediction unit configured to produce energy, forces,
+        and stress for ``task_name``. The wrapper uses its prediction tasks as
+        supplied. Use :meth:`from_checkpoint` to configure OMol stress during
+        checkpoint loading.
     task_name : str
         UMA task: one of ``_UMA_TASKS``. Determines which per-task head
-        in the multi-task model is used and which inputs (charge, spin)
-        must be populated.
+        in the multi-task model is used. OMol accepts cell-less molecular
+        inputs and defaults to neutral charge and singlet spin; with a supplied
+        cell, omitted PBC defaults to periodic for OMol.
     train : bool
         ``False`` (default) freezes all weights for inference (lossless for
         autograd forces); ``True`` keeps fairchem's trainable/frozen split
@@ -1058,7 +1073,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
     Attributes
     ----------
     model_config : ModelConfig
-        Task-dependent outputs + autograd + neighbor config.
+        Output, autograd, and neighbor configuration.
     task_name : str
         The UMA task this wrapper is pinned to.
     """
@@ -1093,7 +1108,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         self.predict_unit = predict_unit
         self.task_name = task_name
-        self._is_pbc_task = task_name in _PBC_TASKS
         self._cutoff = self._extract_cutoff()
         # Snapshot before anything prunes the tables: fairchem builds them in
         # MLIPPredictUnit.__init__, so this is the full as-loaded set.
@@ -1105,32 +1119,24 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         )
         self._warned_ungated = False
 
-        # Task-dependent output set. Energy + forces are universal;
-        # stress only makes sense for periodic tasks.
-        outputs: set[str] = {"energy", "forces"}
-        autograd_outputs: set[str] = {"forces"}
-        active_outputs: set[str] = {"energy", "forces"}
-        if self._is_pbc_task:
-            outputs.add("stress")
-            autograd_outputs.add("stress")
-            active_outputs.add("stress")
+        outputs = frozenset({"energy", "forces", "stress"})
 
         self.model_config = ModelConfig(
-            outputs=frozenset(outputs),
-            autograd_outputs=frozenset(autograd_outputs),
+            outputs=outputs,
+            autograd_outputs=frozenset({"forces", "stress"}),
             autograd_inputs=frozenset({"positions"}),
-            # All optional (not required for OMol) to keep one config shape
-            # across tasks — the adapter fills charge/spin defaults.
+            # Keep one config shape across tasks; the adapter fills charge and
+            # spin defaults, and the input adapter supplies missing cells/PBC.
             required_inputs=frozenset(),
             optional_inputs=frozenset({"cell", "charge", "spin", "tags"}),
             supports_pbc=True,
-            needs_pbc=self._is_pbc_task,
+            needs_pbc=task_name != "omol",
             neighbor_config=NeighborConfig(
                 cutoff=self._cutoff,
                 format=NeighborListFormat.COO,
                 half_list=False,
             ),
-            active_outputs=active_outputs,
+            active_outputs=set(outputs),
         )
 
         # Inference (train=False): freeze all weights — conservative forces
@@ -1174,9 +1180,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             or a local file path.
         task_name : str
             One of ``omol``, ``omat``, ``oc20``, ``odac``, ``omc``.
-            Defaults to ``omol`` (molecular chemistry) — the most
-            common entry point; override explicitly for crystals /
-            catalysis.
+            Defaults to ``omol`` (OMol25); override explicitly for OMat
+            crystals, catalysis, direct air capture, or molecular crystals.
         device : str | torch.device
             Target device for inference. Defaults to ``"cpu"``.
         inference_settings : InferenceSettings | str
@@ -1189,6 +1194,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             instance. ``torch.compile`` is reached through this argument
             — see the module docstring's *torch.compile* section.
             Defaults to ``"default"``.
+            For ``task_name="omol"``, a copied settings object adds ``"omol"``
+            to ``predict_untrained_stress`` before loading the checkpoint.
         overrides : dict | None
             Optional overrides forwarded to fairchem's inference-settings
             builder.
@@ -1224,6 +1231,21 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         from fairchem.core.calculate import pretrained_mlip  # noqa: PLC0415
         from fairchem.core.units.mlip_unit import load_predict_unit  # noqa: PLC0415
+
+        if task_name == "omol":
+            from fairchem.core.units.mlip_unit.api.inference import (  # noqa: PLC0415
+                guess_inference_settings,
+            )
+
+            settings = (
+                guess_inference_settings(inference_settings)
+                if isinstance(inference_settings, str)
+                else inference_settings
+            )
+            inference_settings = copy.copy(settings)
+            inference_settings.predict_untrained_stress = set(
+                inference_settings.predict_untrained_stress
+            ) | {"omol"}
 
         if isinstance(device, torch.device):
             device = device.type
@@ -1558,11 +1580,12 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         ``FAIRChemCalculator``, zero lattice vectors are completed with unit
         vectors (so 1D and 2D systems have a valid cell) and positions are
         folded into the cell along periodic directions; ``data.positions`` is
-        not modified.
-        Charge/spin default
-        per the ASE-calculator convention (per-system LongTensors; spin defaults
-        to the closed-shell singlet for OMol, 0 for periodic tasks) unless the
-        caller provides them on the batch.
+        not modified. For OMol, missing cell and PBC mean a nonperiodic
+        molecule; when a cell is supplied without PBC, PBC defaults to
+        periodic. Other tasks default missing PBC to periodic. Charge/spin
+        default per the ASE-calculator convention (per-system LongTensors; OMol
+        spin defaults to the closed-shell singlet, while other tasks default to
+        0) unless provided on the batch.
 
         Parameters
         ----------
@@ -1602,6 +1625,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         # Batch already shapes cell/pbc as (B, 3, 3) / (B, 3) — just cast.
         cell = getattr(data, "cell", None)
+        has_cell = cell is not None
         if cell is None:
             cell = torch.zeros(n_systems, 3, 3, dtype=target_dtype, device=device)
         else:
@@ -1613,8 +1637,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         pbc = getattr(data, "pbc", None)
         if pbc is None:
+            pbc_default = self.task_name != "omol" or has_cell
             pbc = torch.full(
-                (n_systems, 3), self._is_pbc_task, dtype=torch.bool, device=device
+                (n_systems, 3), pbc_default, dtype=torch.bool, device=device
             )
         else:
             pbc = pbc.to(torch.bool)
@@ -1643,10 +1668,10 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         spin = getattr(data, "spin", None)
         if spin is None:
-            # spin is the multiplicity (only used by the OMol head); default to
-            # the closed-shell singlet (1), matching FAIRChemCalculator. Open-
-            # shell systems must set it explicitly. Periodic heads ignore spin.
-            spin_default = 0 if self._is_pbc_task else 1
+            # spin is the multiplicity (used by the OMol head); default to the
+            # closed-shell singlet (1), matching FAIRChemCalculator. Other task
+            # heads ignore spin and default to 0.
+            spin_default = 1 if self.task_name == "omol" else 0
             spin = torch.full(
                 (n_systems,), spin_default, dtype=torch.long, device=device
             )
@@ -1697,13 +1722,16 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             fairchem's prediction dict: ``"energy"`` (per-system), ``"forces"``
             (per-atom ``[N, 3]``), and optionally ``"stress"`` (per-system).
         data : AtomicData | Batch | None, optional
-            The input system the outputs were computed for. Unused here.
+            The original input system. Cell-less OMol inputs omit stress. If
+            ``data`` is omitted, raw stress follows the usual shape and dtype
+            handling.
 
         Returns
         -------
         ModelOutputs
             The active subset of ``energy`` ``[B, 1]``, ``forces`` ``[N, 3]``, and
-            ``stress`` ``[B, 3, 3]``.
+            ``stress`` ``[B, 3, 3]``. Stress is converted to FairChem's configured
+            base precision.
         """
         out: dict[str, torch.Tensor] = {}
         active = self.model_config.active_outputs
@@ -1720,12 +1748,17 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             out["energy"] = energy
         if "forces" in active:
             out["forces"] = raw["forces"]
-        if "stress" in active and "stress" in raw:
+        cellless_omol = (
+            self.task_name == "omol"
+            and data is not None
+            and getattr(data, "cell", None) is None
+        )
+        if "stress" in active and "stress" in raw and not cellless_omol:
             stress = raw["stress"]
             if stress.dim() == 2 and stress.shape[-1] == 9:
                 # fairchem sometimes flattens stress; reshape to (n, 3, 3).
                 stress = stress.reshape(-1, 3, 3)
-            out["stress"] = stress
+            out["stress"] = stress.to(target_dtype)
 
         return out
 
@@ -1902,10 +1935,11 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         The single distribution touchpoint is ``ctx.maybe_pad_graph``, which under
         compiled domain decomposition pads the fairchem graph to stable per-rank
         shapes (a no-op single-process). The two blocks below handle fairchem's own
-        compile requirements: CPU routing for the first-call MoLE merge, and, under
-        domain decomposition only, forcing static shapes. Single-process runs keep
-        fairchem's own ``dynamic=True`` compile, so a compiled model stays compiled
-        while MD changes the graph's edge count every step.
+        compile requirements: moving the first-call MoLE merge to the requested
+        device, and, under domain decomposition only, forcing static shapes.
+        Single-process runs keep fairchem's own ``dynamic=True`` compile, so a
+        compiled model stays compiled while MD changes the graph's edge count
+        every step.
 
         Parameters
         ----------
@@ -1930,7 +1964,12 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             and settings is not None
             and (getattr(settings, "merge_mole", False) or compiling)
         ):
-            fc_data = fc_data.to(torch.device("cpu"))
+            # Fairchem prepares MoLE before its normal device move. Move both the
+            # model and first input now so routing and distributed reductions run
+            # on the requested device instead of mixing CPU and CUDA tensors
+            # (upstream #220; replaces this fork's earlier CPU routing).
+            self.predict_unit.move_to_device()
+            fc_data = fc_data.to(self.predict_unit.device)
         # Static shapes only pay with the fixed-shape caps domain decomposition pads
         # to (and its joint graph needs them). Single-process, the edge count changes
         # with every MD step: static compiles then recompile until dynamo's limit and

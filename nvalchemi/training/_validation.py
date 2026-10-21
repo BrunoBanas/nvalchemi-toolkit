@@ -111,7 +111,7 @@ class BatchValidationCallback(Protocol):
         ...
 
 
-def _ensure_reiterable_validation_data(value: Any) -> Any:
+def ensure_reiterable_validation_data(value: Any) -> Any:
     """Reject one-shot iterators so validation can restart each pass.
 
     Parameters
@@ -129,9 +129,9 @@ def _ensure_reiterable_validation_data(value: Any) -> Any:
     Raises
     ------
     ValueError
-        When ``value`` is not iterable at all, or when it is a one-shot
-        iterator (e.g. a generator) that cannot be re-iterated across
-        repeated validation passes.
+        If ``value`` is not iterable at all, or if it is a one-shot iterator
+        (e.g. a generator) that cannot be re-iterated across repeated
+        validation passes.
     """
     try:
         iterator = iter(value)
@@ -167,7 +167,7 @@ class ValidationConfig(BaseModel):
     ``validation_data`` must be a re-iterable container (``list``,
     ``DataLoader``, ``Dataset``, ...); a fresh iterator is drawn for every
     pass, so one-shot generators and bare iterators are rejected at
-    construction time (see ``_ensure_reiterable_validation_data``). The
+    construction time (see :func:`ensure_reiterable_validation_data`). The
     scheduling fields ``every_n_epochs`` and ``every_n_steps`` are mutually
     exclusive: set at most one to control cadence, or leave both unset to run
     validation only at the end of :meth:`TrainingStrategy.run`. When
@@ -239,7 +239,7 @@ class ValidationConfig(BaseModel):
 
     validation_data: Annotated[
         Iterable[Batch],
-        PlainValidator(_ensure_reiterable_validation_data),
+        PlainValidator(ensure_reiterable_validation_data),
         Field(
             description=(
                 "Re-iterable container (e.g. ``list``, ``DataLoader``, ``Dataset``) "
@@ -431,7 +431,14 @@ def _as_float64_scalar(value: torch.Tensor, device: torch.device) -> torch.Tenso
 
 
 class _LossAccumulator:
-    """Accumulate composed-loss diagnostics over validation batches."""
+    """Accumulate composed-loss diagnostics over validation batches.
+
+    Every running sum is widened to float64 as it is taken, not on the way out.
+    A half-precision loss reaching validation outside autocast would otherwise
+    accumulate in its own dtype, where the running sum stops growing once the
+    increment falls below half an ulp: 500 bf16 batches averaging 0.8 reported
+    0.512, a 36% understatement.
+    """
 
     def __init__(self, device: torch.device) -> None:
         self.device = device
@@ -446,16 +453,16 @@ class _LossAccumulator:
     def update(self, loss_out: ComposedLossOutput) -> None:
         """Add one batch's loss output to the running totals."""
         self.batch_count += 1
-        total = loss_out["total_loss"].detach()
+        total = _as_float64_scalar(loss_out["total_loss"], self.device)
         self.total_sum = total if self.total_sum is None else self.total_sum + total
         for name, value in loss_out["per_component_unweighted"].items():
-            detached = value.detach()
+            detached = _as_float64_scalar(value, self.device)
             previous = self.per_component_unweighted_sum.get(name)
             self.per_component_unweighted_sum[name] = (
                 detached if previous is None else previous + detached
             )
         for name, sample in loss_out["per_component_sample"].items():
-            detached_sum = sample.detach().sum()
+            detached_sum = _as_float64_scalar(sample, self.device)
             previous = self.per_component_sample_sum.get(name)
             self.per_component_sample_sum[name] = (
                 detached_sum if previous is None else previous + detached_sum

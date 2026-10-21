@@ -23,11 +23,19 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 import numpy as np
 import periodictable as pt
 import torch
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    PrivateAttr,
+    model_validator,
+)
 
 from nvalchemi import OptionalDependency
 from nvalchemi import _typing as t
 from nvalchemi.data.data import DataMixin  # type: ignore
+from nvalchemi.data.level_storage import DEFAULT_ATTRIBUTE_MAP
 
 if TYPE_CHECKING:
     from ase import Atoms
@@ -51,6 +59,23 @@ def _tensor_serialization(tensor: torch.Tensor) -> list[float | int | list]:
     if tensor is None:
         return None
     return tensor.detach().cpu().tolist()
+
+
+def _warn_first(seen: set, key: object, message: str, *, stacklevel: int = 2) -> None:
+    """Emit ``message`` as a ``UserWarning`` the first time ``key`` is seen.
+
+    ``key`` is recorded in ``seen`` so repeats stay silent. ``stacklevel`` is
+    relative to the caller (this frame is added on top).
+    """
+    if key not in seen:
+        seen.add(key)
+        warnings.warn(message, UserWarning, stacklevel=stacklevel + 1)
+
+
+# Process-global record of (field, src_dtype, tgt_dtype) casts already warned
+# about, so check_fp_dtype_consistency warns once per cast rather than per
+# construction. Module-level so it stays out of the AtomicData schema.
+_FP_CAST_WARNED: set[tuple[str, str, str]] = set()
 
 
 class AtomicNumberTable:
@@ -81,6 +106,7 @@ class AtomicNumberTable:
 
 
 _DEFAULT_MASS_TABLE: torch.Tensor | None = None
+_BUILTIN_FIELD_NAMES = frozenset().union(*DEFAULT_ATTRIBUTE_MAP.values())
 
 
 def _default_mass_table() -> torch.Tensor:
@@ -175,7 +201,15 @@ class AtomicData(BaseModel, DataMixin):
       populated from :mod:`periodictable` using ``atomic_numbers``.
     - Floating-point fields are coerced to the dtype of ``positions``; passing a
       ``float64`` label alongside ``float32`` positions triggers a cast and a
-      :class:`UserWarning`. Pass matching dtypes to silence it.
+      :class:`UserWarning` (once per field and dtype pair per process). Pass
+      matching dtypes to silence it, or name the field in
+      ``precision_preserving_keys`` to keep its dtype, e.g. so an extensive
+      total energy is not quantized by ``float32``. Set the class attribute on
+      :class:`AtomicData` itself when the data flows through
+      :class:`~nvalchemi.data.datapipes.Dataset` or
+      :func:`~nvalchemi.data.transforms.make_supercell`, which rebuild samples
+      as plain :class:`AtomicData`; a subclass override only covers objects
+      constructed through the subclass (including ``Batch.to_data_list``).
     - ``validate_assignment=True`` means re-assigning a field re-runs validation;
       use :meth:`add_node_property` and friends (not raw attribute assignment) to
       register new custom keys so they are tracked in the correct property group.
@@ -381,6 +415,10 @@ class AtomicData(BaseModel, DataMixin):
         default_factory=dict,
         description="Additional unstructured information about the system.",
     )
+    # Batch stores custom level definitions privately on an extracted
+    # AtomicData so an immediate unbatch/rebatch cycle retains its schema.
+    # PrivateAttr keeps this metadata out of field enumeration and dumps.
+    _level_schema: Any = PrivateAttr(default=None)
     # "Node key" means dim(0) == num_nodes; tensors may have any rank.
     _default_node_keys: ClassVar[frozenset[str]] = frozenset(
         {
@@ -418,6 +456,9 @@ class AtomicData(BaseModel, DataMixin):
             "spin",
         }
     )
+
+    # Floating fields exempt from check_fp_dtype_consistency; see class Notes.
+    precision_preserving_keys: ClassVar[frozenset[str]] = frozenset()
 
     # Pydantic configuration
     model_config: ClassVar[ConfigDict] = ConfigDict(
@@ -515,31 +556,28 @@ class AtomicData(BaseModel, DataMixin):
     @model_validator(mode="after")
     def check_fp_dtype_consistency(self) -> AtomicData:
         """
-        Ensures all floating point tensors are at the same precision
-        as the positions tensor.
+        Cast floating point tensors to the positions dtype. Fields in
+        ``precision_preserving_keys`` are exempt. Casting is unconditional, but
+        each distinct ``(field, src, tgt)`` cast warns only once per process.
         """
         dtype = self.positions.dtype
-        casted: list[str] = []
         for key in self.model_dump().keys():
+            if key in self.precision_preserving_keys:
+                continue
             value = getattr(self, key)
-            if isinstance(value, torch.Tensor):
-                tensor_dtype = value.dtype
-                if tensor_dtype.is_floating_point and tensor_dtype != dtype:
-                    # using __dict__ to avoid re-validation
-                    self.__dict__[key] = value.to(dtype)
-                    casted.append(key)
-        if casted:
-            casted.sort()
-            # Keep the warning attributed to the user's AtomicData(...) call
-            # instead of Pydantic's internal validation frames. This may need
-            # adjustment if Pydantic's construction stack changes.
-            warnings.warn(
-                f"AtomicData fields {casted} were cast from their original "
-                f"dtypes to {dtype} to match positions. "
-                f"Pass tensors with matching dtypes to silence this warning.",
-                UserWarning,
-                stacklevel=3,
-            )
+            if not (isinstance(value, torch.Tensor) and value.dtype.is_floating_point):
+                continue
+            if value.dtype != dtype:
+                # stacklevel=3 keeps the warning on the user's AtomicData(...) call
+                _warn_first(
+                    _FP_CAST_WARNED,
+                    (key, str(value.dtype), str(dtype)),
+                    f"AtomicData field '{key}' was cast from {value.dtype} to "
+                    f"{dtype} to match positions; pass a matching dtype to silence "
+                    f"this (warned once per field/dtype).",
+                    stacklevel=3,
+                )
+                self.__dict__[key] = value.to(dtype)  # __dict__ skips re-validation
         return self
 
     @model_validator(mode="after")
@@ -701,6 +739,48 @@ class AtomicData(BaseModel, DataMixin):
         """Add a system property to the graph."""
         setattr(self, key, value)
         self.__system_keys__.add(key)
+
+    def clone(self) -> AtomicData:
+        """Return a deep copy, including an independent private level schema."""
+        cloned = DataMixin.clone(self)
+        if self._level_schema is not None:
+            cloned._level_schema = self._level_schema.clone()
+        return cloned  # type: ignore[return-value]
+
+    def to(
+        self,
+        device: torch.device | str,
+        dtype: torch.dtype | None = None,
+        non_blocking: bool = False,
+    ) -> AtomicData:
+        """Return a device-moved copy with synchronized level metadata.
+
+        Floating custom-field dtype declarations follow an explicit dtype
+        conversion so the returned object can be batched again immediately.
+
+        Raises
+        ------
+        ValueError
+            If the requested dtype cannot be represented by the level schema.
+        """
+        moved = DataMixin.to(self, device, dtype, non_blocking)
+        if self._level_schema is not None:
+            schema = self._level_schema.clone()
+            if dtype is not None:
+                for key, group_name in schema.attr_to_group.items():
+                    if key in _BUILTIN_FIELD_NAMES:
+                        continue
+                    original = getattr(self, key, None)
+                    converted = getattr(moved, key, None)
+                    if (
+                        isinstance(original, torch.Tensor)
+                        and isinstance(converted, torch.Tensor)
+                        and original.dtype.is_floating_point
+                        and original.dtype != converted.dtype
+                    ):
+                        schema.set(key, group_name, dtype=converted.dtype)
+            moved._level_schema = schema
+        return moved  # type: ignore[return-value]
 
     @property
     def chemical_hash(self) -> str:

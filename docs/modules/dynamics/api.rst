@@ -17,6 +17,7 @@ Core classes
    :nosignatures:
 
    BaseDynamics
+   DynamicsStrategy
    DemoDynamics
    FusedStage
    DistributedPipeline
@@ -39,6 +40,15 @@ Convergence
 
    ConvergenceHook
 
+Constants
+---------
+
+.. autosummary::
+   :toctree: _generated
+   :nosignatures:
+
+   KB_EV
+
 Hooks
 -----
 
@@ -60,6 +70,7 @@ Data sinks
    :nosignatures:
 
    DataSink
+   ResizableSink
    GPUBuffer
    HostMemory
    ZarrData
@@ -74,3 +85,7 @@ Sampling
    :nosignatures:
 
    SizeAwareSampler
+   OrderedStructureSampler
+   StructureSource
+   FitPolicy
+   WithinBudget
