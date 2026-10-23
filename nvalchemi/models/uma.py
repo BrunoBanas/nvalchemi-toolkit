@@ -1922,7 +1922,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
                     f"NVALCHEMI_UMA_COMPILE_SHAPES={mode!r} must be one of {get_args(CompileShapes)}"
                 )
         if mode == "auto":
-            return bool(dd_ctx.is_distributed)
+            # Static shapes pay only with the fixed-shape caps a graph padder pads to
+            # (upstream's criterion; only domain decomposition installs one).
+            return getattr(dd_ctx, "graph_padder", None) is not None
         return mode == "static"
 
     def forward(self, data: AtomicData | Batch, **kwargs: Any) -> ModelOutputs:

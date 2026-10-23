@@ -334,7 +334,9 @@ class TestAdaptInput:
         assert fc.natoms.tolist() == [3]
         assert fc.cell.shape == (1, 3, 3)
         assert fc.pbc.shape == (1, 3)
-        assert torch.count_nonzero(fc.cell).item() == 0
+        # The fork completes zero lattice vectors as fairchem's from_ase does
+        # (``_complete_cell``): an all-zero molecular cell becomes the identity.
+        assert torch.equal(fc.cell[0], torch.eye(3, dtype=fc.cell.dtype))
         assert fc.pbc.any().item() is False
         assert fc.edge_index.shape == (2, 0)
         assert fc.nedges.tolist() == [0]
@@ -811,6 +813,10 @@ class _CompilingPredictUnit(_MockPredictUnit):
         self.inference_settings.merge_mole = False
         self.lazy_model_intialized = False
         self.compile_was_patched: bool | None = None
+        self.device = torch.device("cpu")
+
+    def move_to_device(self) -> None:
+        pass
 
     def predict(self, data: FCAtomicData, undo_element_references: bool = True) -> dict:
         self.compile_was_patched = torch.compile is not _ORIGINAL_TORCH_COMPILE
@@ -823,6 +829,7 @@ _ORIGINAL_TORCH_COMPILE = torch.compile
 
 class _FakeDistributedContext:
     is_distributed = True
+    graph_padder = object()
 
     def maybe_pad_graph(self, data):
         return data
