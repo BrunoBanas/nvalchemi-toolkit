@@ -190,6 +190,12 @@ every workload measured (factor 0.45, from a few paired runs).
   when nothing faster fits. Unmerged energy-only MC is unaffected (SGC-NPT 2048
   atoms with checkpointing is only 4% slower), but with merge_mole it slows MC
   ~3.4x, so merge + checkpointing is a poor fallback for Kawasaki-NPT.
+- checkpointed memory has a knee: ~3 GiB per 1000 batch atoms up to ~2,200, then
+  ~0.5 GiB per 1000 (fixed-size edge chunks; fitted within 0.3% to 28,728 atoms, one
+  walker, with `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`). One walker fits
+  ~47,000 atoms on 40 GB and ~100,000 on 80 GB (extrapolated past 28,728); large
+  checkpointed runs are limited by time (an SGC-NPT production block takes ~2.5 h at
+  20,000 atoms). Compile + checkpointing fails in inductor (`CantSplit`).
 - tf32: identical accept/reject sequences, ueV/atom energy differences.
 - energy-only MC: SGC 1.3-1.44x, Kawasaki (turbo) 2.1x per MC step.
 - Kawasaki unlike-pair proposals: removes the ~50% of draws that swapped

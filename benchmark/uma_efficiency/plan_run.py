@@ -279,7 +279,20 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
         n_eff / REF_N
     )  # memory is linear in atom count (measured 108-2048 atoms)
 
+    knee = mem_c.get("form") == "knee"
+
     def memory(width: int) -> float:
+        if knee:
+            # Checkpointing recomputes activations in fixed-size edge chunks: steep up to
+            # ~2,200 batch atoms, ~6x shallower beyond (fitted to 28,728 atoms, 0.3%).
+            batch_atoms = width * n_eff
+            k = mem_c["knee_atoms"]
+            allocated = (
+                mem_c["base_gib"]
+                + mem_c["below_gib_per_1000_atoms"] * min(batch_atoms, k) / 1000
+                + mem_c["above_gib_per_1000_atoms"] * max(0.0, batch_atoms - k) / 1000
+            )
+            return max(0.5, allocated * mem_c["reserved_factor"])
         atoms = width * mem_scale  # batch atoms in units of the 500-atom reference
         # SGC-NPT grows faster than linear in the number of walkers (not in atoms):
         # 2048 atoms x 1 walker uses 35.8 GiB, 256 x 8 uses 52.3 GiB.
@@ -316,7 +329,8 @@ def evaluate(ctx: dict, cls: str, max_width: int) -> dict:
             {
                 "width": w,
                 "memory_gib": mem,
-                "fits": mem <= ctx["budget"] * ctx["budget_scale"],
+                # budget_scale covers the eager SGC-NPT fit's error; the knee fit needs none.
+                "fits": mem <= ctx["budget"] * (1.0 if knee else ctx["budget_scale"]),
                 "block_s": b["total"],
                 "mc_s": b["mc"],
                 "md_s": b["md"],
@@ -454,6 +468,11 @@ def plan(args) -> dict:
                 "against 70% of the card instead of 85%."
             )
         if cls.startswith("checkpointed"):
+            notes.append(
+                "checkpointing: set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (the memory model assumes "
+                "it; without it reserved memory reached 1.3-2.4x allocated). Do not combine with compile: "
+                "inductor fails on the checkpointed edge chunks (CantSplit), measured at 11k and 20k atoms."
+            )
             notes.append(
                 "activation checkpointing chosen because the faster settings do not fit: ~2x slower per MD "
                 "step, ~2-3x less memory per walker. Unmerged energy-only MC is unaffected; with merge_mole "

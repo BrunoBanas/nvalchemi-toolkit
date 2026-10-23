@@ -7,7 +7,7 @@
     "reference_density_atoms_per_A3": 0.0625,
     "reference_n_atoms": 500,
     "gpu": "A100-SXM4-80GB",
-    "measured": "2026-09-24..30, efficiency matrix (500 atoms, widths 1/2/4) + follow-up (widths 8/12, 108/256/2048 atoms, checkpointing, compile), A100-SXM4-80GB; compiled MD (dynamic shapes) 2026-10-09/10"
+    "measured": "2026-09-24..30, efficiency matrix (500 atoms, widths 1/2/4) + follow-up (widths 8/12, 108/256/2048 atoms, checkpointing, compile), A100-SXM4-80GB; compiled MD (dynamic shapes) 2026-10-09/10; checkpointed memory refit to 28,728 atoms 2026-10-19"
   },
   "time_model": {
     "_form": "one batched step takes c1_ms_per_atom * (n0_atoms + width * (N_eff * sf + nw_atoms)) ms on the reference GPU: n0 = per-call overhead in atom-equivalents (amortized by batching), nw = per-walker overhead (not amortized), sf = size_scaling factor, applied to compiled runs only. Least-squares fit (relative error) to every A100-SXM cell of the efficiency matrix and its follow-up: 108-2048 atoms, widths 1-16.",
@@ -162,14 +162,22 @@
         "source": "Kawasaki-NPT turbo (dynamic shapes) + energy-only MC, 500 atoms w1 / w4: 2.87 / 11.2 GiB"
       },
       "checkpointed_merged": {
-        "base_gib": 0.16,
-        "per_walker_gib": 1.863,
-        "source": "merge + checkpointing: pure-NPT fit, agrees with the 2048-atom Kawasaki-NPT cell (7.65 GiB)"
+        "form": "knee",
+        "base_gib": 0.05,
+        "below_gib_per_1000_atoms": 2.979,
+        "knee_atoms": 2150,
+        "above_gib_per_1000_atoms": 0.499,
+        "reserved_factor": 1.15,
+        "source": "merge + checkpointing (pure NPT at 500 atoms, NPT and Kawasaki-NPT at 2048, Kawasaki-NPT energy-only MC scan above): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       },
       "checkpointed_unmerged": {
-        "base_gib": -0.59,
-        "per_walker_gib": 4.54,
-        "source": "PROXY: SGC-NPT batch preset (checkpointing, no merge; full outputs)"
+        "form": "knee",
+        "base_gib": 1.13,
+        "below_gib_per_1000_atoms": 3.011,
+        "knee_atoms": 2300,
+        "above_gib_per_1000_atoms": 0.474,
+        "reserved_factor": 1.15,
+        "source": "no merge + checkpointing (SGC-NPT energy-only MC; the same allocated memory as pure NPT with the batch preset at 500 atoms): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       }
     },
     "sgc_npt": {
@@ -181,16 +189,22 @@
         "source": "SGC-NPT no merge, energy-only MC: 108 (w1-16), 256 (w1-8), 500 (w1/2/4), 2048 (w1) atoms; max error 21% (under-predicts 500 x 4 walkers: 38.5 vs 48.7 GiB) -- hence budget_scale"
       },
       "checkpointed_unmerged": {
-        "base_gib": 0.92,
-        "per_walker_gib": 2.885,
-        "per_walker_cross_gib": 0.368,
-        "source": "SGC-NPT no merge + checkpointing, energy-only MC, 500 atoms w1/2/4 and 2048 atoms; max error 9%"
+        "form": "knee",
+        "base_gib": 1.13,
+        "below_gib_per_1000_atoms": 3.011,
+        "knee_atoms": 2300,
+        "above_gib_per_1000_atoms": 0.474,
+        "reserved_factor": 1.15,
+        "source": "no merge + checkpointing (SGC-NPT energy-only MC; the same allocated memory as pure NPT with the batch preset at 500 atoms): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       },
       "checkpointed": {
-        "base_gib": 0.92,
-        "per_walker_gib": 2.885,
-        "per_walker_cross_gib": 0.368,
-        "source": "SGC-NPT no merge + checkpointing, energy-only MC, 500 atoms w1/2/4 and 2048 atoms; max error 9%"
+        "form": "knee",
+        "base_gib": 1.13,
+        "below_gib_per_1000_atoms": 3.011,
+        "knee_atoms": 2300,
+        "above_gib_per_1000_atoms": 0.474,
+        "reserved_factor": 1.15,
+        "source": "no merge + checkpointing (SGC-NPT energy-only MC; the same allocated memory as pure NPT with the batch preset at 500 atoms): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       },
       "compiled_unmerged": {
         "base_gib": 0.845,
@@ -211,21 +225,30 @@
         "source": "NPT no merge, 500 atoms w1/2/4 and 2048 atoms; max error 1.5%"
       },
       "checkpointed_merged": {
-        "base_gib": 0.16,
-        "per_walker_gib": 1.863,
-        "source": "NPT merge + checkpointing, 500 atoms w1/2/4 and 2048 atoms; max error 5.5%"
+        "form": "knee",
+        "base_gib": 0.05,
+        "below_gib_per_1000_atoms": 2.979,
+        "knee_atoms": 2150,
+        "above_gib_per_1000_atoms": 0.499,
+        "reserved_factor": 1.15,
+        "source": "merge + checkpointing (pure NPT at 500 atoms, NPT and Kawasaki-NPT at 2048, Kawasaki-NPT energy-only MC scan above): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       },
       "checkpointed_unmerged": {
-        "base_gib": 1.26,
-        "per_walker_gib": 1.98,
-        "source": "pure NPT (--md-only), 20 blocks x 50 steps, median: batch preset 3.24 / 5.16 / 9.19 GiB"
+        "form": "knee",
+        "base_gib": 1.13,
+        "below_gib_per_1000_atoms": 3.011,
+        "knee_atoms": 2300,
+        "above_gib_per_1000_atoms": 0.474,
+        "reserved_factor": 1.15,
+        "source": "no merge + checkpointing (SGC-NPT energy-only MC; the same allocated memory as pure NPT with the batch preset at 500 atoms): allocated memory, fitted 500-28,728 atoms (widths 1-4 at 500 atoms, 2048 atoms, and single-walker scans to 19,652 / 28,728 atoms on A100-SXM4-80GB); max error 0.3% in allocated memory. Reserved = allocated x reserved_factor, measured 1.09-1.13 with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True; without it reserved reached 1.3-2.4x allocated (worst at width 4)"
       },
       "compiled_merged": {
         "base_gib": 0.09,
         "per_walker_gib": 2.78,
         "source": "turbo with dynamic shapes: NPT w1 2.90 GiB; per-walker slope from Kawasaki-NPT w1/w4 (2.87 / 11.2 GiB). Replaces the 2026-09 static-shape fit, whose recompiles inflated reserved memory"
       }
-    }
+    },
+    "_knee_form": "Checkpointed classes ('form': 'knee'): allocated = base + below x min(A, knee) + above x max(0, A - knee), A = batch atoms (width x N_eff), GiB per 1000 atoms; reserved = allocated x reserved_factor. Checkpointing recomputes activations in fixed-size edge chunks, so above ~2,200 atoms in the batch memory grows ~6x more slowly."
   },
   "size_scaling": {
     "_note": "Applied to compiled per-atom TIME only: one large graph costs more per atom under compile (Kawasaki turbo: 79 ms/step for 2048 atoms x 1 vs 58 ms for 500 x 4). Memory has no size ramp: it is linear in atom count (measured 108-2048 atoms).",
