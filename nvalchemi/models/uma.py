@@ -88,7 +88,9 @@ Carlo, or when systems of different composition share a batch) fairchem runs
 those layers either as a pure-PyTorch loop over systems (``MOLE``) or through
 the ``fairchem_cpp`` ``segment_mm`` CUDA extension (``MOLEDGL``, fairchem's
 ``moe_layer_type="dgl"``). :meth:`UMAWrapper.from_checkpoint` selects the
-extension automatically when it is installed (``moe_layer_type="auto"``); on
+extension automatically when it is installed (``moe_layer_type="auto"``),
+except with ``merge_mole=True`` or ``activation_checkpointing=True``, where
+fairchem's ``MOLEDGL`` does not work and the loop is always used; on
 an A100 it made 500-atom energy calls 1.6-2.0x faster and an SGC-NPT hybrid
 1.3x (one walker) to 1.5x (four walkers) faster, for ~15% more GPU memory.
 ``fairchem_cpp`` is not on PyPI; see the user guide's UMA section for the
@@ -170,21 +172,28 @@ def _fairchem_cpp_available() -> bool:
     return bool(getattr(mole, "fairchem_cpp_found", False))
 
 
-def _merge_and_compile(settings: Any) -> tuple[bool | None, bool | None]:
-    """``(merge_mole, compile)`` of resolved inference settings; ``None`` if unknown."""
+def _merge_compile_checkpointing(
+    settings: Any,
+) -> tuple[bool | None, bool | None, bool | None]:
+    """``(merge_mole, compile, activation_checkpointing)`` of resolved inference
+    settings; ``None`` where unknown."""
     if isinstance(settings, str):
         try:
             from fairchem.core.units.mlip_unit.api import (  # noqa: PLC0415
                 inference,
             )
         except ImportError:
-            return None, None
+            return None, None, None
         # Preset name -> fairchem's inference_settings_<name>() factory.
         factory = getattr(inference, f"inference_settings_{settings}", None)
         if factory is None:
-            return None, None
+            return None, None, None
         settings = factory()
-    return getattr(settings, "merge_mole", None), getattr(settings, "compile", None)
+    return (
+        getattr(settings, "merge_mole", None),
+        getattr(settings, "compile", None),
+        getattr(settings, "activation_checkpointing", None),
+    )
 
 
 def _resolve_moe_layer_type(
@@ -194,7 +203,13 @@ def _resolve_moe_layer_type(
 
     ``"auto"`` defers to ``NVALCHEMI_UMA_MOE_LAYER_TYPE`` (default ``"auto"``)
     and then applies ``"dgl"`` only where it is known to work: a registered
-    ``uma-*`` checkpoint, ``merge_mole=False``, ``compile=False``. Inside that
+    ``uma-*`` checkpoint, ``merge_mole=False``, ``compile=False``,
+    ``activation_checkpointing=False``. Merged and checkpointed settings use the
+    loop even when ``"dgl"`` is requested explicitly (with a warning): fairchem's
+    merge step reads ``MOLE.merged_linear_layer``, which ``MOLEDGL`` lacks, and
+    checkpointing splits the edges into 131,072-edge chunks, past the first of
+    which ``MOLEDGL``'s ``segment_mm`` raises "Segment index out of bound"
+    (fairchem 2.22). Inside that
     scope a missing ``fairchem_cpp`` is a warning under ``"auto"`` and an error
     when ``"dgl"`` was asked for (argument or environment variable), so a
     production job that requires the extension cannot silently run slower.
@@ -219,12 +234,28 @@ def _resolve_moe_layer_type(
             )
     if mode == "pytorch":
         return "pytorch"
-    merge_mole, compile_on = _merge_and_compile(inference_settings)
+    merge_mole, compile_on, checkpointing = _merge_compile_checkpointing(
+        inference_settings
+    )
     if merge_mole:
-        # Merging folds the experts into plain linears: no MoLE layer runs.
+        # Merging folds the experts into plain linears: no MoLE layer runs, and
+        # fairchem's merge step cannot fold MOLEDGL (no merged_linear_layer).
         if not scoped:
             warnings.warn(
-                "moe_layer_type='dgl' has no effect with merge_mole=True",
+                "moe_layer_type='dgl' has no effect with merge_mole=True "
+                "(fairchem cannot merge MOLEDGL layers): using the pytorch loop",
+                UserWarning,
+                stacklevel=3,
+            )
+        return "pytorch"
+    if checkpointing:
+        # Activation checkpointing chunks the edges (131,072 per chunk); MOLEDGL
+        # fails on every chunk after the first, i.e. on any large system.
+        if not scoped:
+            warnings.warn(
+                "moe_layer_type='dgl' is not supported with activation_checkpointing=True "
+                "(fairchem_cpp segment_mm fails past the first 131,072-edge chunk): "
+                "using the pytorch loop",
                 UserWarning,
                 stacklevel=3,
             )

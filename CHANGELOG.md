@@ -11,6 +11,10 @@
   `"auto"` (default) uses it for registered `uma-*` checkpoints without
   compile whenever it is installed and warns otherwise;
   `NVALCHEMI_UMA_MOE_LAYER_TYPE=dgl` makes a missing extension an error.
+  Merged (`merge_mole=True`) and checkpointed (`activation_checkpointing=True`)
+  settings always use the loop, with a warning when `"dgl"` was asked for:
+  fairchem cannot merge `MOLEDGL` layers, and `segment_mm` fails past the first
+  131,072-edge checkpointing chunk (~2,300 bulk atoms).
   A100, 500 atoms: SGC-NPT hybrid 1.28x faster per block for one walker and
   1.53x for four, ~15% more GPU memory. `UMAWrapper.moe_layer_type` and
   `mole_layer_counts` report the layers built. Availability is read from

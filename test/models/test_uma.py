@@ -751,6 +751,10 @@ class TestMoLELayerType:
         ("settings", "uma"),
         [
             ("compile=false,merge_mole=true", True),  # experts merged away
+            (  # MOLEDGL fails past the first checkpointing chunk
+                "compile=false,merge_mole=false,activation_checkpointing=true",
+                True,
+            ),
             ("compile=true,merge_mole=false", True),  # dgl untested under compile
             (_UNMERGED, False),  # local checkpoint may have no MoLE backbone
         ],
@@ -785,12 +789,38 @@ class TestMoLELayerType:
         with pytest.warns(UserWarning, match="no effect"):
             assert self._resolve(monkeypatch, "dgl", "merge_mole=true") == "pytorch"
 
-    def test_explicit_dgl_under_compile_warns(self, monkeypatch):
-        with pytest.warns(UserWarning, match="untested"):
+    def test_explicit_dgl_falls_back_under_checkpointing(self, monkeypatch):
+        settings = (
+            "compile=false,merge_mole=false,tf32=true,activation_checkpointing=true"
+        )
+        with pytest.warns(UserWarning, match="activation_checkpointing"):
+            assert self._resolve(monkeypatch, "dgl", settings) == "pytorch"
+
+    def test_checkpointing_is_fairchems_default_for_unlisted_fields(self, monkeypatch):
+        # InferenceSettings() defaults activation_checkpointing=True.
+        with pytest.warns(UserWarning, match="activation_checkpointing"):
             assert (
-                self._resolve(monkeypatch, "dgl", "compile=true,merge_mole=false")
-                == "dgl"
+                self._resolve(monkeypatch, "dgl", "compile=false,merge_mole=false")
+                == "pytorch"
             )
+
+    def test_env_dgl_keeps_checkpointed_runs_on_pytorch(self, monkeypatch):
+        monkeypatch.setenv("NVALCHEMI_UMA_MOE_LAYER_TYPE", "dgl")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert (
+                self._resolve(
+                    monkeypatch,
+                    "auto",
+                    "merge_mole=false,activation_checkpointing=true",
+                )
+                == "pytorch"
+            )
+
+    def test_explicit_dgl_under_compile_warns(self, monkeypatch):
+        settings = "compile=true,merge_mole=false,activation_checkpointing=false"
+        with pytest.warns(UserWarning, match="untested"):
+            assert self._resolve(monkeypatch, "dgl", settings) == "dgl"
 
     @pytest.mark.parametrize("bad_env", [None, "segment_mm"])
     def test_invalid_values_raise(self, monkeypatch, bad_env):
