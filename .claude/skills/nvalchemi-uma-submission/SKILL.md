@@ -94,7 +94,14 @@ Each knob pays under exactly one condition.
   for large SGC-NPT it costs only ~4% (2048 atoms: 122 vs 117 s/block at 13 vs 36
   GiB). With merge it also slows MC ~3.4x (Kawasaki-NPT 2048 atoms: 112 vs 36
   s/block), so it is a poor fallback there; merged MD fits 40 GB up to ~2048 atoms
-  anyway (16 GiB).
+  anyway (16 GiB). Checkpointed memory has a knee: ~3 GiB per 1000 batch atoms up to ~2,200, then ~0.5
+  GiB per 1000 (fixed-size edge chunks), so one walker fits ~47,000 atoms on 40 GB and
+  ~100,000 on 80 GB (measured to 28,728 atoms; beyond that extrapolated). Large
+  checkpointed runs are limited by time, not memory: an SGC-NPT production block
+  (0.2 N trials + 50 MD steps) takes ~2.5 h at 20,000 atoms. Set
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (without it reserved memory
+  reached 1.3-2.4x allocated), and never combine checkpointing with compile: inductor
+  fails on the edge chunks (`CantSplit`).
 - `tf32` on: identical accept/reject sequences, ueV/atom energy differences.
 - Energy-only MC skips the forces/stress backward pass: SGC 1.3-1.44x, Kawasaki
   (turbo) 2.1x per MC step. MC-only runs set it on the model; hybrids pass
@@ -184,6 +191,9 @@ factors on the eager fits (MD 0.70 merged, 0.92 unmerged), plus a one-time
 compile spread over `--n-blocks`. Memory is linear in batch atoms,
 `base + a * width * N_eff / 500`, limited to 85% of the card; SGC-NPT adds a term
 that grows with the number of walkers and plans against 70% of the card.
+Checkpointed classes instead use the knee fit (steep to ~2,200 batch atoms, then
+~6x shallower; 0.3% error to 28,728 atoms) times 1.15 for reserved memory with
+`expandable_segments`.
 
 How it chooses. Every valid class that fits is compared; the highest
 walker-blocks/s wins in the throughput regime, the lowest s/block at width 1 in
