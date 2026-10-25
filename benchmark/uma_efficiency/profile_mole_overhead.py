@@ -389,6 +389,8 @@ def load(spec: str, device: torch.device, template) -> tuple[UMAWrapper, dict]:
         task_name=campaign.TASK,
         device=str(device),
         inference_settings=spec,
+        # The instrumented replicas patch the pure-PyTorch MOLE loop.
+        moe_layer_type="pytorch",
     )
     load_s = time.perf_counter() - t0
     # First call: fairchem's lazy init, which for merge_mole is where the merge happens.
