@@ -283,6 +283,64 @@ class TestConstruction:
         else:
             guess_settings.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("settings", "graph_gen_version", "expected"),
+        [
+            ("batch", None, 3),
+            ("compile=false,merge_mole=false", None, 3),
+            ("compile=false,internal_graph_gen_version=2", None, 2),
+            ("batch", 2, 2),
+            ("object", None, 2),
+            ("object", 3, 3),
+        ],
+    )
+    def test_from_checkpoint_graph_gen_version(
+        self, mock_pu, settings, graph_gen_version, expected
+    ):
+        from fairchem.core.calculate import pretrained_mlip
+        from fairchem.core.units.mlip_unit.api.inference import InferenceSettings
+
+        if settings == "object":
+            settings = InferenceSettings(internal_graph_gen_version=2)
+        with (
+            patch.object(pretrained_mlip, "available_models", ["uma-test"]),
+            patch.object(
+                pretrained_mlip, "get_predict_unit", return_value=mock_pu
+            ) as get_predict_unit,
+        ):
+            UMAWrapper.from_checkpoint(
+                "uma-test",
+                task_name="omat",
+                inference_settings=settings,
+                graph_gen_version=graph_gen_version,
+            )
+        configured = get_predict_unit.call_args.kwargs["inference_settings"]
+        assert configured.internal_graph_gen_version == expected
+        if isinstance(settings, InferenceSettings):
+            assert configured is not settings
+            assert settings.internal_graph_gen_version == 2
+
+    def test_from_checkpoint_turbo_maps_to_multigpu(self, mock_pu):
+        from fairchem.core.calculate import pretrained_mlip
+        from fairchem.core.units.mlip_unit.api.inference import (
+            inference_settings_multigpu,
+        )
+
+        with (
+            patch.object(pretrained_mlip, "available_models", ["uma-test"]),
+            patch.object(
+                pretrained_mlip, "get_predict_unit", return_value=mock_pu
+            ) as get_predict_unit,
+            pytest.warns(DeprecationWarning, match="multigpu"),
+        ):
+            UMAWrapper.from_checkpoint(
+                "uma-test", task_name="omat", inference_settings="turbo"
+            )
+        configured = get_predict_unit.call_args.kwargs["inference_settings"]
+        expected = inference_settings_multigpu()
+        expected.internal_graph_gen_version = 3
+        assert configured == expected
+
 
 class TestModelConfig:
     def test_omol_active_outputs(self, mock_omol):
@@ -1910,7 +1968,7 @@ class TestTurboCompile:
 
         try:
             return UMAWrapper.from_checkpoint(
-                _CKPT, task_name="omat", device="cuda", inference_settings="turbo"
+                _CKPT, task_name="omat", device="cuda", inference_settings="multigpu"
             )
         except GatedRepoError as e:
             pytest.skip(f"no HF access to UMA checkpoint {_CKPT}: {e}")
