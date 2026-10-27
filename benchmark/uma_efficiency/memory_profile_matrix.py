@@ -242,7 +242,7 @@ def main() -> None:
     parser.add_argument(
         "--inference-settings",
         required=True,
-        help="A fairchem preset (default/turbo/batch) or a key=value InferenceSettings spec.",
+        help="A fairchem preset (default/multigpu/batch) or a key=value InferenceSettings spec.",
     )
     parser.add_argument(
         "--kernels", nargs="+", default=list(KERNELS), choices=list(KERNELS)

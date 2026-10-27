@@ -57,7 +57,9 @@ from __future__ import annotations
 from typing import Any
 
 _DERIVATIVE_PROPERTIES = frozenset({"forces", "stress", "hessian"})
-_NAMED_PRESETS = frozenset({"default", "turbo", "batch"})
+_NAMED_PRESETS = frozenset(
+    {"default", "nitro", "multigpu", "high-precision", "batch", "turbo"}
+)
 
 
 def _coerce(value: str) -> Any:

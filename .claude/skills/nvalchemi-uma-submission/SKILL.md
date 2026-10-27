@@ -107,11 +107,19 @@ Each knob pays under exactly one condition.
   (turbo) 2.1x per MC step. MC-only runs set it on the model; hybrids pass
   `mc_energy_only=True` and keep full outputs for MD.
 
+fairchem 2.24 (UMA Nitro): `"turbo"` was renamed `"multigpu"` (the wrapper
+maps `"turbo"` to it with a warning); "turbo" below means `"multigpu"`. The new
+`"default"` runs UMA Nitro for `uma-s-1p2p1` at width 1 with fixed composition
+(single-system NPT/NVT MD, relaxations) and otherwise falls back to
+`"multigpu"`, so use it only for width-1 MD; batched walkers and any MC that
+changes composition keep the classes below. Presets and spec strings default to
+`internal_graph_gen_version=3` (single-GPU neighbor list).
+
 Settings classes and the spec strings `UMAWrapper.from_checkpoint` accepts:
 
 | Class | `inference_settings` |
 |---|---|
-| `compiled_merged` | `"turbo"` |
+| `compiled_merged` | `"multigpu"` |
 | `compiled_unmerged` | `"compile=true,merge_mole=false,tf32=true,activation_checkpointing=false"` |
 | `eager_merged` | `"compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"` |
 | `eager_unmerged` | `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"` |

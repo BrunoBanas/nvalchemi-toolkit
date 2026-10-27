@@ -4,6 +4,14 @@
 
 ### Added
 
+- UMA: support fairchem-core 2.24 and UMA Nitro (`uma-s-1p2p1`); the UMA extras
+  now require `fairchem-core>=2.24.0`. `"default"` / `"nitro"` run Nitro for
+  single-system calls and fall back to `"multigpu"` otherwise. The removed
+  `"turbo"` preset is mapped to `"multigpu"` (identical settings) with a
+  `DeprecationWarning`. `UMAWrapper.from_checkpoint(graph_gen_version=...)`:
+  preset names and `key=value` specs now default to
+  `internal_graph_gen_version=3` (nvalchemi-toolkit-ops neighbor list, faster
+  on one GPU); `InferenceSettings` instances are taken as given.
 - `UMAWrapper.from_checkpoint(moe_layer_type=...)`: unmerged UMA backbones
   (`merge_mole=False`, as SGC / VC-SGC requires) run their mixture-of-experts
   layers through the `fairchem_cpp` `segment_mm` extension (fairchem's

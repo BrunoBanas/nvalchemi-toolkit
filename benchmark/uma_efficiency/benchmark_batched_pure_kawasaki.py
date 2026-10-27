@@ -26,7 +26,7 @@ Initial compositions come from benchmark_npt_md_only_single_point.py's
 ``_build_state_matching_fcc_random_box()``, one composition seed per replica
 (base seed + replica index). Velocities are zero (MC only).
 
-``--inference-settings`` defaults to "turbo": a Kawasaki swap never changes a
+``--inference-settings`` defaults to "multigpu" (formerly "turbo"): a Kawasaki swap never changes a
 replica's composition and MC-only never changes the graph shape, the one case
 where both compile and merge_mole are valid. ``--energy-only`` skips the
 forces/stress backward pass, which Monte Carlo never reads (see
@@ -45,7 +45,7 @@ boundary so metrics.json is still written, flagged ``truncated``.
     python benchmark/uma_efficiency/benchmark_batched_pure_kawasaki.py \
         --n-atoms 500 --n-blocks 100 --temperature-k 1200.0 \
         --cutoff-angstrom 3.40 --batch-width 4 \
-        --inference-settings turbo --energy-only --device cuda \
+        --inference-settings multigpu --energy-only --device cuda \
         --output kawasaki_mc/metrics.json
 """
 
@@ -224,8 +224,8 @@ def main() -> None:
     parser.add_argument("--profile-measured-blocks", type=int, default=2)
     parser.add_argument(
         "--inference-settings",
-        default="turbo",
-        help="A fairchem preset (default/turbo/batch) or a comma-separated key=value spec of "
+        default="multigpu",
+        help="A fairchem preset (default/multigpu/batch) or a comma-separated key=value spec of "
         "InferenceSettings fields, e.g. 'compile=true,tf32=true,activation_checkpointing=false'.",
     )
     parser.add_argument(

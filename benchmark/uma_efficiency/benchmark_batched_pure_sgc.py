@@ -235,7 +235,7 @@ def main() -> None:
     parser.add_argument(
         "--inference-settings",
         default=campaign.INFERENCE_SETTINGS,
-        help="A fairchem preset (default/turbo/batch) or a comma-separated key=value spec of "
+        help="A fairchem preset (default/multigpu/batch) or a comma-separated key=value spec of "
         "InferenceSettings fields, e.g. 'compile=false,merge_mole=false,tf32=true,"
         "activation_checkpointing=false'. Only compile=False and merge_mole=False are safe for SGC.",
     )

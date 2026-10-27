@@ -132,7 +132,7 @@ def main() -> None:
         default=20260901,
         help="Seed of the Maxwell-Boltzmann velocities.",
     )
-    parser.add_argument("--inference-settings", default="turbo")
+    parser.add_argument("--inference-settings", default="default")
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
         "--output",

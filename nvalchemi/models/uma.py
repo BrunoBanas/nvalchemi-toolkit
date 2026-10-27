@@ -63,12 +63,20 @@ internally: it is a field on ``fairchem.core.units.mlip_unit.api.inference.Infer
 (``compile: bool``), not a ``torch.compile(model)`` call. Reach it
 through :meth:`from_checkpoint`'s ``inference_settings`` argument:
 
-* ``inference_settings="default"`` — fairchem 2.22's compiled, merged-MoLE
-  FP32 preset for fixed-composition inference.
+* ``inference_settings="default"`` (alias ``"nitro"``) — fairchem 2.24's
+  UMA Nitro fused kernels for ``uma-s-1p2p1`` on one system per call
+  (Ampere/Hopper/Blackwell); anything Nitro cannot serve (a batch, a
+  composition change, another checkpoint) falls back to ``"multigpu"``.
+* ``inference_settings="multigpu"`` — the compiled, merged-MoLE preset with
+  TF32 (fairchem's former ``"turbo"``, which is accepted as an alias).
+* ``inference_settings="high-precision"`` — compiled, merged-MoLE FP32.
 * ``inference_settings="batch"`` — eager, unmerged inference for changing
   batch composition.
-* ``inference_settings="turbo"`` — the compiled, merged preset with TF32
-  enabled for more speed at slightly lower precision.
+
+Preset names and ``key=value`` specs use fairchem's internal neighbor list
+``internal_graph_gen_version=3`` (nvalchemi-toolkit-ops, fastest on one GPU)
+instead of fairchem's v2 default; see ``graph_gen_version`` on
+:meth:`UMAWrapper.from_checkpoint`.
 * For reproducible controls, pass an ``InferenceSettings`` instance::
 
       from fairchem.core.units.mlip_unit.api.inference import (
@@ -316,7 +324,7 @@ def _resolve_inference_settings(settings: Any) -> Any:
     ``"compile=false,merge_mole=false,tf32=true"`` builds
     ``InferenceSettings(compile=False, merge_mole=False, tf32=True)``, so one
     string can name any combination -- the fairchem presets (``"default"``,
-    ``"turbo"``, ``"batch"``) cannot express, e.g., the recommended SGC settings.
+    ``"multigpu"``, ``"batch"``) cannot express, e.g., the recommended SGC settings.
     Preset names and ``InferenceSettings`` instances are returned unchanged.
 
     Raises
@@ -1332,6 +1340,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         task_name: UMATask = "omol",
         device: str | torch.device = "cpu",
         inference_settings: "InferenceSettings | str" = "default",
+        graph_gen_version: int | None = None,
         overrides: dict | None = None,
         train: bool = False,
         compile_shapes: CompileShapes = "auto",
@@ -1358,8 +1367,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         device : str | torch.device
             Target device for inference. Defaults to ``"cpu"``.
         inference_settings : InferenceSettings | str
-            fairchem inference configuration: a preset name (``"default"``,
-            ``"turbo"``, ``"batch"``), a comma-separated ``key=value`` spec of
+            fairchem inference configuration: a preset name (``"default"`` /
+            ``"nitro"``, ``"multigpu"``, ``"high-precision"``, ``"batch"``;
+            the removed ``"turbo"`` maps to ``"multigpu"``), a comma-separated ``key=value`` spec of
             ``InferenceSettings`` fields (e.g.
             ``"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"``,
             the recommended SGC settings), or a
@@ -1369,6 +1379,13 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             Defaults to ``"default"``.
             For ``task_name="omol"``, a copied settings object adds ``"omol"``
             to ``predict_untrained_stress`` before loading the checkpoint.
+        graph_gen_version : int | None
+            fairchem ``internal_graph_gen_version`` (2: fairchem's own, suited
+            to graph parallelism; 3: nvalchemi-toolkit-ops neighbor list,
+            faster on one GPU). ``None`` (default) uses 3 for preset names and
+            ``key=value`` specs that do not set ``internal_graph_gen_version``,
+            and keeps the value of an ``InferenceSettings`` instance. UMA Nitro
+            builds its own graph, so this only affects the non-Nitro path.
         overrides : dict | None
             Optional overrides forwarded to fairchem's inference-settings
             builder.
@@ -1427,25 +1444,45 @@ class UMAWrapper(nn.Module, BaseModelMixin):
 
         from fairchem.core.calculate import pretrained_mlip  # noqa: PLC0415
         from fairchem.core.units.mlip_unit import load_predict_unit  # noqa: PLC0415
+        from fairchem.core.units.mlip_unit.api.inference import (  # noqa: PLC0415
+            guess_inference_settings,
+        )
 
+        # Strings (presets and key=value specs) that do not name the graph
+        # generator get v3; an InferenceSettings object is taken as given.
+        default_v3 = (
+            isinstance(inference_settings, str)
+            and "internal_graph_gen_version" not in inference_settings
+        )
+        if inference_settings == "turbo":
+            # fairchem 2.24 removed "turbo"; "multigpu" holds its exact settings.
+            warnings.warn(
+                "inference_settings='turbo' was removed in fairchem 2.24; using "
+                "'multigpu' (same settings). Use 'default' (UMA Nitro) for "
+                "single-system MD.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            inference_settings = "multigpu"
+        inference_settings = _resolve_inference_settings(inference_settings)
+        # Always work on a copy so the caller's object and fairchem's preset
+        # singletons are never mutated.
+        inference_settings = copy.deepcopy(
+            guess_inference_settings(inference_settings)
+            if isinstance(inference_settings, str)
+            else inference_settings
+        )
+        if graph_gen_version is None and default_v3:
+            graph_gen_version = 3
+        if graph_gen_version is not None:
+            inference_settings.internal_graph_gen_version = graph_gen_version
         if task_name == "omol":
-            from fairchem.core.units.mlip_unit.api.inference import (  # noqa: PLC0415
-                guess_inference_settings,
-            )
-
-            settings = (
-                guess_inference_settings(inference_settings)
-                if isinstance(inference_settings, str)
-                else inference_settings
-            )
-            inference_settings = copy.copy(settings)
             inference_settings.predict_untrained_stress = set(
                 inference_settings.predict_untrained_stress
             ) | {"omol"}
 
         if isinstance(device, torch.device):
             device = device.type
-        inference_settings = _resolve_inference_settings(inference_settings)
 
         name_str = str(name_or_path)
         user_moe = ((overrides or {}).get("backbone") or {}).get("moe_layer_type")
