@@ -1,0 +1,437 @@
+{
+  "version": "1.5",
+  "config": {
+    "t0": 500.0,
+    "mu0": null,
+    "t_stop": 1400.0,
+    "dt": 100.0,
+    "dt_min": 12.5,
+    "dt_max": 200.0,
+    "tol_mu": 0.002,
+    "max_corr": 2,
+    "min_gap": 0.05,
+    "z": 2.576,
+    "min_jump": 0.03,
+    "max_steps": 60,
+    "mu0_se": 0.0,
+    "max_gap_frac": 0.15,
+    "recenter": true,
+    "recenter_dmu": 0.0025,
+    "recenter_max_runs": 24,
+    "max_recenter": 8,
+    "x_a0": null,
+    "x_g0": null,
+    "dilute_dG": {
+      "300.0": -0.5,
+      "350.0": -0.5,
+      "400.0": -0.5,
+      "450.0": -0.5,
+      "500.0": -0.5,
+      "550.0": -0.5,
+      "600.0": -0.5,
+      "650.0": -0.5,
+      "700.0": -0.5,
+      "750.0": -0.5,
+      "800.0": -0.5,
+      "850.0": -0.5,
+      "900.0": -0.5,
+      "950.0": -0.5,
+      "1000.0": -0.5,
+      "1050.0": -0.5,
+      "1100.0": -0.5,
+      "1150.0": -0.5,
+      "1200.0": -0.5,
+      "1250.0": -0.5,
+      "1300.0": -0.5,
+      "1350.0": -0.5,
+      "1400.0": -0.5,
+      "1450.0": -0.5,
+      "1500.0": -0.5
+    },
+    "dilute_tol": 0.003,
+    "dilute_x_max": 0.15,
+    "dt_floor": 100.0,
+    "melt_T": null,
+    "melt_T_se": 0.0,
+    "melt_host": "A",
+    "melt_dH": null,
+    "melt_dH_se": 0.0,
+    "melt_dCp": 0.0,
+    "melt_mu_pure": null,
+    "melt_mu_probe": null,
+    "cross_mu": null
+  },
+  "points": [
+    {
+      "T": 500.0,
+      "mu": -0.5,
+      "mu_se": 0.0010390365805033864,
+      "a": {
+        "x": 0.002712590844733011,
+        "x_se": 0.003,
+        "E": -0.0010260199751622504,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.9739027377327067,
+        "x_se": 0.003,
+        "E": -0.48490960138645456,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 7.593001879315636e-05,
+      "f_se": 0.0001328600896067624,
+      "dT": 0.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5,
+      "mu_corr": -0.5010223415604794,
+      "mu_dilute": -0.5010223415604794,
+      "anchored": true,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      },
+      "recentered": null
+    },
+    {
+      "T": 600.0,
+      "mu": -0.5012268098725753,
+      "mu_se": 0.00029838021628885347,
+      "a": {
+        "x": 0.01647289252093625,
+        "x_se": 0.003,
+        "E": -0.00424959864555051,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.9568564355645713,
+        "x_se": 0.003,
+        "E": -0.47007459259278545,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.00030352435978666173,
+      "f_se": 0.00016418130650437289,
+      "dT": 100.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5012268098725753,
+      "mu_corr": -0.5014214378038775,
+      "mu_dilute": -0.5014214378038775,
+      "mu_eq29": -0.5007338975354342,
+      "anchored": true,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 750.0,
+      "mu": -0.5045997744498621,
+      "mu_se": 0.00035021999037133234,
+      "a": {
+        "x": 0.03474089889995262,
+        "x_se": 0.003,
+        "E": -0.005985481703996277,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.9015935336354161,
+        "x_se": 0.003,
+        "E": -0.4331714642687402,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0007625445486163923,
+      "f_se": 0.00022206689772955517,
+      "dT": 150.0,
+      "corrector_runs": 2,
+      "mu_pred": -0.5021565882658382,
+      "mu_corr": -0.5044098840985308,
+      "mu_dilute": -0.5044098840985308,
+      "mu_eq29": -0.5032886792003407,
+      "anchored": true,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 950.0,
+      "mu": -0.5077132583785677,
+      "mu_se": 0.0007597392043378627,
+      "a": {
+        "x": 0.09802174605077905,
+        "x_se": 0.003,
+        "E": -0.030205363506536808,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.7900258604089583,
+        "x_se": 0.003,
+        "E": -0.3652817780367985,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0019239559918040675,
+      "f_se": 0.0003493441065578594,
+      "dT": 200.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5077132583785677,
+      "mu_corr": -0.5089752894260571,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1068.732050954447,
+      "mu": -0.510652517500794,
+      "mu_se": 0.0008672869369195265,
+      "a": {
+        "x": 0.156084959520745,
+        "x_se": 0.003,
+        "E": -0.051841289722801866,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.687225694112205,
+        "x_se": 0.003,
+        "E": -0.3047743715218007,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0031722760396114755,
+      "f_se": 0.0005079539711454636,
+      "dT": 118.73205095444698,
+      "corrector_runs": 1,
+      "mu_pred": -0.510652517500794,
+      "mu_corr": -0.5111712332990036,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1168.732050954447,
+      "mu": -0.5139967396504517,
+      "mu_se": 0.0010071115600789602,
+      "a": {
+        "x": 0.2594878222156632,
+        "x_se": 0.003,
+        "E": -0.08774949252125423,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.5624381049673308,
+        "x_se": 0.003,
+        "E": -0.23330381360982938,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.003377993171946314,
+      "f_se": 0.0009780299794861103,
+      "dT": 100.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5139967396504517,
+      "mu_corr": -0.5136953109798136,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1181.232050954447,
+      "mu": -0.5143528943879305,
+      "mu_se": 0.0010102355254792013,
+      "a": {
+        "x": 0.2856887088966914,
+        "x_se": 0.003,
+        "E": -0.09992526179852332,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.5432241032636468,
+        "x_se": 0.003,
+        "E": -0.2212238658045963,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0044131455759771065,
+      "f_se": 0.0011518722691478505,
+      "dT": 12.5,
+      "corrector_runs": 1,
+      "mu_pred": -0.5143528943879305,
+      "mu_corr": -0.5144060548672542,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1193.732050954447,
+      "mu": -0.5148590100327929,
+      "mu_se": 0.0010149974262567355,
+      "a": {
+        "x": 0.30494458084200826,
+        "x_se": 0.003,
+        "E": -0.10521943328257646,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.5071476803348736,
+        "x_se": 0.003,
+        "E": -0.20584753221804325,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0017693758733497988,
+      "f_se": 0.0015226367570119162,
+      "dT": 12.5,
+      "corrector_runs": 1,
+      "mu_pred": -0.5148590100327929,
+      "mu_corr": -0.5146708969970261,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    }
+  ],
+  "events": [
+    {
+      "T": 950.0,
+      "kind": "dilute-exit",
+      "last_anchored_T": 750.0,
+      "reason": "formula -0.51824 vs eq. 29 -0.51205 eV (-6.19 meV)",
+      "start_suspect": false
+    },
+    {
+      "T": 1268.732050954447,
+      "kind": "recenter-failed",
+      "walker": "a",
+      "reason": "rerun at the midpoint left a phase",
+      "problems": [
+        "alpha jumped toward the other phase (x 0.378 vs own trend 0.322)",
+        "gamma jumped toward the other phase (x 0.376 vs own trend 0.466)",
+        "gap x_g - x_a = -0.002 < min_gap 0.05"
+      ],
+      "mu_back": -0.5192081798380006,
+      "mu_fwd": -0.5167081798380007,
+      "half": 0.0024999999999999736,
+      "n_runs": 2
+    },
+    {
+      "T": 1268.732050954447,
+      "kind": "rejected",
+      "dT": 100.0,
+      "mu": -0.5167081798380007,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.441 vs own trend 0.322)",
+        "gap x_g - x_a = -0.001 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 1218.732050954447,
+      "kind": "rejected",
+      "dT": 50.0,
+      "mu": -0.5153911563548186,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.479 vs own trend 0.285)",
+        "gamma jumped toward the other phase (x 0.475 vs own trend 0.518)",
+        "gap x_g - x_a = -0.003 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 1193.732050954447,
+      "kind": "recenter-failed",
+      "walker": "a",
+      "reason": "rerun at the midpoint left a phase",
+      "problems": [
+        "alpha jumped toward the other phase (x 0.322 vs own trend 0.267)"
+      ],
+      "mu_back": -0.517203958579589,
+      "mu_fwd": -0.5122039585795891,
+      "half": 0.003749999999999947,
+      "n_runs": 3
+    },
+    {
+      "T": 1193.732050954447,
+      "kind": "rejected",
+      "dT": 25.0,
+      "mu": -0.5147039585795891,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.321 vs own trend 0.267)"
+      ]
+    },
+    {
+      "T": 1206.232050954447,
+      "kind": "recenter-failed",
+      "walker": "a",
+      "reason": "rerun at the midpoint left a phase",
+      "problems": [
+        "gamma jumped toward the other phase (x 0.289 vs own trend 0.482)",
+        "gap x_g - x_a = -0.000 < min_gap 0.05"
+      ],
+      "mu_back": -0.5174068499707063,
+      "mu_fwd": -0.5149068499707063,
+      "half": 0.0024999999999999736,
+      "n_runs": 2
+    },
+    {
+      "T": 1206.232050954447,
+      "kind": "rejected",
+      "dT": 12.5,
+      "mu": -0.5149068499707063,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.507 vs own trend 0.329)",
+        "gap x_g - x_a = -0.002 < min_gap 0.05"
+      ]
+    }
+  ],
+  "status": "finished",
+  "stop_reason": "gap closed: critical point approached between 1193.73 and 1206.23 K",
+  "next_dt": 12.5,
+  "mode": "eq29",
+  "anchor": "dilute",
+  "dilute_exit_T": 750.0,
+  "n_recenter": 3
+}

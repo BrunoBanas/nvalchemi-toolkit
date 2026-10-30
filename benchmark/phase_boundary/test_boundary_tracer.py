@@ -207,6 +207,128 @@ def compare(trace):
     return errs
 
 
+# ----------------------------------------------------------------------------- solid-liquid model
+# Regular solutions for a solid and a liquid sharing pure-solid references G_A = 0, G_B = E_B;
+# each pure liquid has dH (enthalpic) and melts at TM: g_liq(pure) = dH (1 - T/TM), dCp = 0.
+MELT = dict(E_B=-0.5, W_s=0.02, W_l=0.0, TM_A=800.0, DH_A=0.10, TM_B=1400.0, DH_B=0.15)
+
+
+def _sl_params(phase, T):
+    m = MELT
+    if phase == "solid":
+        return 0.0, m["E_B"], m["W_s"], 0.0, m["E_B"]  # gA, gB, W, hA, hB
+    return (m["DH_A"] * (1 - T / m["TM_A"]), m["E_B"] + m["DH_B"] * (1 - T / m["TM_B"]), m["W_l"],
+            m["DH_A"], m["E_B"] + m["DH_B"])
+
+
+def sl_x(phase, T, mu):
+    """Equilibrium x of a regular-solution phase at (T, dmu): mu_B - mu_A = dmu (bisection in logit)."""
+    gA, gB, W, _, _ = _sl_params(phase, T)
+    kT = 8.617333262e-5 * T
+    lo, hi = -60.0, 60.0
+    for _ in range(200):
+        z = 0.5 * (lo + hi)
+        x = 1 / (1 + np.exp(-z))
+        if gB - gA + kT * z + W * (1 - 2 * x) > mu:
+            hi = z
+        else:
+            lo = z
+    return float(1 / (1 + np.exp(-0.5 * (lo + hi))))
+
+
+def sl_phi(phase, T, mu):
+    gA, gB, W, _, _ = _sl_params(phase, T)
+    kT = 8.617333262e-5 * T
+    x = sl_x(phase, T, mu)
+    mix = kT * (x * np.log(x) + (1 - x) * np.log(1 - x)) if 0 < x < 1 else 0.0
+    return gA * (1 - x) + gB * x + mix + W * x * (1 - x) - mu * x
+
+
+def sl_exact(T, host):
+    """Exact solid-liquid coexistence dmu at T on the host's branch (scan from the pure end, then bisect)."""
+    m = MELT
+    grid = np.linspace(m["E_B"] - 1.0, m["E_B"] + 1.0, 801)
+    grid = grid if host == "A" else grid[::-1]
+    d = [sl_phi("liquid", T, mu) - sl_phi("solid", T, mu) for mu in grid]
+    for i in range(1, len(grid)):
+        if d[i - 1] * d[i] <= 0:
+            lo, hi = grid[i - 1], grid[i]
+            dlo = d[i - 1]
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                dm = sl_phi("liquid", T, mid) - sl_phi("solid", T, mid)
+                if dm * dlo > 0:
+                    lo, dlo = mid, dm
+                else:
+                    hi = mid
+            return 0.5 * (lo + hi)
+    return None
+
+
+class SolidLiquidEngine:
+    """A solid and a liquid walker (state {"phase": ...}) on the regular-solution model, with noise."""
+
+    def __init__(self, noise_x=0.0005, noise_E=0.0005, seed=0):
+        self.rng = np.random.default_rng(seed)
+        self.nx, self.nE = noise_x, noise_E
+        self.calls = 0
+        self.phase_kind = None  # set by the tracer in melt mode
+
+    def _walker(self, T, mu, state):
+        ph = state["phase"]
+        x = sl_x(ph, T, mu)
+        _, _, W, hA, hB = _sl_params(ph, T)
+        E = hA * (1 - x) + hB * x + W * x * (1 - x)
+        return dict(x=float(np.clip(x + self.rng.normal(0, self.nx), 1e-7, 1 - 1e-7)), x_se=self.nx,
+                    E=E + self.rng.normal(0, self.nE), E_se=self.nE, drift=0.0, resolved=True), dict(state)
+
+    def run(self, T, mu, sa, sg, tag=""):
+        """Both walkers at (T, mu); also checks the tracer told it which walker is the liquid."""
+        self.calls += 1
+        if self.phase_kind is not None:
+            assert self.phase_kind["a"] == sa["phase"] and self.phase_kind["g"] == sg["phase"], (self.phase_kind, sa, sg)
+        a, sa2 = self._walker(T, mu, sa)
+        g, sg2 = self._walker(T, mu, sg)
+        return a, g, sa2, sg2
+
+
+def melt_test(out, quiet) -> bool:
+    """[10] Trace both solid-liquid branches from T_m (dH_m measured by the tracer) vs the exact lines."""
+    m, good, lines = MELT, True, []
+    for host, Tm, span, seed, cross in (("A", m["TM_A"], 500.0, 11, None), ("B", m["TM_B"], 800.0, 12, 1200.0)):
+        kT = 8.617333262e-5 * Tm
+        sign = 1.0 if host == "A" else -1.0
+        mu_pure = m["E_B"] - sign * 3.0
+        mu_probe = m["E_B"] + sign * (kT * np.log(0.02))
+        cross_mu = None if cross is None else {float(T): sl_exact(cross, host) for T in (300.0, 1500.0)}
+        cfg = TraceConfig(t0=Tm, mu0=None, t_stop=Tm + span, dt=25.0, dt_max=100.0, dt_min=5.0, min_gap=0.0,
+                          melt_T=Tm, melt_host=host, melt_mu_pure=mu_pure, melt_mu_probe=mu_probe,
+                          cross_mu=cross_mu, max_steps=40, tol_mu=0.001, max_corr=3)
+        eng = SolidLiquidEngine(seed=seed)
+        tr = BoundaryTracer(cfg, eng, out / f"melt_{host}.json", log=quiet).run(dict(phase="solid"), dict(phase="liquid"))
+        # error in T (the line is steep in dmu near T_m, so dmu errors there mean little)
+        errs = []
+        for p in tr["points"]:
+            ex, up, dn = (sl_exact(p["T"] + d, host) for d in (0.0, 1.0, -1.0))
+            errs.append((p["T"], (p["mu"] - ex) / (0.5 * (up - dn))))
+        worst = max(abs(e) for _, e in errs) if errs else float("inf")
+        dH_err = tr["melt"]["dH"] - (m["DH_A"] if host == "A" else m["DH_B"])
+        ok = (tr["status"] == "finished" and len(errs) >= 3 and worst < 10.0 and abs(dH_err) < 0.002)
+        if cross is not None:
+            tp = tr.get("three_phase") or {}
+            ok &= abs(tp.get("T", 0) - cross) < 15
+        good &= ok
+        lines.append(f"host {host}: T_m {Tm:g} K, line runs {'UP' if tr.get('direction', 0) > 0 else 'DOWN'} "
+                     f"({tr.get('phase_kind')}), dH_m err {dH_err * 1e3:+.2f} meV, {len(errs)} pts "
+                     f"{errs[0][0]:.0f}-{errs[-1][0]:.0f} K, worst T err {worst:.1f} K, "
+                     f"{sum(bool(p.get('anchored')) for p in tr['points'])} anchored, {eng.calls} calls, "
+                     f"three-phase {tr.get('three_phase', {}).get('T', '-')}, stop='{tr['stop_reason']}'"
+                     f"  -> {'PASS' if ok else 'FAIL'}")
+    for line in lines:
+        print(f"[10] {line}")
+    return good
+
+
 def main():
     """Run the downward, upward, offset-start and recentering traces and check them against the truth."""
     ap = argparse.ArgumentParser()
@@ -450,6 +572,9 @@ def main():
     print(f"[9] retrace {top['T']:.0f} -> {exit_T:.0f} K (tol_mu 4 meV): closure on the anchored point "
           f"{closure * 1e3:+.2f} meV, worst error vs exact {worst9 * 1e3:.2f} meV over {len(e9)} points, "
           f"{eng9.calls} engine calls  -> {'PASS' if good9 else 'FAIL'}")
+
+    # 10. solid-liquid lines from both pure melting points (melt anchor, v1.5)
+    ok &= melt_test(out, quiet)
 
     report(
         [str(out / "down.json"), str(out / "up.json")],

@@ -1,0 +1,234 @@
+{
+  "version": "1.5",
+  "config": {
+    "t0": 950.0,
+    "mu0": -0.5077180050159648,
+    "t_stop": 1400.0,
+    "dt": 50.0,
+    "dt_min": 2.0,
+    "dt_max": 100.0,
+    "tol_mu": 0.002,
+    "max_corr": 2,
+    "min_gap": 0.05,
+    "z": 2.576,
+    "min_jump": 0.03,
+    "max_steps": 60,
+    "mu0_se": 0.0,
+    "max_gap_frac": 0.15,
+    "recenter": true,
+    "recenter_dmu": 0.0025,
+    "recenter_max_runs": 24,
+    "max_recenter": 8,
+    "x_a0": null,
+    "x_g0": null,
+    "dilute_dG": null,
+    "dilute_tol": 0.003,
+    "dilute_x_max": 0.15,
+    "dt_floor": 0.0,
+    "melt_T": null,
+    "melt_T_se": 0.0,
+    "melt_host": "A",
+    "melt_dH": null,
+    "melt_dH_se": 0.0,
+    "melt_dCp": 0.0,
+    "melt_mu_pure": null,
+    "melt_mu_probe": null,
+    "cross_mu": null
+  },
+  "points": [
+    {
+      "T": 950.0,
+      "mu": -0.5077180050159648,
+      "mu_se": 0.0,
+      "a": {
+        "x": 0.09049226735028182,
+        "x_se": 0.003,
+        "E": -0.030449626807461168,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.7842824105423242,
+        "x_se": 0.003,
+        "E": -0.3642279963290748,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0021795541422829356,
+      "f_se": 0.0003473608940656769,
+      "dT": 0.0,
+      "corrector_runs": 0,
+      "mu_pred": -0.5077180050159648,
+      "mu_corr": -0.5077180050159648,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      },
+      "recentered": null
+    },
+    {
+      "T": 1000.0,
+      "mu": -0.5090491984655147,
+      "mu_se": 0.00016116600495952478,
+      "a": {
+        "x": 0.11183508616540228,
+        "x_se": 0.003,
+        "E": -0.03634250429783759,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.7473267740995269,
+        "x_se": 0.003,
+        "E": -0.33909192712911224,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0028133298638709017,
+      "f_se": 0.000397319307302882,
+      "dT": 50.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5090491984655147,
+      "mu_corr": -0.5092427421983118,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1075.0,
+      "mu": -0.5116670081523054,
+      "mu_se": 0.00031286957116083034,
+      "a": {
+        "x": 0.16369895795387093,
+        "x_se": 0.003,
+        "E": -0.04858676394705415,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.6786257473383399,
+        "x_se": 0.003,
+        "E": -0.29677513435903596,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0027493837844380156,
+      "f_se": 0.0005300736424797649,
+      "dT": 75.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5116670081523054,
+      "mu_corr": -0.5113010337447431,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 1099.024100091576,
+      "mu": -0.5123135839040841,
+      "mu_se": 0.0003267290162523492,
+      "a": {
+        "x": 0.1787955670112075,
+        "x_se": 0.003,
+        "E": -0.0550896226221524,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.6476220227029827,
+        "x_se": 0.003,
+        "E": -0.28207559245841257,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.002666540838321893,
+      "f_se": 0.0005964997051682516,
+      "dT": 24.024100091576056,
+      "corrector_runs": 1,
+      "mu_pred": -0.5123135839040841,
+      "mu_corr": -0.5123060086185941,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    }
+  ],
+  "events": [
+    {
+      "T": 1123.0482001831522,
+      "kind": "rejected",
+      "dT": 48.04820018315211,
+      "mu": -0.5129283769861697,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    },
+    {
+      "T": 1135.06025022894,
+      "kind": "rejected",
+      "dT": 36.03615013736408,
+      "mu": -0.5131877548624291,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    },
+    {
+      "T": 1117.042175160258,
+      "kind": "rejected",
+      "dT": 18.01807506868204,
+      "mu": -0.5127626499371613,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    },
+    {
+      "T": 1108.033137625917,
+      "kind": "rejected",
+      "dT": 9.00903753434102,
+      "mu": -0.5125412154257686,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    },
+    {
+      "T": 1103.5286188587465,
+      "kind": "rejected",
+      "dT": 4.50451876717051,
+      "mu": -0.5124281876899367,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    },
+    {
+      "T": 1101.2763594751611,
+      "kind": "rejected",
+      "dT": 2.252259383585255,
+      "mu": -0.5123710845090967,
+      "reasons": [
+        "alpha left its crystal phase (solid fraction 0.1)"
+      ]
+    }
+  ],
+  "status": "finished",
+  "stop_reason": "a new phase appeared (a walker lost its crystal phase) between 1099.02 and 1101.28 K",
+  "next_dt": 2.252259383585255,
+  "mode": "eq29",
+  "anchor": null
+}

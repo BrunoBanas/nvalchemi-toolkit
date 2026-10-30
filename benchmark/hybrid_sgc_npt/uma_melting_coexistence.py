@@ -46,6 +46,19 @@ interactions once atoms drift beyond one periodic image (see
 ``_npt_wrap_hooks`` in run_campaign.py and the BUG note in
 nvalchemi/models/uma.py).
 
+Alloy mode (``--delta-mu-ev``): every stage after the hot melt is hybrid SGC-MD at
+the absolute Pt chemical potential delta_mu (Au = 0, the run_campaign.py
+convention): before each ``--log-every-steps`` MD chunk, ``--mc-step-fraction`` x N
+SGC transmutation trials (energy-only). Solid and liquid then each take their own
+equilibrium composition at (T, delta_mu), and the interface moves toward the
+phase with the lower SGC potential phi = G - delta_mu x, so the T where it stops
+moving is a point of the solid-liquid coexistence line, with the solid-like and
+liquid-like Pt fractions (``x_pt_solid``/``x_pt_liquid`` in summary.json) as the
+solidus and liquidus compositions. ``--element`` is then the host the cells are
+built from (Au for the Au-rich branch, Pt for the Pt-rich one); merge_mole must
+be off because the composition changes. uma_melting_bisect.py --delta-mu-ev
+bisects T at fixed delta_mu.
+
 Outputs in ``--out-dir/<element>/T<temperature>/``: ``series.csv`` (time,
 potential energy/atom, temperature, box lengths, solid fraction),
 ``trajectory.extxyz``, ``snapshots.npz``, ``summary.json``.
@@ -84,7 +97,11 @@ from run_campaign import (  # noqa: E402
     _wrap_batch_positions,
 )
 
+from run_campaign import SPECIES  # noqa: E402
+
 from nvalchemi.data import AtomicData, Batch
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.mc import SGC
 from nvalchemi.dynamics.hooks import MaxForceClampHook
 from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.dynamics.integrators.nvt_langevin import NVTLangevin
@@ -223,16 +240,53 @@ def _nvt(
     )
 
 
-def _integrate(dynamics, batch: Batch, n_steps: int, chunk: int, on_chunk=None) -> None:
+def _sgc(
+    model: UMAWrapper,
+    temperature_k: float,
+    delta_mu_ev: float,
+    seed: int,
+    device: torch.device,
+) -> SGC:
+    return SGC(
+        model=model,
+        temperature=torch.tensor([temperature_k], device=device),
+        species=SPECIES,
+        chemical_potentials={
+            SPECIES[0]: torch.zeros(1, device=device),
+            SPECIES[1]: torch.tensor([delta_mu_ev], device=device),
+        },
+        random_seed=seed,
+    )
+
+
+def _integrate(
+    dynamics, batch: Batch, n_steps: int, chunk: int, on_chunk=None, mc=None, mc_steps=0
+) -> None:
     """Run ``n_steps`` in chunks, calling ``on_chunk(steps_done)`` after each.
-    ``on_chunk`` returning True stops early."""
+    ``on_chunk`` returning True stops early. With ``mc`` (an SGC sampler), each
+    chunk is preceded by an ``mc_steps`` SGC block (hybrid MC-MD, the same loop
+    as run_campaign._run_hybrid_with_observables)."""
     _wrap_batch_positions(batch)
+    hybrid = (
+        None
+        if mc is None or mc_steps < 1
+        else HybridMCMD(mc=mc, md=dynamics, mc_steps=mc_steps, md_steps=chunk, mc_energy_only=True)
+    )
     with dynamics:
         dynamics.compute(batch)
+        if hybrid is not None:
+            hybrid.mc.synchronize(batch)
         done = 0
         while done < n_steps:
             k = min(chunk, n_steps - done)
+            if hybrid is not None:
+                hybrid.run_mc_block(batch)
+                if hasattr(hybrid, "prepare_md_block"):
+                    hybrid.prepare_md_block(batch)
+                dynamics.compute(batch)
             dynamics.run(batch, n_steps=k)
+            if hybrid is not None:
+                hybrid.mc.synchronize(batch)
             done += k
             if on_chunk is not None and on_chunk(done):
                 return
@@ -283,6 +337,19 @@ def main() -> None:
     ap.add_argument("--snapshot-ps", type=float, default=0.5)
     ap.add_argument("--log-every-steps", type=int, default=50)
     ap.add_argument("--seed", type=int, default=20260921)
+    ap.add_argument(
+        "--delta-mu-ev",
+        type=float,
+        default=None,
+        help="alloy mode: absolute Pt chemical potential (Au = 0) for hybrid SGC-MD in every "
+        "stage after the hot melt; omit for a pure element",
+    )
+    ap.add_argument(
+        "--mc-step-fraction",
+        type=float,
+        default=0.1,
+        help="alloy mode: SGC trials per MD chunk, as a fraction of the atom count",
+    )
     ap.add_argument("--device", default="cuda")
     ap.add_argument(
         "--inference-settings",
@@ -295,13 +362,17 @@ def main() -> None:
     device = torch.device(args.device)
     T, el, dt = args.temperature_k, args.element, args.dt_fs
     melt_T = args.melt_temperature_k or max(DEFAULT_MELT_TEMPERATURE_K[el], 1.8 * T)
+    dmu = args.delta_mu_ev
+    if dmu is not None and "merge_mole=true" in args.inference_settings.replace(" ", ""):
+        raise SystemExit("--delta-mu-ev changes the composition: use merge_mole=false")
     out = args.out_dir / el / f"T{T:g}"
     out.mkdir(parents=True, exist_ok=True)
     t_wall = time.perf_counter()
     print(
         f"[setup] {el} T={T:g} K (exp. T_m {EXPERIMENTAL_TM_K[el]:g} K) nx={args.nx} nz/phase={args.nz} "
         f"dt={dt} fs melt_T={melt_T:g} K checkpoint={CHECKPOINT} task={TASK} device={device} "
-        f"(single-graph batch, no multi-walker batching)",
+        f"(single-graph batch, no multi-walker batching)"
+        + ("" if dmu is None else f" SGC delta_mu={dmu:+.4f} eV, MC trials/chunk frac={args.mc_step_fraction}"),
         flush=True,
     )
 
@@ -338,12 +409,20 @@ def main() -> None:
             )
         return False
 
+    def _mc(seed: int) -> dict:
+        """Hybrid SGC arguments for _integrate in alloy mode (none for a pure element)."""
+        if dmu is None:
+            return {}
+        n = len(batch.atomic_numbers)
+        return dict(mc=_sgc(model, T, dmu, seed, device), mc_steps=max(1, round(args.mc_step_fraction * n)))
+
     _integrate(
         _npt(model, T, dt, device),
         batch,
         _steps(args.solid_eq_ps, dt),
         args.log_every_steps,
         _solid_log,
+        **_mc(args.seed + 100),
     )
     L_avg = np.mean(cells[len(cells) // 2 :], axis=0)
     solid = _snapshot(batch)
@@ -396,6 +475,7 @@ def main() -> None:
         batch,
         _steps(args.liquid_eq_ps, dt),
         args.log_every_steps,
+        **_mc(args.seed + 110),
     )
     liquid = _snapshot(batch)
     f_liq = float(solid_like_mask(liquid["positions"], liquid["cell"]).mean())
@@ -451,6 +531,7 @@ def main() -> None:
         "positions": [],
         "cell": [],
         "solid_mask": [],
+        "pt": [],
     }
     snap_every = max(
         args.log_every_steps,
@@ -474,6 +555,7 @@ def main() -> None:
             snaps["positions"].append(s["positions"].astype(np.float32))
             snaps["cell"].append(s["cell"])
             snaps["solid_mask"].append(m)
+            snaps["pt"].append(s["numbers"] == SPECIES[1])
             frame = Atoms(
                 numbers=s["numbers"], positions=s["positions"], cell=s["cell"], pbc=True
             )
@@ -498,7 +580,9 @@ def main() -> None:
             state["last"] = done_state
             print(
                 f"[prod] {t_ps:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  T={_temperature(s):6.0f}  "
-                f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}",
+                f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}"
+                + ("" if dmu is None else f"  x_Pt solid/liquid={(s['numbers'][m] == SPECIES[1]).mean():.3f}/"
+                   f"{(s['numbers'][~m] == SPECIES[1]).mean() if (~m).any() else float('nan'):.3f}"),
                 flush=True,
             )
             if state["streak"] >= 3:
@@ -514,6 +598,7 @@ def main() -> None:
         _steps(args.production_ps, dt),
         args.log_every_steps,
         _prod_log,
+        **_mc(args.seed + 120),
     )
     with series_path.open("w", newline="") as fh:
         w = csv.writer(fh)
@@ -539,6 +624,14 @@ def main() -> None:
         else float("nan")
     )
     final = snaps["solid_mask"][-1].mean() if snaps["solid_mask"] else float("nan")
+    # Phase compositions over the second half of the snapshots (solid-like vs liquid-like atoms).
+    half = slice(len(snaps["pt"]) // 2, None)
+    def _x(sel: bool) -> float:
+        num = sum(int((p & (m == sel)).sum()) for p, m in zip(snaps["pt"][half], snaps["solid_mask"][half]))
+        den = sum(int((m == sel).sum()) for m in snaps["solid_mask"][half])
+        return num / den if den else float("nan")
+    x_solid, x_liquid = _x(True), _x(False)
+    x_total = float(np.mean([p.mean() for p in snaps["pt"][half]])) if snaps["pt"] else float("nan")
     verdict = state["verdict"]
     if verdict.startswith("coexisting"):
         verdict = (
@@ -563,6 +656,11 @@ def main() -> None:
         solid_fraction_rate_per_ps_first_10ps=rate,
         production_ps_run=float(t.max()) if len(t) else 0.0,
         verdict=verdict,
+        delta_mu_ev=dmu,
+        mc_step_fraction=args.mc_step_fraction if dmu is not None else 0.0,
+        x_pt_solid=x_solid,
+        x_pt_liquid=x_liquid,
+        x_pt_total=x_total,
         wall_minutes=(time.perf_counter() - t_wall) / 60,
     )
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")

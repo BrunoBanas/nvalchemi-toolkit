@@ -1,0 +1,240 @@
+{
+  "version": "1.5",
+  "config": {
+    "t0": 950.0,
+    "mu0": -0.5077180050159648,
+    "t_stop": 600.0,
+    "dt": 50.0,
+    "dt_min": 5.0,
+    "dt_max": 100.0,
+    "tol_mu": 0.002,
+    "max_corr": 2,
+    "min_gap": 0.05,
+    "z": 2.576,
+    "min_jump": 0.03,
+    "max_steps": 60,
+    "mu0_se": 0.004,
+    "max_gap_frac": 0.15,
+    "recenter": false,
+    "recenter_dmu": 0.0025,
+    "recenter_max_runs": 24,
+    "max_recenter": 8,
+    "x_a0": 0.09570580859,
+    "x_g0": 0.78836442327,
+    "dilute_dG": null,
+    "dilute_tol": 0.003,
+    "dilute_x_max": 0.15,
+    "dt_floor": 0.0,
+    "melt_T": null,
+    "melt_T_se": 0.0,
+    "melt_host": "A",
+    "melt_dH": null,
+    "melt_dH_se": 0.0,
+    "melt_dCp": 0.0,
+    "melt_mu_pure": null,
+    "melt_mu_probe": null,
+    "cross_mu": null
+  },
+  "points": [
+    {
+      "T": 950.0,
+      "mu": -0.5077180050159648,
+      "mu_se": 0.004,
+      "a": {
+        "x": 0.09571075700584492,
+        "x_se": 0.003,
+        "E": -0.02512533231505359,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.7875433171019325,
+        "x_se": 0.003,
+        "E": -0.3413854864702526,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.004141046387244315,
+      "f_se": 0.00034011406032832673,
+      "dT": 0.0,
+      "corrector_runs": 0,
+      "mu_pred": -0.5077180050159648,
+      "mu_corr": -0.5077180050159648,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      },
+      "recentered": null
+    },
+    {
+      "T": 900.0,
+      "mu": -0.5049077799958614,
+      "mu_se": 0.004002921886383429,
+      "a": {
+        "x": 0.07815885822341044,
+        "x_se": 0.003,
+        "E": -0.02237671236693396,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.8283569132259168,
+        "x_se": 0.003,
+        "E": -0.36157455926452814,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.004092116930016702,
+      "f_se": 0.0002956728115431948,
+      "dT": -50.0,
+      "corrector_runs": 1,
+      "mu_pred": -0.5049077799958614,
+      "mu_corr": -0.5049243824161271,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 862.5,
+      "mu": -0.5026250496655078,
+      "mu_se": 0.004004506353503177,
+      "a": {
+        "x": 0.06921944561061948,
+        "x_se": 0.003,
+        "E": -0.019289661947036473,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.8543342801357875,
+        "x_se": 0.003,
+        "E": -0.37830348533967945,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.0033705783277708026,
+      "f_se": 0.0002721379761189843,
+      "dT": -37.5,
+      "corrector_runs": 1,
+      "mu_pred": -0.5026250496655078,
+      "mu_corr": -0.5028159688278406,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    },
+    {
+      "T": 834.375,
+      "mu": -0.501228779524769,
+      "mu_se": 0.004005399735930285,
+      "a": {
+        "x": 0.05555266023452008,
+        "x_se": 0.003,
+        "E": -0.016079499935136105,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "g": {
+        "x": 0.8674047015089641,
+        "x_se": 0.003,
+        "E": -0.3891184307333614,
+        "E_se": 0.0015,
+        "drift": 0.0,
+        "resolved": true
+      },
+      "f": 0.00300096296083769,
+      "f_se": 0.00025515628939793176,
+      "dT": -28.125,
+      "corrector_runs": 1,
+      "mu_pred": -0.501228779524769,
+      "mu_corr": -0.5011802296098731,
+      "state_a": {
+        "branch": "low"
+      },
+      "state_g": {
+        "branch": "high"
+      }
+    }
+  ],
+  "events": [
+    {
+      "T": 825.0,
+      "kind": "rejected",
+      "dT": -75.0,
+      "mu": -0.5001606416172281,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.877 vs own trend 0.052)",
+        "gap x_g - x_a = 0.003 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 806.25,
+      "kind": "rejected",
+      "dT": -56.25,
+      "mu": -0.5000281725323915,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.882 vs own trend 0.051)",
+        "gap x_g - x_a = -0.002 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 792.1875,
+      "kind": "rejected",
+      "dT": -42.1875,
+      "mu": -0.49922961678753064,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.894 vs own trend 0.043)",
+        "gap x_g - x_a = -0.008 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 813.28125,
+      "kind": "rejected",
+      "dT": -21.09375,
+      "mu": -0.5001992753619839,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.883 vs own trend 0.050)",
+        "gap x_g - x_a = -0.004 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 823.828125,
+      "kind": "rejected",
+      "dT": -10.546875,
+      "mu": -0.5007073634309022,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.874 vs own trend 0.053)",
+        "gap x_g - x_a = 0.006 < min_gap 0.05"
+      ]
+    },
+    {
+      "T": 829.1015625,
+      "kind": "rejected",
+      "dT": -5.2734375,
+      "mu": -0.5009665000878786,
+      "reasons": [
+        "alpha jumped toward the other phase (x 0.874 vs own trend 0.055)",
+        "gap x_g - x_a = -0.002 < min_gap 0.05"
+      ]
+    }
+  ],
+  "status": "finished",
+  "stop_reason": "gap closed: critical point approached between 834.375 and 829.102 K",
+  "next_dt": -5.2734375,
+  "mode": "eq29",
+  "anchor": null
+}

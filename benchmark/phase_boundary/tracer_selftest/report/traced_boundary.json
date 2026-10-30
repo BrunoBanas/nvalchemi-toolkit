@@ -1,0 +1,23 @@
+{
+  "n_points": 13,
+  "T_range": [
+    600.0,
+    1194.7296571584934
+  ],
+  "stop_reasons": [
+    "reached t_stop",
+    "gap closed: critical point approached between 1194.73 and 1198.28 K"
+  ],
+  "rejections": 2,
+  "critical_estimate": {
+    "T_c": 1203.5370866338822,
+    "beta_c": 0.326,
+    "fitted_T": [
+      1161.3223798221543,
+      1176.079286435259,
+      1190.8361930483638,
+      1194.7296571584934
+    ],
+    "x_c": 0.42492135689297683
+  }
+}

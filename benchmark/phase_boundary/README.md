@@ -141,6 +141,10 @@ give the slope, and no anchor is needed after the starting point.
   errors. It switches to eq. 29 when formula and eq. 29 differ by > `dilute_tol`
   (3 meV) or a solute fraction exceeds `dilute_x_max` (0.15), recording
   `dilute_exit_T`. `dt_floor` holds a minimum step until the first rejection.
+- Melt anchoring (tracer 1.5, `melt_T`): solid-liquid lines from the pure host's
+  melting point; ΔH_m and the partition direction are measured by the tracer, Δμ is
+  anchored from kT ln[(1 − y_s)/(1 − y_l)] = ΔH_m(1 − T/T_m), and `cross_mu` stops the
+  trace at the three-phase point. See boundary_tracer.py's docstring and self-test 10.
   Self-test checks 8 and 9 cover the anchored upward pass and the retrace to it.
 
 ## Validation

@@ -65,6 +65,15 @@ the last committed states (nothing is lost).
 Resumable: every walker's spec, progress and latest state are saved after each chunk; traces
 resume from their own trace.json. A resubmission continues exactly where the last job stopped.
 
+Solid-liquid lines (tracer 1.5): a trace with ``"melt_T"`` (pure host melting point) starts from
+the pure host's T_m with a solid and a liquid walker (``"solid_state"`` / ``"liquid_state"``; a
+fresh ``liquid_state`` with ``"melt_T": 3000`` is melted by ``melt_ps`` of NPT at that temperature
+before its first block) and traces the solidus/liquidus pair with boundary_tracer's melt anchor:
+dH_m measured at ``melt_mu_pure``, partition ratio and direction from ``melt_mu_probe``.
+``"cross_mu"`` (a {T: dmu} dict, or a CSV with T and mu columns such as
+traced_boundary_current.csv) stops it at the three-phase point. The liquid walker is checked the
+other way round: its solid-like fraction must stay below ``max_liquid_solid_fraction`` (0.5).
+
 Trace runs also check structure: every walker's final state must keep a solid-like fraction
 (atoms with exactly 12 neighbours inside the fcc first shell) of at least ``min_solid_fraction``
 (0.5); otherwise that phase is reported with ``phase_ok=False`` and the tracer stops there with
@@ -92,6 +101,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import shutil
 import threading
@@ -309,8 +319,10 @@ class PoolTraceEngine(NvalchemiTraceEngine):
     Walker ids are deterministic in the tracer's tag, so an interrupted run resumes mid-step."""
 
     def __init__(self, pool, name, cls, replicas, min_blocks, max_blocks, gate_passes, log_path,
-                 min_solid_fraction=0.5):
+                 min_solid_fraction=0.5, max_liquid_solid_fraction=0.5):
         self.min_solid_fraction = min_solid_fraction
+        self.max_liquid_solid_fraction = max_liquid_solid_fraction
+        self.phase_kind = None  # melt traces: {"a": "solid"|"liquid", "g": ...}, set by the tracer
         self.pool, self.name, self.cls = pool, name, cls
         self.replicas, self.z, self.min_jump = replicas, 2.576, 0.03
         self.min_blocks, self.max_blocks, self.gate_passes = min_blocks, max_blocks, gate_passes
@@ -337,11 +349,16 @@ class PoolTraceEngine(NvalchemiTraceEngine):
                 wids.append(w.wid)
         return self.pool.wait(wids)
 
-    def _crystal(self, ws: list[Walker], obs: dict) -> dict:
-        """Add each replica's solid-like fraction; flag the phase if any replica lost its crystal."""
+    def _crystal(self, ws: list[Walker], obs: dict, phase: str = "a") -> dict:
+        """Add each replica's solid-like fraction; flag the phase if any replica lost its crystal
+        (or, for the liquid walker of a melt trace, crystallized)."""
         sf = [solid_fraction(self.pool.store.load(f"{w.wid}.final", device="cpu")) for w in ws]
         obs = dict(obs, solid_fraction=[round(v, 3) for v in sf])
-        if min(sf) < self.min_solid_fraction:
+        if self.phase_kind and self.phase_kind.get(phase) == "liquid":
+            if max(sf) > self.max_liquid_solid_fraction:
+                obs.update(phase_ok=False, phase_note=f"liquid crystallized: solid-like fraction {max(sf):.2f} "
+                                                      f"> {self.max_liquid_solid_fraction}")
+        elif min(sf) < self.min_solid_fraction:
             obs.update(phase_ok=False, phase_note=f"solid-like fraction {min(sf):.2f} < {self.min_solid_fraction}")
         return obs
 
@@ -351,7 +368,7 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         name, branch = ("alpha", "Arich") if phase == "a" else ("gamma", "Brich")
         ws = self._submit(T, mu, tag, ((name, state, branch),))
         obs = self._combine([self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"]) for w in ws])
-        obs = self._crystal(ws, obs)
+        obs = self._crystal(ws, obs, phase)
         print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={obs['x']:.4f}{obs['x_replicas']} "
               f"solid {obs['solid_fraction']} (recentering)",
               flush=True)
@@ -365,7 +382,7 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         obs, new_states = {}, {}
         for j, phase in enumerate(("alpha", "gamma")):
             sl = slice(j * self.replicas, (j + 1) * self.replicas)
-            obs[phase] = self._crystal(ws[sl], self._combine(per_run[sl]))
+            obs[phase] = self._crystal(ws[sl], self._combine(per_run[sl]), "a" if phase == "alpha" else "g")
             new_states[phase] = [f"{w.wid}.final" for w in ws[sl]]
         with self.log_path.open("a") as fh:
             fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])) + "\n")
@@ -433,7 +450,26 @@ def build_walkers(spec: dict, ref: dict, pool: Pool) -> list[dict]:
     return spec.get("traces", [])
 
 
-def initial(w: Walker, pool: Pool, ref: dict, n_atoms: int, device):
+def melt_fresh(data, model, hot_T: float, T: float, ps: float, device):
+    """Melt a fresh crystal: isotropic NPT at hot_T for ps (dt 1.5 fs), then velocities rescaled to T."""
+    batch = Batch.from_data_list([data])
+    _wrap_batch_positions(batch)
+    md = NPT(model=model, dt=1.5, temperature=torch.tensor([hot_T], device=device),
+             pressure=torch.full((1,), PRESSURE_EV_PER_A3, device=device), thermostat_time=THERMOSTAT_TIME_FS,
+             barostat_time=BAROSTAT_TIME_FS, pressure_coupling="isotropic", hooks=_npt_wrap_hooks())
+    with md:
+        md.compute(batch)
+        md.run(batch, n_steps=max(1, round(ps * 1000 / 1.5)))
+    batch.velocities = batch.velocities * math.sqrt(T / hot_T)
+    out = batch.to_data_list()[0]
+    sf = solid_fraction(out)
+    print(f"[campaign] melted a fresh walker at {hot_T:g} K for {ps:g} ps: solid-like fraction {sf:.2f}", flush=True)
+    if sf > 0.3:
+        raise RuntimeError(f"fresh liquid still {sf:.0%} solid-like after {ps} ps at {hot_T} K")
+    return out
+
+
+def initial(w: Walker, pool: Pool, ref: dict, n_atoms: int, device, model=None):
     """Starting AtomicData for a walker that has not run yet."""
     s = w.start
     if "state_ref" in s:
@@ -447,8 +483,11 @@ def initial(w: Walker, pool: Pool, ref: dict, n_atoms: int, device):
                {SPECIES[0]: ref[T]["Au"]["lattice_constant_a_ang"], SPECIES[1]: ref[T]["Pt"]["lattice_constant_a_ang"]})
     x0 = s.get("c0", s.get("x0", 0.5))
     seed_x = s.get("seed_phase_x")
-    return initial_state(n_atoms, w.T, x0, s.get("fresh", "random"), lattice,
+    data = initial_state(n_atoms, w.T, x0, s.get("fresh", "random"), lattice,
                          SEED + zlib.crc32(w.wid.encode()) % 100000, device, tuple(seed_x) if seed_x else None)
+    if s.get("melt_T"):
+        data = melt_fresh(data, model, float(s["melt_T"]), w.T, float(s.get("melt_ps", 6.0)), device)
+    return data
 
 
 def finish_step(w: Walker, pool: Pool, n_atoms: int, equilibrated: bool, gx: dict, ge: dict,
@@ -515,9 +554,11 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     temps = {float(i["T"]) for k in ("ladders", "points", "vcsgc") for i in spec.get(k, [])}
     # traces only need the pure references (lattice constants) for a fresh start without "lattice_a"
     def fresh_needs_ref(t):
-        return any(isinstance(t.get(k), dict) and "lattice_a" not in t[k] for k in ("alpha_state", "gamma_state"))
+        return any(isinstance(t.get(k), dict) and "lattice_a" not in t[k]
+                   for k in ("alpha_state", "gamma_state", "solid_state", "liquid_state"))
 
-    temps |= {float(t["t0"]) for t in spec.get("traces", []) if "t0" in t and fresh_needs_ref(t)}
+    temps |= {float(t.get("t0", t.get("melt_T"))) for t in spec.get("traces", [])
+              if ("t0" in t or "melt_T" in t) and fresh_needs_ref(t)}
     ref = references(spec, model, temps, out, device)
     store = FinalStateStore(out / "states")
     pool = Pool(out, store)
@@ -533,7 +574,16 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     threads: dict[str, threading.Thread] = {}
     cfg_keys = ("mu0_se", "dt", "dt_min", "dt_max", "tol_mu", "min_gap", "max_corr", "max_gap_frac", "z", "min_jump",
                 "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0",
-                "dilute_tol", "dilute_x_max", "dt_floor")
+                "dilute_tol", "dilute_x_max", "dt_floor", "melt_T_se", "melt_host", "melt_dH", "melt_dH_se",
+                "melt_dCp", "melt_mu_pure", "melt_mu_probe")
+
+    def cross_table(t):
+        """The trace's cross_mu: an inline {T: dmu} dict or a CSV with T and mu columns."""
+        c = t.get("cross_mu")
+        if isinstance(c, str):
+            with open(c) as fh:
+                c = {float(r["T"]): float(r["mu"]) for r in csv.DictReader(fh)}
+        return c
 
     def dilute_table(t):
         """The trace's dilute_dG: a pure_dG.json path (its "table") or an inline {T: dG} dict."""
@@ -565,7 +615,8 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                                  int(t.get("min_blocks", spec.get("defaults", {}).get("min_blocks", 100))),
                                  int(t.get("max_blocks", spec.get("defaults", {}).get("max_blocks", 300))),
                                  int(t.get("gate_passes", 2)), tdir / "runs.jsonl",
-                                 float(t.get("min_solid_fraction", 0.5)))
+                                 float(t.get("min_solid_fraction", 0.5)),
+                                 float(t.get("max_liquid_solid_fraction", 0.5)))
         Tracer = make_exporting_tracer(BoundaryTracer, store, tdir)
 
         def target(engine=engine, t=t, tdir=tdir, Tracer=Tracer):
@@ -595,6 +646,10 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                     (tdir / "closure.json").write_text(json.dumps(closure, indent=2) + "\n")
                     print(f"[trace] {t['name']}: closure at {end['T']:g} K: retrace mu {end['mu']:.5f}+-{end['mu_se']:.4f} "
                           f"vs source point {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)", flush=True)
+                elif t.get("melt_T") is not None:
+                    cfg = TraceConfig(t0=float(t["melt_T"]), mu0=None, t_stop=t["t_stop"], melt_T=float(t["melt_T"]),
+                                      cross_mu=cross_table(t), **{k: t[k] for k in cfg_keys if k in t})
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(t["solid_state"], t["liquid_state"])
                 else:
                     cfg = TraceConfig(t0=t["t0"], mu0=t.get("mu0"), t_stop=t["t_stop"], dilute_dG=dilute_table(t),
                                       **{k: t[k] for k in cfg_keys if k in t})
@@ -641,7 +696,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
             for w in active:
                 started = w.x or w.step > 0 or w.finished
                 states.append(store.load(w.wid, device=device) if started and store.exists(w.wid)
-                              else initial(w, pool, ref, n_atoms, device))
+                              else initial(w, pool, ref, n_atoms, device, model))
             n_chunks += 1
             try:
                 if device.type == "cuda":
@@ -753,6 +808,12 @@ def smoke_spec(spec: dict) -> dict:
                 step = it.get("dt_min", 5.0)
                 it["t_stop"] = it["t0"] + (step if it["t_stop"] > it["t0"] else -step)
                 it["dt"] = step
+            if key == "traces" and "melt_T" in it:  # pure + probe runs, then one anchored point
+                step = it.get("dt_min", 5.0)
+                it["t_stop"], it["dt"] = it["melt_T"] + step, step
+                for k in ("solid_state", "liquid_state"):
+                    if isinstance(it.get(k), dict) and "melt_T" in it[k]:
+                        it[k]["melt_ps"] = 1.0
     return spec
 
 
