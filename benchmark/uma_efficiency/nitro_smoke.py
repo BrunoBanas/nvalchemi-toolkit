@@ -53,7 +53,7 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=20)
     args = parser.parse_args()
 
-    atoms = bulk(args.element, cubic=True) * (args.reps,) * 3
+    atoms = bulk(args.element, cubic=True) * ((args.reps,) * 3)
     atoms.rattle(0.05, seed=0)
     batch = Batch.from_data_list([AtomicData.from_atoms(atoms)]).to("cuda")
     print(f"{len(atoms)} atoms, GPU {torch.cuda.get_device_name()}")
