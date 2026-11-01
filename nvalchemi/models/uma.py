@@ -2243,6 +2243,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             first_call
             and settings is not None
             and (getattr(settings, "merge_mole", False) or compiling)
+            # Nitro keeps its unmerged experts on the CPU and merges them there
+            # before its own device move; moving early mixes CPU and CUDA tensors.
+            and not getattr(settings, "nitro", False)
         ):
             # Fairchem prepares MoLE before its normal device move. Move both the
             # model and first input now so routing and distributed reductions run
