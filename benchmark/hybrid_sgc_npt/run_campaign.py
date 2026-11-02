@@ -185,6 +185,7 @@ import argparse
 import csv
 import json
 import math
+import os
 import statistics
 import time
 from dataclasses import replace
@@ -224,7 +225,9 @@ from nvalchemi.scheduling import (
 # Grid definition
 # ---------------
 
-CHECKPOINT = "uma-s-1p2"
+# Overridable per cluster (Perlmutter's env.sh sets uma-s-1p2p1); every driver importing CHECKPOINT follows it.
+# Never mix checkpoints within one isotherm / boundary trace.
+CHECKPOINT = os.environ.get("NVALCHEMI_UMA_CHECKPOINT", "uma-s-1p2")
 TASK = "omat"
 # SGC changes atomic composition every step, so no MoLE merge (it assumes a
 # fixed composition). Activation checkpointing off and tf32 on: 1.9x faster per
