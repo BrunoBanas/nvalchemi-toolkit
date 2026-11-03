@@ -409,9 +409,14 @@ def relax_cell_volume(
     """
     n_graphs = batch.num_graphs
     for iteration in range(max_iterations + 1):
-        pressure = -batch.stress.reshape(n_graphs, 3, 3).diagonal(dim1=-2, dim2=-1).sum(-1) / 3.0
+        pressure = (
+            -batch.stress.reshape(n_graphs, 3, 3).diagonal(dim1=-2, dim2=-1).sum(-1)
+            / 3.0
+        )
         excess = pressure - target_pressure_ev_per_a3
-        if iteration == max_iterations or bool((excess.abs() < tolerance_ev_per_a3).all()):
+        if iteration == max_iterations or bool(
+            (excess.abs() < tolerance_ev_per_a3).all()
+        ):
             return pressure.detach()
         scale = (1.0 + excess / bulk_modulus_ev_per_a3).clamp(0.85, 1.15) ** (1.0 / 3.0)
         with torch.no_grad():
@@ -421,7 +426,9 @@ def relax_cell_volume(
     return pressure.detach()
 
 
-def lattice_constant_per_graph(batch: Batch, atoms_per_cubic_cell: int = 4) -> list[float]:
+def lattice_constant_per_graph(
+    batch: Batch, atoms_per_cubic_cell: int = 4
+) -> list[float]:
     """Cubic-equivalent lattice constant (4 atoms per fcc cube) of each graph's cell."""
     n_graphs = batch.num_graphs
     volumes = torch.linalg.det(batch.cell.reshape(n_graphs, 3, 3)).abs()

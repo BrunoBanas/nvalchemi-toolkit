@@ -213,10 +213,17 @@ class Pool:
             p = self.path(w.wid)
             if p.is_file():
                 saved = Walker(**json.loads(p.read_text()))
-                if (saved.kind, saved.cls, saved.T, saved.mus, saved.kappa, saved.c0) != (
-                    w.kind, w.cls, w.T, w.mus, w.kappa, w.c0
-                ):
-                    raise SystemExit(f"walker {w.wid}: spec differs from {p}; use a fresh --out")
+                if (
+                    saved.kind,
+                    saved.cls,
+                    saved.T,
+                    saved.mus,
+                    saved.kappa,
+                    saved.c0,
+                ) != (w.kind, w.cls, w.T, w.mus, w.kappa, w.c0):
+                    raise SystemExit(
+                        f"walker {w.wid}: spec differs from {p}; use a fresh --out"
+                    )
                 w = saved
             self._order += 1
             w.order = self._order
@@ -271,8 +278,14 @@ def write_extxyz(data, path: Path, comment: str = "") -> None:
     pos = data.positions.detach().cpu().double().numpy().reshape(-1, 3)
     cell = data.cell.detach().cpu().double().numpy().reshape(3, 3)
     lat = " ".join(f"{v:.8f}" for v in cell.reshape(-1))
-    lines = [str(len(z)), f'Lattice="{lat}" Properties=species:S:1:pos:R:3 pbc="T T T" {comment}'.rstrip()]
-    lines += [f"{chemical_symbols[int(zi)]} {x:.6f} {y:.6f} {w:.6f}" for zi, (x, y, w) in zip(z, pos)]
+    lines = [
+        str(len(z)),
+        f'Lattice="{lat}" Properties=species:S:1:pos:R:3 pbc="T T T" {comment}'.rstrip(),
+    ]
+    lines += [
+        f"{chemical_symbols[int(zi)]} {x:.6f} {y:.6f} {w:.6f}"
+        for zi, (x, y, w) in zip(z, pos)
+    ]
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -290,7 +303,9 @@ def make_exporting_tracer(base, store: FinalStateStore, tdir: Path):
             new = not index.is_file()
             with index.open("a") as fh:
                 if new:
-                    fh.write("step,T_K,mu_eV,mu_se_eV,phase,replica,x_run_mean,solid_fraction,recentered,file\n")
+                    fh.write(
+                        "step,T_K,mu_eV,mu_se_eV,phase,replica,x_run_mean,solid_fraction,recentered,file\n"
+                    )
                 for i, pt in enumerate(self.trace["points"]):
                     for key, phase in (("a", "alpha"), ("g", "gamma")):
                         states = pt.get(f"state_{key}") or []
@@ -303,10 +318,15 @@ def make_exporting_tracer(base, store: FinalStateStore, tdir: Path):
                             shutil.copyfile(store.path_for(sid), dst)
                             data = store.load(sid, device="cpu")
                             sf = solid_fraction(data)
-                            write_extxyz(data, sdir / f"{stem}.extxyz",
-                                         f'T={pt["T"]:g} mu={pt["mu"]:.6f} phase={phase} replica={k}')
-                            fh.write(f"{i},{pt['T']:g},{pt['mu']:.6f},{pt['mu_se']:.6f},{phase},{k},"
-                                     f"{pt[key]['x']:.5f},{sf:.3f},{bool(pt.get('recentered'))},{stem}.pt\n")
+                            write_extxyz(
+                                data,
+                                sdir / f"{stem}.extxyz",
+                                f"T={pt['T']:g} mu={pt['mu']:.6f} phase={phase} replica={k}",
+                            )
+                            fh.write(
+                                f"{i},{pt['T']:g},{pt['mu']:.6f},{pt['mu_se']:.6f},{phase},{k},"
+                                f"{pt[key]['x']:.5f},{sf:.3f},{bool(pt.get('recentered'))},{stem}.pt\n"
+                            )
 
     return ExportingTracer
 
@@ -318,14 +338,31 @@ class PoolTraceEngine(NvalchemiTraceEngine):
     means, batch-means SEs, drift, gate) and replica combination (_combine, incl. replica_split).
     Walker ids are deterministic in the tracer's tag, so an interrupted run resumes mid-step."""
 
-    def __init__(self, pool, name, cls, replicas, min_blocks, max_blocks, gate_passes, log_path,
-                 min_solid_fraction=0.5, max_liquid_solid_fraction=0.5):
+    def __init__(
+        self,
+        pool,
+        name,
+        cls,
+        replicas,
+        min_blocks,
+        max_blocks,
+        gate_passes,
+        log_path,
+        min_solid_fraction=0.5,
+        max_liquid_solid_fraction=0.5,
+    ):
         self.min_solid_fraction = min_solid_fraction
         self.max_liquid_solid_fraction = max_liquid_solid_fraction
-        self.phase_kind = None  # melt traces: {"a": "solid"|"liquid", "g": ...}, set by the tracer
+        self.phase_kind = (
+            None  # melt traces: {"a": "solid"|"liquid", "g": ...}, set by the tracer
+        )
         self.pool, self.name, self.cls = pool, name, cls
         self.replicas, self.z, self.min_jump = replicas, 2.576, 0.03
-        self.min_blocks, self.max_blocks, self.gate_passes = min_blocks, max_blocks, gate_passes
+        self.min_blocks, self.max_blocks, self.gate_passes = (
+            min_blocks,
+            max_blocks,
+            gate_passes,
+        )
         self.log_path = log_path
 
     def _states(self, state) -> list:
@@ -333,33 +370,54 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         if isinstance(state, dict):
             return [state] * self.replicas
         states = [state] if isinstance(state, str) else list(state)
-        return states[: self.replicas] if len(states) > self.replicas else super()._states(states)
+        return (
+            states[: self.replicas]
+            if len(states) > self.replicas
+            else super()._states(states)
+        )
 
     def _submit(self, T, mu, tag, phases) -> list[Walker]:
         """Queue one walker per replica for each (phase name, states, branch) and wait for all."""
         wids = []
         for phase, states, branch in phases:
             for k, s in enumerate(self._states(states)):
-                w = self.pool.add(Walker(
-                    wid=f"{tag}.{phase}.r{k}", kind="trace", cls=self.cls, T=float(T), mus=[float(mu)],
-                    start=dict(s) if isinstance(s, dict) else {"state_ref": s},
-                    min_blocks=self.min_blocks, max_blocks=self.max_blocks,
-                    gate_passes=self.gate_passes, branch=branch,
-                ))
+                w = self.pool.add(
+                    Walker(
+                        wid=f"{tag}.{phase}.r{k}",
+                        kind="trace",
+                        cls=self.cls,
+                        T=float(T),
+                        mus=[float(mu)],
+                        start=dict(s) if isinstance(s, dict) else {"state_ref": s},
+                        min_blocks=self.min_blocks,
+                        max_blocks=self.max_blocks,
+                        gate_passes=self.gate_passes,
+                        branch=branch,
+                    )
+                )
                 wids.append(w.wid)
         return self.pool.wait(wids)
 
     def _crystal(self, ws: list[Walker], obs: dict, phase: str = "a") -> dict:
         """Add each replica's solid-like fraction; flag the phase if any replica lost its crystal
         (or, for the liquid walker of a melt trace, crystallized)."""
-        sf = [solid_fraction(self.pool.store.load(f"{w.wid}.final", device="cpu")) for w in ws]
+        sf = [
+            solid_fraction(self.pool.store.load(f"{w.wid}.final", device="cpu"))
+            for w in ws
+        ]
         obs = dict(obs, solid_fraction=[round(v, 3) for v in sf])
         if self.phase_kind and self.phase_kind.get(phase) == "liquid":
             if max(sf) > self.max_liquid_solid_fraction:
-                obs.update(phase_ok=False, phase_note=f"liquid crystallized: solid-like fraction {max(sf):.2f} "
-                                                      f"> {self.max_liquid_solid_fraction}")
+                obs.update(
+                    phase_ok=False,
+                    phase_note=f"liquid crystallized: solid-like fraction {max(sf):.2f} "
+                    f"> {self.max_liquid_solid_fraction}",
+                )
         elif min(sf) < self.min_solid_fraction:
-            obs.update(phase_ok=False, phase_note=f"solid-like fraction {min(sf):.2f} < {self.min_solid_fraction}")
+            obs.update(
+                phase_ok=False,
+                phase_note=f"solid-like fraction {min(sf):.2f} < {self.min_solid_fraction}",
+            )
         return obs
 
     def run_one(self, T, mu, state, phase, tag=""):
@@ -367,29 +425,51 @@ class PoolTraceEngine(NvalchemiTraceEngine):
         tag = f"{self.name}.{tag}".replace("+", "")
         name, branch = ("alpha", "Arich") if phase == "a" else ("gamma", "Brich")
         ws = self._submit(T, mu, tag, ((name, state, branch),))
-        obs = self._combine([self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"]) for w in ws])
+        obs = self._combine(
+            [
+                self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"])
+                for w in ws
+            ]
+        )
         obs = self._crystal(ws, obs, phase)
-        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={obs['x']:.4f}{obs['x_replicas']} "
-              f"solid {obs['solid_fraction']} (recentering)",
-              flush=True)
+        print(
+            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={obs['x']:.4f}{obs['x_replicas']} "
+            f"solid {obs['solid_fraction']} (recentering)",
+            flush=True,
+        )
         return obs, [f"{w.wid}.final" for w in ws]
 
     def run(self, T, mu, state_a, state_g, tag=""):
         """Both phases' replicas at (T, mu), run in the shared pool; returns the tracer's observables."""
         tag = f"{self.name}.{tag}".replace("+", "")
-        ws = self._submit(T, mu, tag, (("alpha", state_a, "Arich"), ("gamma", state_g, "Brich")))
-        per_run = [self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"]) for w in ws]
+        ws = self._submit(
+            T, mu, tag, (("alpha", state_a, "Arich"), ("gamma", state_g, "Brich"))
+        )
+        per_run = [
+            self._observe(w.finished[-1]["x_series"], w.finished[-1]["e_series"])
+            for w in ws
+        ]
         obs, new_states = {}, {}
         for j, phase in enumerate(("alpha", "gamma")):
             sl = slice(j * self.replicas, (j + 1) * self.replicas)
-            obs[phase] = self._crystal(ws[sl], self._combine(per_run[sl]), "a" if phase == "alpha" else "g")
+            obs[phase] = self._crystal(
+                ws[sl], self._combine(per_run[sl]), "a" if phase == "alpha" else "g"
+            )
             new_states[phase] = [f"{w.wid}.final" for w in ws[sl]]
         with self.log_path.open("a") as fh:
-            fh.write(json.dumps(dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])) + "\n")
+            fh.write(
+                json.dumps(
+                    dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])
+                )
+                + "\n"
+            )
         a, g = obs["alpha"], obs["gamma"]
-        print(f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} "
-              f"x_g={g['x']:.4f}{g['x_replicas']} E_a={a['E']:.4f} E_g={g['E']:.4f} "
-              f"solid a {a['solid_fraction']} g {g['solid_fraction']}", flush=True)
+        print(
+            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} "
+            f"x_g={g['x']:.4f}{g['x_replicas']} E_a={a['E']:.4f} E_g={g['E']:.4f} "
+            f"solid a {a['solid_fraction']} g {g['solid_fraction']}",
+            flush=True,
+        )
         return a, g, new_states["alpha"], new_states["gamma"]
 
 
@@ -398,15 +478,26 @@ def references(spec: dict, model, temps, out: Path, device) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     cache = out / "auto_reference_energies.json"
     table = {}
-    for f in spec.get("reference_energies", []) + ([str(cache)] if cache.is_file() else []):
+    for f in spec.get("reference_energies", []) + (
+        [str(cache)] if cache.is_file() else []
+    ):
         for t, v in json.loads(Path(f).read_text())["reference"].items():
             table.setdefault(t, v)
     missing = sorted({float(t) for t in temps if f"{t:g}" not in table})
     if missing:
-        print(f"[campaign] calibrating pure Au/Pt NPT references at {missing} K", flush=True)
+        print(
+            f"[campaign] calibrating pure Au/Pt NPT references at {missing} K",
+            flush=True,
+        )
         cal = compute_reference_energies(
-            model, missing, spec["n_atoms"], n_blocks=150, md_steps_per_block=50,
-            equilibration_window_blocks=EQUILIBRATION_WINDOW_BLOCKS, velocity_seed=SEED, device=device,
+            model,
+            missing,
+            spec["n_atoms"],
+            n_blocks=150,
+            md_steps_per_block=50,
+            equilibration_window_blocks=EQUILIBRATION_WINDOW_BLOCKS,
+            velocity_seed=SEED,
+            device=device,
         )
         old = json.loads(cache.read_text()) if cache.is_file() else cal
         old["reference"].update(cal["reference"])
@@ -420,33 +511,78 @@ def build_walkers(spec: dict, ref: dict, pool: Pool) -> list[dict]:
     d = spec.get("defaults", {})
 
     def gated(item, kind):
-        g = dict(min_blocks=d.get("min_blocks", 100), max_blocks=d.get("max_blocks", 300),
-                 gate_passes=d.get("gate_passes", 2))
-        g.update({k: item[k] for k in ("min_blocks", "max_blocks", "gate_passes") if k in item})
+        g = dict(
+            min_blocks=d.get("min_blocks", 100),
+            max_blocks=d.get("max_blocks", 300),
+            gate_passes=d.get("gate_passes", 2),
+        )
+        g.update(
+            {
+                k: item[k]
+                for k in ("min_blocks", "max_blocks", "gate_passes")
+                if k in item
+            }
+        )
         return g
 
     def mu_list(item, T):
         if "mu_excess" in item:
-            return [ref[f"{T:g}"]["delta_mu_ref_eV"] + float(m) for m in item["mu_excess"]]
+            return [
+                ref[f"{T:g}"]["delta_mu_ref_eV"] + float(m) for m in item["mu_excess"]
+            ]
         return [float(m) for m in item["mu"]]
 
     for it in spec.get("ladders", []):
         T = float(it["T"])
-        pool.add(Walker(wid=f"ladder.{it['name']}", kind="ladder", cls=it["class"], T=T, mus=mu_list(it, T),
-                        start=it["start"], branch=it.get("branch", "Arich"),
-                        out_dir=f"ladders/{it['name']}", ref=ref[f"{T:g}"]["delta_mu_ref_eV"], **gated(it, "ladder")))
+        pool.add(
+            Walker(
+                wid=f"ladder.{it['name']}",
+                kind="ladder",
+                cls=it["class"],
+                T=T,
+                mus=mu_list(it, T),
+                start=it["start"],
+                branch=it.get("branch", "Arich"),
+                out_dir=f"ladders/{it['name']}",
+                ref=ref[f"{T:g}"]["delta_mu_ref_eV"],
+                **gated(it, "ladder"),
+            )
+        )
     for it in spec.get("points", []):
         T = float(it["T"])
         for k, mu in enumerate(mu_list(it, T)):
-            pool.add(Walker(wid=f"point.{it['name']}.p{k}", kind="point", cls=it["class"], T=T, mus=[mu],
-                            start=it["start"], branch=it.get("branch", "Arich"), out_dir=f"points/{it['name']}",
-                            ref=ref[f"{T:g}"]["delta_mu_ref_eV"], **gated(it, "point")))
+            pool.add(
+                Walker(
+                    wid=f"point.{it['name']}.p{k}",
+                    kind="point",
+                    cls=it["class"],
+                    T=T,
+                    mus=[mu],
+                    start=it["start"],
+                    branch=it.get("branch", "Arich"),
+                    out_dir=f"points/{it['name']}",
+                    ref=ref[f"{T:g}"]["delta_mu_ref_eV"],
+                    **gated(it, "point"),
+                )
+            )
     for it in spec.get("vcsgc", []):
         T = float(it["T"])
         for c0 in it["c0"]:
-            pool.add(Walker(wid=f"vcsgc.{it['name']}.c{c0:.3f}", kind="vcsgc", cls=it["class"], T=T, mus=[],
-                            kappa=float(it["kappa"]), c0=float(c0), start=dict(it["start"], c0=c0),
-                            out_dir=f"vcsgc/{it['name']}", ref=ref[f"{T:g}"]["delta_mu_ref_eV"], **gated(it, "vcsgc")))
+            pool.add(
+                Walker(
+                    wid=f"vcsgc.{it['name']}.c{c0:.3f}",
+                    kind="vcsgc",
+                    cls=it["class"],
+                    T=T,
+                    mus=[],
+                    kappa=float(it["kappa"]),
+                    c0=float(c0),
+                    start=dict(it["start"], c0=c0),
+                    out_dir=f"vcsgc/{it['name']}",
+                    ref=ref[f"{T:g}"]["delta_mu_ref_eV"],
+                    **gated(it, "vcsgc"),
+                )
+            )
     return spec.get("traces", [])
 
 
@@ -454,18 +590,30 @@ def melt_fresh(data, model, hot_T: float, T: float, ps: float, device):
     """Melt a fresh crystal: isotropic NPT at hot_T for ps (dt 1.5 fs), then velocities rescaled to T."""
     batch = Batch.from_data_list([data])
     _wrap_batch_positions(batch)
-    md = NPT(model=model, dt=1.5, temperature=torch.tensor([hot_T], device=device),
-             pressure=torch.full((1,), PRESSURE_EV_PER_A3, device=device), thermostat_time=THERMOSTAT_TIME_FS,
-             barostat_time=BAROSTAT_TIME_FS, pressure_coupling="isotropic", hooks=_npt_wrap_hooks())
+    md = NPT(
+        model=model,
+        dt=1.5,
+        temperature=torch.tensor([hot_T], device=device),
+        pressure=torch.full((1,), PRESSURE_EV_PER_A3, device=device),
+        thermostat_time=THERMOSTAT_TIME_FS,
+        barostat_time=BAROSTAT_TIME_FS,
+        pressure_coupling="isotropic",
+        hooks=_npt_wrap_hooks(),
+    )
     with md:
         md.compute(batch)
         md.run(batch, n_steps=max(1, round(ps * 1000 / 1.5)))
     batch.velocities = batch.velocities * math.sqrt(T / hot_T)
     out = batch.to_data_list()[0]
     sf = solid_fraction(out)
-    print(f"[campaign] melted a fresh walker at {hot_T:g} K for {ps:g} ps: solid-like fraction {sf:.2f}", flush=True)
+    print(
+        f"[campaign] melted a fresh walker at {hot_T:g} K for {ps:g} ps: solid-like fraction {sf:.2f}",
+        flush=True,
+    )
     if sf > 0.3:
-        raise RuntimeError(f"fresh liquid still {sf:.0%} solid-like after {ps} ps at {hot_T} K")
+        raise RuntimeError(
+            f"fresh liquid still {sf:.0%} solid-like after {ps} ps at {hot_T} K"
+        )
     return out
 
 
@@ -474,24 +622,52 @@ def initial(w: Walker, pool: Pool, ref: dict, n_atoms: int, device, model=None):
     s = w.start
     if "state_ref" in s:
         r = s["state_ref"]
-        return load_state(r, device) if r.endswith(".pt") and Path(r).is_file() else pool.store.load(r, device=device)
+        return (
+            load_state(r, device)
+            if r.endswith(".pt") and Path(r).is_file()
+            else pool.store.load(r, device=device)
+        )
     if "state" in s:
         return load_state(s["state"], device)
     T = f"{w.T:g}"
     a = s.get("lattice_a")
-    lattice = ({SPECIES[0]: a, SPECIES[1]: a} if a else
-               {SPECIES[0]: ref[T]["Au"]["lattice_constant_a_ang"], SPECIES[1]: ref[T]["Pt"]["lattice_constant_a_ang"]})
+    lattice = (
+        {SPECIES[0]: a, SPECIES[1]: a}
+        if a
+        else {
+            SPECIES[0]: ref[T]["Au"]["lattice_constant_a_ang"],
+            SPECIES[1]: ref[T]["Pt"]["lattice_constant_a_ang"],
+        }
+    )
     x0 = s.get("c0", s.get("x0", 0.5))
     seed_x = s.get("seed_phase_x")
-    data = initial_state(n_atoms, w.T, x0, s.get("fresh", "random"), lattice,
-                         SEED + zlib.crc32(w.wid.encode()) % 100000, device, tuple(seed_x) if seed_x else None)
+    data = initial_state(
+        n_atoms,
+        w.T,
+        x0,
+        s.get("fresh", "random"),
+        lattice,
+        SEED + zlib.crc32(w.wid.encode()) % 100000,
+        device,
+        tuple(seed_x) if seed_x else None,
+    )
     if s.get("melt_T"):
-        data = melt_fresh(data, model, float(s["melt_T"]), w.T, float(s.get("melt_ps", 6.0)), device)
+        data = melt_fresh(
+            data, model, float(s["melt_T"]), w.T, float(s.get("melt_ps", 6.0)), device
+        )
     return data
 
 
-def finish_step(w: Walker, pool: Pool, n_atoms: int, equilibrated: bool, gx: dict, ge: dict,
-                acceptance: float, final) -> None:
+def finish_step(
+    w: Walker,
+    pool: Pool,
+    n_atoms: int,
+    equilibrated: bool,
+    gx: dict,
+    ge: dict,
+    acceptance: float,
+    final,
+) -> None:
     """Record a finished step in the format of the matching analysis tool, then advance."""
     out = pool.out / w.out_dir if w.out_dir else None
     stopped = "equilibrated" if equilibrated else "cap"
@@ -500,18 +676,41 @@ def finish_step(w: Walker, pool: Pool, n_atoms: int, equilibrated: bool, gx: dic
         step_index = w.step if w.kind == "ladder" else int(w.wid.rsplit(".p", 1)[1])
         rid = f"atoms{n_atoms}.T{w.T:g}.{w.branch}.{w.wid.split('.', 1)[1]}.dmu{step_index}.mu{mu:.5f}"
         out.mkdir(parents=True, exist_ok=True)
-        (out / f"{rid}.equilibration.json").write_text(json.dumps({
-            "run_id": rid, "temperature_K": w.T, "chemical_potentials_ev": {"Au": 0.0, "Pt": mu},
-            "delta_mu_ref_eV": w.ref, "delta_mu_excess_eV": mu - w.ref, "n_blocks": len(w.x),
-            "window_blocks": EQUILIBRATION_WINDOW_BLOCKS, "composition_gate": gx, "energy_gate": ge,
-            "resolved": bool(equilibrated), "stopped": stopped, "gate_history": w.gate,
-            "acceptance_last_chunk": acceptance, "walker": w.wid, "x_series": w.x, "e_series": w.e,
-        }) + "\n")
+        (out / f"{rid}.equilibration.json").write_text(
+            json.dumps(
+                {
+                    "run_id": rid,
+                    "temperature_K": w.T,
+                    "chemical_potentials_ev": {"Au": 0.0, "Pt": mu},
+                    "delta_mu_ref_eV": w.ref,
+                    "delta_mu_excess_eV": mu - w.ref,
+                    "n_blocks": len(w.x),
+                    "window_blocks": EQUILIBRATION_WINDOW_BLOCKS,
+                    "composition_gate": gx,
+                    "energy_gate": ge,
+                    "resolved": bool(equilibrated),
+                    "stopped": stopped,
+                    "gate_history": w.gate,
+                    "acceptance_last_chunk": acceptance,
+                    "walker": w.wid,
+                    "x_series": w.x,
+                    "e_series": w.e,
+                }
+            )
+            + "\n"
+        )
         pool.store.save(rid.replace("+", ""), final)
-    w.finished.append(dict(step=w.step, blocks=len(w.x), stopped=stopped,
-                           x=gx.get("mean_last_window"), e=ge.get("mean_last_window"),
-                           x_series=list(w.x) if w.kind == "trace" else None,
-                           e_series=list(w.e) if w.kind == "trace" else None))
+    w.finished.append(
+        dict(
+            step=w.step,
+            blocks=len(w.x),
+            stopped=stopped,
+            x=gx.get("mean_last_window"),
+            e=ge.get("mean_last_window"),
+            x_series=list(w.x) if w.kind == "trace" else None,
+            e_series=list(w.e) if w.kind == "trace" else None,
+        )
+    )
     if w.kind == "trace":
         pool.store.save(f"{w.wid}.final", final)
     if w.kind == "vcsgc":
@@ -523,16 +722,35 @@ def finish_step(w: Walker, pool: Pool, n_atoms: int, equilibrated: bool, gx: dic
         w.x, w.e, w.v, w.gate = [], [], [], []
 
 
-def write_vcsgc_series(w: Walker, pool: Pool, n_atoms: int, cls: dict, settings: str, acc: list) -> None:
+def write_vcsgc_series(
+    w: Walker, pool: Pool, n_atoms: int, cls: dict, settings: str, acc: list
+) -> None:
     """Write a VC-SGC walker's series in run_vcsgc_scan.py's format (read by vcsgc_analysis.py)."""
     out = pool.out / w.out_dir
     out.mkdir(parents=True, exist_ok=True)
     rid = f"atoms{n_atoms}.T{w.T:g}.vcsgc.k{w.kappa:g}.c{w.c0:.3f}.{w.start.get('fresh', 'ckpt')}"
-    s = dict(run_id=rid, temperature_K=w.T, c0=w.c0, kappa=w.kappa, init=w.start.get("fresh", "checkpoint"),
-             start_state=w.start.get("state"), seed_phase_x=w.start.get("seed_phase_x"), n_atoms=n_atoms,
-             delta_mu_ref_eV=w.ref, mc_step_fraction=cls["mc_step_fraction"],
-             md_steps_per_block=cls["md_steps_per_block"], inference_settings=settings, checkpoint=CHECKPOINT,
-             task=TASK, c=w.x, u=w.e, v=w.v, acceptance=acc, gate=w.gate, stopped=w.stopped)
+    s = dict(
+        run_id=rid,
+        temperature_K=w.T,
+        c0=w.c0,
+        kappa=w.kappa,
+        init=w.start.get("fresh", "checkpoint"),
+        start_state=w.start.get("state"),
+        seed_phase_x=w.start.get("seed_phase_x"),
+        n_atoms=n_atoms,
+        delta_mu_ref_eV=w.ref,
+        mc_step_fraction=cls["mc_step_fraction"],
+        md_steps_per_block=cls["md_steps_per_block"],
+        inference_settings=settings,
+        checkpoint=CHECKPOINT,
+        task=TASK,
+        c=w.x,
+        u=w.e,
+        v=w.v,
+        acceptance=acc,
+        gate=w.gate,
+        stopped=w.stopped,
+    )
     (out / f"{rid}.series.json").write_text(json.dumps(s) + "\n")
 
 
@@ -541,7 +759,11 @@ def class_width(cls: dict, n_atoms: int, device) -> int:
     cap = int(cls.get("max_width", 4))
     if device.type != "cuda":
         return cap
-    per = MEM_PER_WALKER_GIB_500["md" if cls["md_steps_per_block"] > 0 else "mc_only"] * n_atoms / 500
+    per = (
+        MEM_PER_WALKER_GIB_500["md" if cls["md_steps_per_block"] > 0 else "mc_only"]
+        * n_atoms
+        / 500
+    )
     total = torch.cuda.get_device_properties(device).total_memory / 1024**3
     return max(1, min(cap, int((MEMORY_FRACTION * total - MEM_BASE_GIB) // per)))
 
@@ -549,33 +771,72 @@ def class_width(cls: dict, n_atoms: int, device) -> int:
 def run(spec: dict, out: Path, model, device, settings: str) -> int:
     """Run (or resume) a whole campaign on one device; returns 0 on success, 1 if a trace failed."""
     out.mkdir(parents=True, exist_ok=True)
-    n_atoms, chunk = int(spec["n_atoms"]), int(spec.get("chunk_blocks", EQUILIBRATION_WINDOW_BLOCKS))
+    n_atoms, chunk = (
+        int(spec["n_atoms"]),
+        int(spec.get("chunk_blocks", EQUILIBRATION_WINDOW_BLOCKS)),
+    )
     classes = spec["classes"]
-    temps = {float(i["T"]) for k in ("ladders", "points", "vcsgc") for i in spec.get(k, [])}
+    temps = {
+        float(i["T"]) for k in ("ladders", "points", "vcsgc") for i in spec.get(k, [])
+    }
+
     # traces only need the pure references (lattice constants) for a fresh start without "lattice_a"
     def fresh_needs_ref(t):
-        return any(isinstance(t.get(k), dict) and "lattice_a" not in t[k]
-                   for k in ("alpha_state", "gamma_state", "solid_state", "liquid_state"))
+        return any(
+            isinstance(t.get(k), dict) and "lattice_a" not in t[k]
+            for k in ("alpha_state", "gamma_state", "solid_state", "liquid_state")
+        )
 
-    temps |= {float(t.get("t0", t.get("melt_T"))) for t in spec.get("traces", [])
-              if ("t0" in t or "melt_T" in t) and fresh_needs_ref(t)}
+    temps |= {
+        float(t.get("t0", t.get("melt_T")))
+        for t in spec.get("traces", [])
+        if ("t0" in t or "melt_T" in t) and fresh_needs_ref(t)
+    }
     ref = references(spec, model, temps, out, device)
     store = FinalStateStore(out / "states")
     pool = Pool(out, store)
     traces = build_walkers(spec, ref, pool)
     widths = {name: class_width(c, n_atoms, device) for name, c in classes.items()}
-    print(f"[campaign] {spec.get('name', '')}: {len(pool.walkers)} walkers + {len(traces)} traces, "
-          f"widths {widths}, chunk {chunk} blocks, settings {settings!r}", flush=True)
+    print(
+        f"[campaign] {spec.get('name', '')}: {len(pool.walkers)} walkers + {len(traces)} traces, "
+        f"widths {widths}, chunk {chunk} blocks, settings {settings!r}",
+        flush=True,
+    )
 
     # tracer threads (import here: boundary_tracer is vendored next to this script)
     from boundary_tracer import BoundaryTracer, TraceConfig
 
     errors: list[str] = []
     threads: dict[str, threading.Thread] = {}
-    cfg_keys = ("mu0_se", "dt", "dt_min", "dt_max", "tol_mu", "min_gap", "max_corr", "max_gap_frac", "z", "min_jump",
-                "max_steps", "recenter", "recenter_dmu", "recenter_max_runs", "max_recenter", "x_a0", "x_g0",
-                "dilute_tol", "dilute_x_max", "dt_floor", "melt_T_se", "melt_host", "melt_dH", "melt_dH_se",
-                "melt_dCp", "melt_mu_pure", "melt_mu_probe")
+    cfg_keys = (
+        "mu0_se",
+        "dt",
+        "dt_min",
+        "dt_max",
+        "tol_mu",
+        "min_gap",
+        "max_corr",
+        "max_gap_frac",
+        "z",
+        "min_jump",
+        "max_steps",
+        "recenter",
+        "recenter_dmu",
+        "recenter_max_runs",
+        "max_recenter",
+        "x_a0",
+        "x_g0",
+        "dilute_tol",
+        "dilute_x_max",
+        "dt_floor",
+        "melt_T_se",
+        "melt_host",
+        "melt_dH",
+        "melt_dH_se",
+        "melt_dCp",
+        "melt_mu_pure",
+        "melt_mu_probe",
+    )
 
     def cross_table(t):
         """The trace's cross_mu: an inline {T: dmu} dict or a CSV with T and mu columns."""
@@ -592,17 +853,26 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
             d = json.loads(Path(d).read_text())
             d = d.get("table", d)
         return d
+
     names = {t["name"] for t in traces}
     for t in traces:
         src = t.get("retrace_from")
         if src and src not in names:
-            raise SystemExit(f"trace {t['name']}: retrace_from {src!r} is not a trace in this spec")
+            raise SystemExit(
+                f"trace {t['name']}: retrace_from {src!r} is not a trace in this spec"
+            )
 
     def retrace_start(t):
         """Highest point of the source trace whose gap is still >= retrace_min_gap (None if only the start)."""
-        src = json.loads((out / "traces" / t["retrace_from"] / "trace.json").read_text())
+        src = json.loads(
+            (out / "traces" / t["retrace_from"] / "trace.json").read_text()
+        )
         pts = src["points"]
-        ok = [p for p in pts if p["g"]["x"] - p["a"]["x"] >= float(t.get("retrace_min_gap", 0.15))]
+        ok = [
+            p
+            for p in pts
+            if p["g"]["x"] - p["a"]["x"] >= float(t.get("retrace_min_gap", 0.15))
+        ]
         top = max(ok, key=lambda p: p["T"]) if ok else None
         if top is None or top["T"] == pts[0]["T"]:
             return None, src
@@ -611,12 +881,18 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     for t in traces:
         tdir = out / "traces" / t["name"]
         tdir.mkdir(parents=True, exist_ok=True)
-        engine = PoolTraceEngine(pool, f"trace.{t['name']}", t["class"], int(t.get("replicas", 1)),
-                                 int(t.get("min_blocks", spec.get("defaults", {}).get("min_blocks", 100))),
-                                 int(t.get("max_blocks", spec.get("defaults", {}).get("max_blocks", 300))),
-                                 int(t.get("gate_passes", 2)), tdir / "runs.jsonl",
-                                 float(t.get("min_solid_fraction", 0.5)),
-                                 float(t.get("max_liquid_solid_fraction", 0.5)))
+        engine = PoolTraceEngine(
+            pool,
+            f"trace.{t['name']}",
+            t["class"],
+            int(t.get("replicas", 1)),
+            int(t.get("min_blocks", spec.get("defaults", {}).get("min_blocks", 100))),
+            int(t.get("max_blocks", spec.get("defaults", {}).get("max_blocks", 300))),
+            int(t.get("gate_passes", 2)),
+            tdir / "runs.jsonl",
+            float(t.get("min_solid_fraction", 0.5)),
+            float(t.get("max_liquid_solid_fraction", 0.5)),
+        )
         Tracer = make_exporting_tracer(BoundaryTracer, store, tdir)
 
         def target(engine=engine, t=t, tdir=tdir, Tracer=Tracer):
@@ -625,44 +901,95 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                     threads[t["retrace_from"]].join()
                     top, src = retrace_start(t)
                     if top is None:
-                        print(f"[trace] {t['name']}: {t['retrace_from']} never got above its start with an open gap; "
-                              "nothing to retrace", flush=True)
+                        print(
+                            f"[trace] {t['name']}: {t['retrace_from']} never got above its start with an open gap; "
+                            "nothing to retrace",
+                            flush=True,
+                        )
                         return
-                    t_end = float(t.get("t_stop", src.get("dilute_exit_T") or src["points"][0]["T"]))
-                    t0 = min(src["points"], key=lambda p: abs(p["T"] - t_end))  # the source point it closes on
+                    t_end = float(
+                        t.get(
+                            "t_stop", src.get("dilute_exit_T") or src["points"][0]["T"]
+                        )
+                    )
+                    t0 = min(
+                        src["points"], key=lambda p: abs(p["T"] - t_end)
+                    )  # the source point it closes on
                     kw = {k: t[k] for k in cfg_keys if k in t}
-                    kw.update(mu0_se=top["mu_se"], x_a0=top["a"]["x"], x_g0=top["g"]["x"])
+                    kw.update(
+                        mu0_se=top["mu_se"], x_a0=top["a"]["x"], x_g0=top["g"]["x"]
+                    )
                     cfg = TraceConfig(t0=top["T"], mu0=top["mu"], t_stop=t_end, **kw)
-                    print(f"[trace] {t['name']}: retracing DOWN from {t['retrace_from']}'s top point T={top['T']:g} K "
-                          f"mu={top['mu']:.5f}+-{top['mu_se']:.4f} (gap {top['g']['x'] - top['a']['x']:.3f}) "
-                          f"to {cfg.t_stop:g} K", flush=True)
-                    result = Tracer(cfg, engine, tdir / "trace.json").run(top["state_a"], top["state_g"])
+                    print(
+                        f"[trace] {t['name']}: retracing DOWN from {t['retrace_from']}'s top point T={top['T']:g} K "
+                        f"mu={top['mu']:.5f}+-{top['mu_se']:.4f} (gap {top['g']['x'] - top['a']['x']:.3f}) "
+                        f"to {cfg.t_stop:g} K",
+                        flush=True,
+                    )
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(
+                        top["state_a"], top["state_g"]
+                    )
                     end = min(result["points"], key=lambda p: abs(p["T"] - t0["T"]))
-                    closure = dict(start_T=t0["T"], start_mu=t0["mu"], start_mu_se=t0["mu_se"],
-                                   start_anchored=bool(t0.get("anchored")), retrace_T=end["T"],
-                                   retrace_mu=end["mu"], retrace_mu_se=end["mu_se"], dmu_meV=1e3 * (end["mu"] - t0["mu"]),
-                                   x_alpha=[t0["a"]["x"], end["a"]["x"]], x_gamma=[t0["g"]["x"], end["g"]["x"]],
-                                   stop_reason=result["stop_reason"])
-                    (tdir / "closure.json").write_text(json.dumps(closure, indent=2) + "\n")
-                    print(f"[trace] {t['name']}: closure at {end['T']:g} K: retrace mu {end['mu']:.5f}+-{end['mu_se']:.4f} "
-                          f"vs source point {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)", flush=True)
+                    closure = dict(
+                        start_T=t0["T"],
+                        start_mu=t0["mu"],
+                        start_mu_se=t0["mu_se"],
+                        start_anchored=bool(t0.get("anchored")),
+                        retrace_T=end["T"],
+                        retrace_mu=end["mu"],
+                        retrace_mu_se=end["mu_se"],
+                        dmu_meV=1e3 * (end["mu"] - t0["mu"]),
+                        x_alpha=[t0["a"]["x"], end["a"]["x"]],
+                        x_gamma=[t0["g"]["x"], end["g"]["x"]],
+                        stop_reason=result["stop_reason"],
+                    )
+                    (tdir / "closure.json").write_text(
+                        json.dumps(closure, indent=2) + "\n"
+                    )
+                    print(
+                        f"[trace] {t['name']}: closure at {end['T']:g} K: retrace mu {end['mu']:.5f}+-{end['mu_se']:.4f} "
+                        f"vs source point {t0['mu']:.5f}+-{t0['mu_se']:.4f} ({closure['dmu_meV']:+.2f} meV)",
+                        flush=True,
+                    )
                 elif t.get("melt_T") is not None:
-                    cfg = TraceConfig(t0=float(t["melt_T"]), mu0=None, t_stop=t["t_stop"], melt_T=float(t["melt_T"]),
-                                      cross_mu=cross_table(t), **{k: t[k] for k in cfg_keys if k in t})
-                    result = Tracer(cfg, engine, tdir / "trace.json").run(t["solid_state"], t["liquid_state"])
+                    cfg = TraceConfig(
+                        t0=float(t["melt_T"]),
+                        mu0=None,
+                        t_stop=t["t_stop"],
+                        melt_T=float(t["melt_T"]),
+                        cross_mu=cross_table(t),
+                        **{k: t[k] for k in cfg_keys if k in t},
+                    )
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(
+                        t["solid_state"], t["liquid_state"]
+                    )
                 else:
-                    cfg = TraceConfig(t0=t["t0"], mu0=t.get("mu0"), t_stop=t["t_stop"], dilute_dG=dilute_table(t),
-                                      **{k: t[k] for k in cfg_keys if k in t})
-                    result = Tracer(cfg, engine, tdir / "trace.json").run(t["alpha_state"], t["gamma_state"])
-                print(f"[trace] {t['name']}: {result['status']}: {result['stop_reason']} "
-                      f"({len(result['points'])} points)", flush=True)
-            except Exception:  # surfaced at the end; the pool keeps serving the other work
+                    cfg = TraceConfig(
+                        t0=t["t0"],
+                        mu0=t.get("mu0"),
+                        t_stop=t["t_stop"],
+                        dilute_dG=dilute_table(t),
+                        **{k: t[k] for k in cfg_keys if k in t},
+                    )
+                    result = Tracer(cfg, engine, tdir / "trace.json").run(
+                        t["alpha_state"], t["gamma_state"]
+                    )
+                print(
+                    f"[trace] {t['name']}: {result['status']}: {result['stop_reason']} "
+                    f"({len(result['points'])} points)",
+                    flush=True,
+                )
+            except (
+                Exception
+            ):  # surfaced at the end; the pool keeps serving the other work
                 errors.append(f"trace {t['name']}:\n{traceback.format_exc()}")
             finally:
                 with pool.cond:
                     pool.cond.notify_all()
 
-        threads[t["name"]] = threading.Thread(target=target, name=t["name"], daemon=True)
+        threads[t["name"]] = threading.Thread(
+            target=target, name=t["name"], daemon=True
+        )
     for th in threads.values():
         th.start()
 
@@ -673,8 +1000,20 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
     with log.open("a", newline="") as fh:
         writer = csv.writer(fh)
         if new_log:
-            writer.writerow(["utc", "class", "width", "blocks", "seconds", "walker_blocks_per_s",
-                             "peak_alloc_gib", "peak_reserved_gib", "acceptance", "walkers"])
+            writer.writerow(
+                [
+                    "utc",
+                    "class",
+                    "width",
+                    "blocks",
+                    "seconds",
+                    "walker_blocks_per_s",
+                    "peak_alloc_gib",
+                    "peak_reserved_gib",
+                    "acceptance",
+                    "walkers",
+                ]
+            )
         while True:
             ready = pool.ready()
             if not ready:
@@ -688,15 +1027,24 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
             if ready[0].kind == "trace":
                 cname = ready[0].cls
             else:
-                fill = {c: min(sum(w.cls == c for w in ready), widths[c]) / widths[c] for c in {w.cls for w in ready}}
-                cname = max(fill, key=lambda c: (fill[c], -min(w.order for w in ready if w.cls == c)))
+                fill = {
+                    c: min(sum(w.cls == c for w in ready), widths[c]) / widths[c]
+                    for c in {w.cls for w in ready}
+                }
+                cname = max(
+                    fill,
+                    key=lambda c: (fill[c], -min(w.order for w in ready if w.cls == c)),
+                )
             active = [w for w in ready if w.cls == cname][: widths[cname]]
             cls = classes[cname]
             states = []
             for w in active:
                 started = w.x or w.step > 0 or w.finished
-                states.append(store.load(w.wid, device=device) if started and store.exists(w.wid)
-                              else initial(w, pool, ref, n_atoms, device, model))
+                states.append(
+                    store.load(w.wid, device=device)
+                    if started and store.exists(w.wid)
+                    else initial(w, pool, ref, n_atoms, device, model)
+                )
             n_chunks += 1
             try:
                 if device.type == "cuda":
@@ -705,30 +1053,61 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                 _wrap_batch_positions(batch)
                 phis, kappas = zip(*(w.coefficients() for w in active))
                 temps_t = torch.tensor([w.T for w in active], device=device)
-                mc = VCSGC(model=model, temperature=temps_t, species=SPECIES, kappa=torch.tensor(kappas),
-                           phi=torch.tensor(phis), concentration_species=SPECIES[1],
-                           reference_exchange_potential=0.0, random_seed=SEED + 7919 * n_chunks)
-                md = NPT(model=model, dt=DT_FS, temperature=temps_t,
-                         pressure=torch.full((len(active),), PRESSURE_EV_PER_A3, device=device),
-                         thermostat_time=THERMOSTAT_TIME_FS, barostat_time=BAROSTAT_TIME_FS,
-                         pressure_coupling="isotropic", hooks=_npt_wrap_hooks())
-                hybrid = HybridMCMD(mc=mc, md=md, mc_steps=max(1, round(cls["mc_step_fraction"] * n_atoms)),
-                                    md_steps=int(cls["md_steps_per_block"]), mc_energy_only=True)
+                mc = VCSGC(
+                    model=model,
+                    temperature=temps_t,
+                    species=SPECIES,
+                    kappa=torch.tensor(kappas),
+                    phi=torch.tensor(phis),
+                    concentration_species=SPECIES[1],
+                    reference_exchange_potential=0.0,
+                    random_seed=SEED + 7919 * n_chunks,
+                )
+                md = NPT(
+                    model=model,
+                    dt=DT_FS,
+                    temperature=temps_t,
+                    pressure=torch.full(
+                        (len(active),), PRESSURE_EV_PER_A3, device=device
+                    ),
+                    thermostat_time=THERMOSTAT_TIME_FS,
+                    barostat_time=BAROSTAT_TIME_FS,
+                    pressure_coupling="isotropic",
+                    hooks=_npt_wrap_hooks(),
+                )
+                hybrid = HybridMCMD(
+                    mc=mc,
+                    md=md,
+                    mc_steps=max(1, round(cls["mc_step_fraction"] * n_atoms)),
+                    md_steps=int(cls["md_steps_per_block"]),
+                    mc_energy_only=True,
+                )
                 start = time.perf_counter()
                 series = run_chunk(hybrid, batch, chunk, n_atoms)
                 elapsed = time.perf_counter() - start
             except torch.cuda.OutOfMemoryError:
                 widths[cname] = max(1, len(active) - 1)
-                print(f"[campaign] CUDA OOM at width {len(active)} ({cname}); width -> {widths[cname]}, "
-                      "repeating the chunk from the last saved states", flush=True)
+                print(
+                    f"[campaign] CUDA OOM at width {len(active)} ({cname}); width -> {widths[cname]}, "
+                    "repeating the chunk from the last saved states",
+                    flush=True,
+                )
                 n_chunks -= 1
                 batch = hybrid = None
                 torch.cuda.empty_cache()
                 continue
             acceptance = mc.stats.acceptance
             finals = batch.to_data_list()
-            alloc = torch.cuda.max_memory_allocated(device) / 1024**3 if device.type == "cuda" else 0.0
-            reserved = torch.cuda.max_memory_reserved(device) / 1024**3 if device.type == "cuda" else 0.0
+            alloc = (
+                torch.cuda.max_memory_allocated(device) / 1024**3
+                if device.type == "cuda"
+                else 0.0
+            )
+            reserved = (
+                torch.cuda.max_memory_reserved(device) / 1024**3
+                if device.type == "cuda"
+                else 0.0
+            )
             notes = []
             with pool.cond:
                 for i, (w, final) in enumerate(zip(active, finals)):
@@ -736,35 +1115,65 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                     w.x.extend(series["c"][i])
                     w.e.extend(series["u"][i])
                     w.v.extend(series["v"][i])
-                    acc_hist.setdefault(w.wid, []).append(dict(blocks=len(w.x), acceptance=acceptance))
+                    acc_hist.setdefault(w.wid, []).append(
+                        dict(blocks=len(w.x), acceptance=acceptance)
+                    )
                     n = len(w.x)
                     gx = ge = {}
                     if n >= max(w.min_blocks, 2 * EQUILIBRATION_WINDOW_BLOCKS):
                         gx = _equilibration_gate(w.x, EQUILIBRATION_WINDOW_BLOCKS)
                         ge = _equilibration_gate(w.e, EQUILIBRATION_WINDOW_BLOCKS)
-                        w.gate.append(dict(blocks=n, passed=bool(gx.get("resolved")) and bool(ge.get("resolved"))))
-                    recent = w.gate[-w.gate_passes:]
-                    equilibrated = len(recent) == w.gate_passes and all(g["passed"] for g in recent)
+                        w.gate.append(
+                            dict(
+                                blocks=n,
+                                passed=bool(gx.get("resolved"))
+                                and bool(ge.get("resolved")),
+                            )
+                        )
+                    recent = w.gate[-w.gate_passes :]
+                    equilibrated = len(recent) == w.gate_passes and all(
+                        g["passed"] for g in recent
+                    )
                     if w.kind == "vcsgc":
                         if equilibrated or n >= w.max_blocks:
                             w.stopped = "equilibrated" if equilibrated else "cap"
-                        write_vcsgc_series(w, pool, n_atoms, cls, settings, acc_hist[w.wid])
+                        write_vcsgc_series(
+                            w, pool, n_atoms, cls, settings, acc_hist[w.wid]
+                        )
                     if equilibrated or n >= w.max_blocks:
                         label = w.mus[w.step] - w.ref if w.kind != "vcsgc" else w.c0
-                        notes.append(f"{w.wid} step {w.step} ({'c0' if w.kind == 'vcsgc' else 'dmu_ex'} "
-                                     f"{label:+.4f}) after {n} blocks, {'equilibrated' if equilibrated else 'cap'}: "
-                                     f"x={gx.get('mean_last_window', float('nan')):.4f}")
-                        finish_step(w, pool, n_atoms, equilibrated, gx, ge, acceptance, final)
+                        notes.append(
+                            f"{w.wid} step {w.step} ({'c0' if w.kind == 'vcsgc' else 'dmu_ex'} "
+                            f"{label:+.4f}) after {n} blocks, {'equilibrated' if equilibrated else 'cap'}: "
+                            f"x={gx.get('mean_last_window', float('nan')):.4f}"
+                        )
+                        finish_step(
+                            w, pool, n_atoms, equilibrated, gx, ge, acceptance, final
+                        )
                     pool.save(w)
                 pool.cond.notify_all()
-            writer.writerow([time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), cname, len(active), chunk,
-                             f"{elapsed:.1f}", f"{len(active) * chunk / elapsed:.5f}", f"{alloc:.2f}",
-                             f"{reserved:.2f}", f"{acceptance:.4f}", " ".join(w.wid for w in active)])
+            writer.writerow(
+                [
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    cname,
+                    len(active),
+                    chunk,
+                    f"{elapsed:.1f}",
+                    f"{len(active) * chunk / elapsed:.5f}",
+                    f"{alloc:.2f}",
+                    f"{reserved:.2f}",
+                    f"{acceptance:.4f}",
+                    " ".join(w.wid for w in active),
+                ]
+            )
             fh.flush()
-            print(f"[campaign] chunk {n_chunks} {cname} width {len(active)}: {elapsed:.0f} s "
-                  f"({len(active) * chunk / elapsed:.4f} walker-blocks/s, peak alloc {alloc:.1f} GiB, "
-                  f"reserved {reserved:.1f}), acceptance {acceptance:.4f}; "
-                  f"{sum(not w.done for w in pool.walkers.values())} walkers open", flush=True)
+            print(
+                f"[campaign] chunk {n_chunks} {cname} width {len(active)}: {elapsed:.0f} s "
+                f"({len(active) * chunk / elapsed:.4f} walker-blocks/s, peak alloc {alloc:.1f} GiB, "
+                f"reserved {reserved:.1f}), acceptance {acceptance:.4f}; "
+                f"{sum(not w.done for w in pool.walkers.values())} walkers open",
+                flush=True,
+            )
             for note in notes:
                 print(f"[campaign]   {note}", flush=True)
             del batch, hybrid, mc, md, finals
@@ -775,7 +1184,9 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
         th.join()
     for err in errors:
         print(f"[campaign] ERROR {err}", flush=True)
-    print(f"[campaign] {'complete' if not errors else 'finished with errors'}", flush=True)
+    print(
+        f"[campaign] {'complete' if not errors else 'finished with errors'}", flush=True
+    )
     return 1 if errors else 0
 
 
@@ -804,11 +1215,15 @@ def smoke_spec(spec: dict) -> dict:
             for k in ("mu_excess", "mu", "c0"):
                 if k in it:
                     it[k] = it[k][:1]
-            if key == "traces" and "t0" in it:     # a retrace inherits its start from the source trace
+            if (
+                key == "traces" and "t0" in it
+            ):  # a retrace inherits its start from the source trace
                 step = it.get("dt_min", 5.0)
                 it["t_stop"] = it["t0"] + (step if it["t_stop"] > it["t0"] else -step)
                 it["dt"] = step
-            if key == "traces" and "melt_T" in it:  # pure + probe runs, then one anchored point
+            if (
+                key == "traces" and "melt_T" in it
+            ):  # pure + probe runs, then one anchored point
                 step = it.get("dt_min", 5.0)
                 it["t_stop"], it["dt"] = it["melt_T"] + step, step
                 for k in ("solid_state", "liquid_state"):
@@ -819,13 +1234,18 @@ def smoke_spec(spec: dict) -> dict:
 
 def main() -> None:
     """Command-line entry point (UMA model)."""
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--spec", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--inference-settings", default=INFERENCE_SETTINGS)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--smoke", action="store_true",
-                    help="check a spec end to end: every item cut to one 50-block step (use a separate --out)")
+    ap.add_argument(
+        "--smoke",
+        action="store_true",
+        help="check a spec end to end: every item cut to one 50-block step (use a separate --out)",
+    )
     args = ap.parse_args()
     from nvalchemi.models.uma import UMAWrapper
 
@@ -834,8 +1254,12 @@ def main() -> None:
         spec = smoke_spec(spec)
 
     device = torch.device(args.device)
-    model = UMAWrapper.from_checkpoint(CHECKPOINT, task_name=TASK, device=str(device),
-                                       inference_settings=args.inference_settings)
+    model = UMAWrapper.from_checkpoint(
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(device),
+        inference_settings=args.inference_settings,
+    )
     raise SystemExit(run(spec, args.out, model, device, args.inference_settings))
 
 

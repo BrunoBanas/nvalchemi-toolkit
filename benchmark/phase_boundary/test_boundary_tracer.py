@@ -217,8 +217,13 @@ def _sl_params(phase, T):
     m = MELT
     if phase == "solid":
         return 0.0, m["E_B"], m["W_s"], 0.0, m["E_B"]  # gA, gB, W, hA, hB
-    return (m["DH_A"] * (1 - T / m["TM_A"]), m["E_B"] + m["DH_B"] * (1 - T / m["TM_B"]), m["W_l"],
-            m["DH_A"], m["E_B"] + m["DH_B"])
+    return (
+        m["DH_A"] * (1 - T / m["TM_A"]),
+        m["E_B"] + m["DH_B"] * (1 - T / m["TM_B"]),
+        m["W_l"],
+        m["DH_A"],
+        m["E_B"] + m["DH_B"],
+    )
 
 
 def sl_x(phase, T, mu):
@@ -279,14 +284,23 @@ class SolidLiquidEngine:
         x = sl_x(ph, T, mu)
         _, _, W, hA, hB = _sl_params(ph, T)
         E = hA * (1 - x) + hB * x + W * x * (1 - x)
-        return dict(x=float(np.clip(x + self.rng.normal(0, self.nx), 1e-7, 1 - 1e-7)), x_se=self.nx,
-                    E=E + self.rng.normal(0, self.nE), E_se=self.nE, drift=0.0, resolved=True), dict(state)
+        return dict(
+            x=float(np.clip(x + self.rng.normal(0, self.nx), 1e-7, 1 - 1e-7)),
+            x_se=self.nx,
+            E=E + self.rng.normal(0, self.nE),
+            E_se=self.nE,
+            drift=0.0,
+            resolved=True,
+        ), dict(state)
 
     def run(self, T, mu, sa, sg, tag=""):
         """Both walkers at (T, mu); also checks the tracer told it which walker is the liquid."""
         self.calls += 1
         if self.phase_kind is not None:
-            assert self.phase_kind["a"] == sa["phase"] and self.phase_kind["g"] == sg["phase"], (self.phase_kind, sa, sg)
+            assert (
+                self.phase_kind["a"] == sa["phase"]
+                and self.phase_kind["g"] == sg["phase"]
+            ), (self.phase_kind, sa, sg)
         a, sa2 = self._walker(T, mu, sa)
         g, sg2 = self._walker(T, mu, sg)
         return a, g, sa2, sg2
@@ -295,17 +309,40 @@ class SolidLiquidEngine:
 def melt_test(out, quiet) -> bool:
     """[10] Trace both solid-liquid branches from T_m (dH_m measured by the tracer) vs the exact lines."""
     m, good, lines = MELT, True, []
-    for host, Tm, span, seed, cross in (("A", m["TM_A"], 500.0, 11, None), ("B", m["TM_B"], 800.0, 12, 1200.0)):
+    for host, Tm, span, seed, cross in (
+        ("A", m["TM_A"], 500.0, 11, None),
+        ("B", m["TM_B"], 800.0, 12, 1200.0),
+    ):
         kT = 8.617333262e-5 * Tm
         sign = 1.0 if host == "A" else -1.0
         mu_pure = m["E_B"] - sign * 3.0
         mu_probe = m["E_B"] + sign * (kT * np.log(0.02))
-        cross_mu = None if cross is None else {float(T): sl_exact(cross, host) for T in (300.0, 1500.0)}
-        cfg = TraceConfig(t0=Tm, mu0=None, t_stop=Tm + span, dt=25.0, dt_max=100.0, dt_min=5.0, min_gap=0.0,
-                          melt_T=Tm, melt_host=host, melt_mu_pure=mu_pure, melt_mu_probe=mu_probe,
-                          cross_mu=cross_mu, max_steps=40, tol_mu=0.001, max_corr=3)
+        cross_mu = (
+            None
+            if cross is None
+            else {float(T): sl_exact(cross, host) for T in (300.0, 1500.0)}
+        )
+        cfg = TraceConfig(
+            t0=Tm,
+            mu0=None,
+            t_stop=Tm + span,
+            dt=25.0,
+            dt_max=100.0,
+            dt_min=5.0,
+            min_gap=0.0,
+            melt_T=Tm,
+            melt_host=host,
+            melt_mu_pure=mu_pure,
+            melt_mu_probe=mu_probe,
+            cross_mu=cross_mu,
+            max_steps=40,
+            tol_mu=0.001,
+            max_corr=3,
+        )
         eng = SolidLiquidEngine(seed=seed)
-        tr = BoundaryTracer(cfg, eng, out / f"melt_{host}.json", log=quiet).run(dict(phase="solid"), dict(phase="liquid"))
+        tr = BoundaryTracer(cfg, eng, out / f"melt_{host}.json", log=quiet).run(
+            dict(phase="solid"), dict(phase="liquid")
+        )
         # error in T (the line is steep in dmu near T_m, so dmu errors there mean little)
         errs = []
         for p in tr["points"]:
@@ -313,17 +350,24 @@ def melt_test(out, quiet) -> bool:
             errs.append((p["T"], (p["mu"] - ex) / (0.5 * (up - dn))))
         worst = max(abs(e) for _, e in errs) if errs else float("inf")
         dH_err = tr["melt"]["dH"] - (m["DH_A"] if host == "A" else m["DH_B"])
-        ok = (tr["status"] == "finished" and len(errs) >= 3 and worst < 10.0 and abs(dH_err) < 0.002)
+        ok = (
+            tr["status"] == "finished"
+            and len(errs) >= 3
+            and worst < 10.0
+            and abs(dH_err) < 0.002
+        )
         if cross is not None:
             tp = tr.get("three_phase") or {}
             ok &= abs(tp.get("T", 0) - cross) < 15
         good &= ok
-        lines.append(f"host {host}: T_m {Tm:g} K, line runs {'UP' if tr.get('direction', 0) > 0 else 'DOWN'} "
-                     f"({tr.get('phase_kind')}), dH_m err {dH_err * 1e3:+.2f} meV, {len(errs)} pts "
-                     f"{errs[0][0]:.0f}-{errs[-1][0]:.0f} K, worst T err {worst:.1f} K, "
-                     f"{sum(bool(p.get('anchored')) for p in tr['points'])} anchored, {eng.calls} calls, "
-                     f"three-phase {tr.get('three_phase', {}).get('T', '-')}, stop='{tr['stop_reason']}'"
-                     f"  -> {'PASS' if ok else 'FAIL'}")
+        lines.append(
+            f"host {host}: T_m {Tm:g} K, line runs {'UP' if tr.get('direction', 0) > 0 else 'DOWN'} "
+            f"({tr.get('phase_kind')}), dH_m err {dH_err * 1e3:+.2f} meV, {len(errs)} pts "
+            f"{errs[0][0]:.0f}-{errs[-1][0]:.0f} K, worst T err {worst:.1f} K, "
+            f"{sum(bool(p.get('anchored')) for p in tr['points'])} anchored, {eng.calls} calls, "
+            f"three-phase {tr.get('three_phase', {}).get('T', '-')}, stop='{tr['stop_reason']}'"
+            f"  -> {'PASS' if ok else 'FAIL'}"
+        )
     for line in lines:
         print(f"[10] {line}")
     return good
@@ -534,44 +578,86 @@ def main():
     )
 
     # 8. fast upward pass, anchored (dilute) start
-    dG_table = {float(T): EB for T in range(300, 1501, 50)}  # pure phases: G_A = 0, G_B = e_B
+    dG_table = {
+        float(T): EB for T in range(300, 1501, 50)
+    }  # pure phases: G_A = 0, G_B = e_B
     eng8 = MeanFieldEngine(seed=9)
-    cfg8 = TraceConfig(t0=500.0, mu0=None, t_stop=1400.0, dt=100.0, dt_floor=100.0, dt_max=200.0, dt_min=12.5,
-                       dilute_dG=dG_table)
-    tr8 = BoundaryTracer(cfg8, eng8, out / "fast_up.json", log=quiet).run(dict(branch="low"), dict(branch="high"))
+    cfg8 = TraceConfig(
+        t0=500.0,
+        mu0=None,
+        t_stop=1400.0,
+        dt=100.0,
+        dt_floor=100.0,
+        dt_max=200.0,
+        dt_min=12.5,
+        dilute_dG=dG_table,
+    )
+    tr8 = BoundaryTracer(cfg8, eng8, out / "fast_up.json", log=quiet).run(
+        dict(branch="low"), dict(branch="high")
+    )
     anch = [p for p in tr8["points"] if p.get("anchored")]
-    e8 = [(p["T"], p["mu"] - mu_coex(p["T"]), p["a"]["x"] - truth(L0, L1, EB, p["T"])["x_alpha"],
-           p["g"]["x"] - truth(L0, L1, EB, p["T"])["x_gamma"]) for p in anch]
+    e8 = [
+        (
+            p["T"],
+            p["mu"] - mu_coex(p["T"]),
+            p["a"]["x"] - truth(L0, L1, EB, p["T"])["x_alpha"],
+            p["g"]["x"] - truth(L0, L1, EB, p["T"])["x_gamma"],
+        )
+        for p in anch
+    ]
     worst8 = max(abs(d) for r in e8 for d in r[1:])
     exit_T = tr8.get("dilute_exit_T")
     top8 = max(p["T"] for p in tr8["points"])
-    good8 = (len(anch) >= 2 and worst8 < 0.01 and exit_T is not None and exit_T < tc - 100
-             and top8 > tc - 120 and top8 < tc)
+    good8 = (
+        len(anch) >= 2
+        and worst8 < 0.01
+        and exit_T is not None
+        and exit_T < tc - 100
+        and top8 > tc - 120
+        and top8 < tc
+    )
     ok &= good8
-    print(f"[8] fast dilute-anchored upward pass: {len(anch)} anchored points "
-          + ", ".join(f"{T:.0f} K ({d * 1e3:+.2f} meV)" for T, d, _, _ in e8)
-          + f"; dilute exit after {exit_T} K ({[e.get('reason') for e in tr8['events'] if e['kind'] == 'dilute-exit']}); "
-          f"top {top8:.1f} K vs T_c {tc:.1f} K, {eng8.calls} engine calls, stop='{tr8['stop_reason']}'"
-          f"  -> {'PASS' if good8 else 'FAIL'}")
+    print(
+        f"[8] fast dilute-anchored upward pass: {len(anch)} anchored points "
+        + ", ".join(f"{T:.0f} K ({d * 1e3:+.2f} meV)" for T, d, _, _ in e8)
+        + f"; dilute exit after {exit_T} K ({[e.get('reason') for e in tr8['events'] if e['kind'] == 'dilute-exit']}); "
+        f"top {top8:.1f} K vs T_c {tc:.1f} K, {eng8.calls} engine calls, stop='{tr8['stop_reason']}'"
+        f"  -> {'PASS' if good8 else 'FAIL'}"
+    )
 
     # 9. retrace down from the fast pass's top, loosened corrector, to its dilute_exit_T
     tops = [p for p in tr8["points"] if p["g"]["x"] - p["a"]["x"] >= 0.15]
     top = max(tops, key=lambda p: p["T"])
     eng9 = MeanFieldEngine(seed=10)
-    cfg9 = TraceConfig(t0=top["T"], mu0=top["mu"], mu0_se=top["mu_se"], t_stop=exit_T, dt=50.0, dt_max=100.0,
-                       tol_mu=0.004, max_corr=1)
+    cfg9 = TraceConfig(
+        t0=top["T"],
+        mu0=top["mu"],
+        mu0_se=top["mu_se"],
+        t_stop=exit_T,
+        dt=50.0,
+        dt_max=100.0,
+        tol_mu=0.004,
+        max_corr=1,
+    )
     tr9 = BoundaryTracer(cfg9, eng9, out / "fast_retrace.json", log=quiet).run(
-        dict(branch="low"), dict(branch="high"))
+        dict(branch="low"), dict(branch="high")
+    )
     end = min(tr9["points"], key=lambda p: abs(p["T"] - exit_T))
     anchor = min(anch, key=lambda p: abs(p["T"] - exit_T))
     closure = end["mu"] - anchor["mu"]
     e9 = mu_errors(tr9)
     worst9 = max(abs(d) for _, d, _ in e9)
-    good9 = abs(closure) < 0.005 and worst9 < 0.005 and tr9["stop_reason"] == "reached t_stop"
+    good9 = (
+        abs(closure) < 0.005
+        and worst9 < 0.005
+        and tr9["stop_reason"] == "reached t_stop"
+    )
     ok &= good9
-    print(f"[9] retrace {top['T']:.0f} -> {exit_T:.0f} K (tol_mu 4 meV): closure on the anchored point "
-          f"{closure * 1e3:+.2f} meV, worst error vs exact {worst9 * 1e3:.2f} meV over {len(e9)} points, "
-          f"{eng9.calls} engine calls  -> {'PASS' if good9 else 'FAIL'}")
+    print(
+        f"[9] retrace {top['T']:.0f} -> {exit_T:.0f} K (tol_mu 4 meV): closure on the anchored point "
+        f"{closure * 1e3:+.2f} meV, worst error vs exact {worst9 * 1e3:.2f} meV over {len(e9)} points, "
+        f"{eng9.calls} engine calls  -> {'PASS' if good9 else 'FAIL'}"
+    )
 
     # 10. solid-liquid lines from both pure melting points (melt anchor, v1.5)
     ok &= melt_test(out, quiet)
@@ -583,7 +669,7 @@ def main():
     )
     # overlay exact binodal on the report figure data for the record
     exact = [dict(T=T, **(truth(L0, L1, EB, T) or {})) for T in np.arange(600, tc, 25)]
-    (out / "exact_binodal.json").write_text(json.dumps(exact, indent=2, default=float))
+    (out / "exact_binodal.json").write_text(json.dumps(exact, indent=2, default=float) + "\n")
     print(f"engine calls: down {len(tr['points'])} pts; report -> {out / 'report'}")
     print("ALL PASS" if ok else "SOME CHECKS FAILED")
     return 0 if ok else 1
