@@ -669,7 +669,9 @@ def main():
     )
     # overlay exact binodal on the report figure data for the record
     exact = [dict(T=T, **(truth(L0, L1, EB, T) or {})) for T in np.arange(600, tc, 25)]
-    (out / "exact_binodal.json").write_text(json.dumps(exact, indent=2, default=float) + "\n")
+    (out / "exact_binodal.json").write_text(
+        json.dumps(exact, indent=2, default=float) + "\n"
+    )
     print(f"engine calls: down {len(tr['points'])} pts; report -> {out / 'report'}")
     print("ALL PASS" if ok else "SOME CHECKS FAILED")
     return 0 if ok else 1
