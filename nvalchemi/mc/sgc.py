@@ -108,31 +108,11 @@ class SGC(BaseMonteCarlo):
             raise ValueError(
                 "per-graph chemical potentials must have equal lengths"
             ) from exc
-        # Device copies of species/potentials (and VC-SGC parameters), made once
-        # per device and dtype instead of every MC step. Treat the public
-        # attributes they are built from as read-only after construction.
-        self._device_parameters: dict[
-            tuple[str, torch.device, torch.dtype], torch.Tensor
-        ] = {}
         self._proposal_indices: torch.Tensor | None = None
         self._proposal_old: torch.Tensor | None = None
         self._proposal_new: torch.Tensor | None = None
-
-    def _on_device(
-        self,
-        name: str,
-        value: torch.Tensor | Sequence[int],
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        """Return the cached copy of parameter *name* on *device* in *dtype*."""
-        key = (name, device, dtype)
-        cached = self._device_parameters.get(key)
-        if cached is None:
-            cached = self._device_parameters[key] = torch.as_tensor(
-                value, dtype=dtype, device=device
-            )
-        return cached
+        # Column of the old and new species in ``self.species`` per graph.
+        self._proposal_ranks: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def _species_tensor(self, batch: Batch) -> torch.Tensor:
         """Return configured species on the batch device."""
@@ -155,13 +135,13 @@ class SGC(BaseMonteCarlo):
         active: torch.Tensor,
     ) -> None:
         """Change one random active site to a uniformly chosen other species."""
-        counts = batch.num_nodes_per_graph
+        numbers = batch.atomic_numbers
         local_indices = torch.floor(
             torch.rand(batch.num_graphs, device=batch.device, generator=generator)
-            * counts
+            * batch.num_nodes_per_graph
         ).to(torch.long)
         indices = batch.batch_ptr[:-1].to(torch.long) + local_indices
-        old = batch.atomic_numbers[indices].clone()
+        old = numbers[indices]
         species = self._species_tensor(batch)
         old_rank = (old[:, None] == species[None, :]).to(torch.long).argmax(dim=1)
         offset = torch.randint(
@@ -170,20 +150,22 @@ class SGC(BaseMonteCarlo):
             device=batch.device,
             generator=generator,
         )
-        new = species[(old_rank + offset + 1) % len(self.species)]
+        new_rank = (old_rank + offset + 1) % len(self.species)
+        new = species[new_rank]
         with torch.no_grad():
-            batch.atomic_numbers[indices[active]] = new[active]
+            numbers[indices] = torch.where(active, new, old)
         self._proposal_indices = indices
         self._proposal_old = old
         self._proposal_new = new
+        self._proposal_ranks = (old_rank, new_rank)
 
     def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
         """Restore atom types for rejected trial transmutations."""
         if self._proposal_indices is None or self._proposal_old is None:
             raise RuntimeError("SGC rejection attempted without a proposal")
-        batch.atomic_numbers[self._proposal_indices[rejected]] = self._proposal_old[
-            rejected
-        ]
+        numbers = batch.atomic_numbers
+        indices = self._proposal_indices
+        numbers[indices] = torch.where(rejected, self._proposal_old, numbers[indices])
 
     def _chemical_potentials_for(self, batch: Batch) -> torch.Tensor:
         """Return the ``(n_graphs, n_species)`` chemical potentials for the batch."""
@@ -204,24 +186,10 @@ class SGC(BaseMonteCarlo):
 
     def _chemical_delta(self, batch: Batch) -> torch.Tensor:
         """Return ``-(mu_new - mu_old)`` for each current SGC proposal."""
-        if (
-            self._proposal_old is None
-            or self._proposal_new is None
-            or self._active is None
-        ):
+        if self._proposal_ranks is None or self._active is None:
             raise RuntimeError("SGC chemical contribution requested without a proposal")
+        old_rank, new_rank = self._proposal_ranks
         potentials = self._chemical_potentials_for(batch)
-        species = self._species_tensor(batch)
-        old_rank = (
-            (self._proposal_old[:, None] == species[None, :])
-            .to(torch.long)
-            .argmax(dim=1)
-        )
-        new_rank = (
-            (self._proposal_new[:, None] == species[None, :])
-            .to(torch.long)
-            .argmax(dim=1)
-        )
         chemical_delta = (
             potentials.gather(1, old_rank[:, None])
             - potentials.gather(1, new_rank[:, None])

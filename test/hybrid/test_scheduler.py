@@ -165,40 +165,116 @@ def test_shared_model_without_energy_only_keeps_adopting_md_energy() -> None:
     assert calls == []
 
 
-def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
-    """The hook sees the post-MC species and precedes every block's first MD evaluation."""
-    mc_model = DemoModelWrapper(DemoModel())
-    md_model = DemoModelWrapper(DemoModel())
-    batch = _one_atom_batch()
-    mc = SGC(
-        model=mc_model,
+def _sgc(model: DemoModelWrapper) -> SGC:
+    return SGC(
+        model=model,
         temperature=1000.0,
         species=[1, 2],
         chemical_potentials={1: 0.0, 2: 1.0e6},
         random_seed=4,
     )
+
+
+def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
+    """The hook sees the post-MC species and precedes every block's first MD evaluation."""
+    md_model = DemoModelWrapper(DemoModel())
+    mc = _sgc(DemoModelWrapper(DemoModel()))
     md = DemoDynamics(model=md_model, n_steps=None, dt=0.01)
     events: list[tuple[str, int]] = []
-
-    def hook(b):
-        events.append(("prepare", int(b.atomic_numbers[0])))
-
     compute = md.compute
 
-    def spy_compute(b):
+    def spy_compute(b, *args, **kwargs):
         events.append(("md.compute", int(b.atomic_numbers[0])))
-        return compute(b)
+        return compute(b, *args, **kwargs)
 
     md.compute = spy_compute
-    HybridMCMD(mc=mc, md=md, mc_steps=1, md_steps=1, before_md_block=hook).run(
-        batch, n_blocks=2
-    )
+    HybridMCMD(
+        mc=mc,
+        md=md,
+        mc_steps=1,
+        md_steps=1,
+        before_md_block=lambda b: events.append(("prepare", int(b.atomic_numbers[0]))),
+    ).run(_one_atom_batch(), n_blocks=2)
 
     names = [name for name, _ in events]
-    # initial prepare+compute, then per block: prepare, compute (md.run's own
-    # computes may follow and are not preceded by a prepare).
     prepares = [i for i, n in enumerate(names) if n == "prepare"]
-    assert len(prepares) == 3
+    assert len(prepares) == 3  # initial evaluation + one per block
     assert all(names[i + 1] == "md.compute" for i in prepares)
     assert events[prepares[0]][1] == 1  # before any MC move
     assert events[prepares[1]][1] == 2  # after the first MC block transmuted 1 -> 2
+
+
+def test_md_block_evaluates_the_model_once_per_step_plus_one() -> None:
+    """md.run primes forces itself; the scheduler must not add a second evaluation."""
+    model = DemoModelWrapper(DemoModel())
+    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
+    calls: list[int] = []
+    compute = md.compute
+
+    def spy(b, *args, **kwargs):
+        calls.append(1)
+        return compute(b, *args, **kwargs)
+
+    md.compute = spy
+    HybridMCMD(mc=_sgc(model), md=md, mc_steps=1, md_steps=3).run(
+        _one_atom_batch(), n_blocks=2
+    )
+
+    assert len(calls) == 1 + 2 * (3 + 1)
+
+
+def test_zero_md_steps_runs_mc_only_blocks() -> None:
+    """md_steps=0 (rigid-lattice MC) runs, with no MD evaluation between blocks."""
+    model = DemoModelWrapper(DemoModel())
+    mc = _sgc(model)
+    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
+
+    HybridMCMD(mc=mc, md=md, mc_steps=2, md_steps=0).run(_one_atom_batch(), n_blocks=3)
+
+    assert mc.step_count == 6
+    assert md.step_count == 0
+
+
+def test_after_md_block_runs_before_mc_adopts_the_energy() -> None:
+    """The hook runs after every MD block (and the initial evaluation), even with md_steps=0."""
+    model = DemoModelWrapper(DemoModel())
+    mc = _sgc(model)
+    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
+    events: list[str] = []
+    synchronize = mc.synchronize
+
+    def spy_synchronize(b):
+        events.append("synchronize")
+        return synchronize(b)
+
+    mc.synchronize = spy_synchronize
+    HybridMCMD(
+        mc=mc,
+        md=md,
+        mc_steps=1,
+        md_steps=0,
+        after_md_block=lambda b: events.append("after"),
+    ).run(_one_atom_batch(), n_blocks=2)
+
+    assert events == ["after", "synchronize"] * 3
+
+
+def test_on_block_sees_every_block_and_can_stop_early() -> None:
+    """on_block receives the block index; returning True ends the run."""
+    model = DemoModelWrapper(DemoModel())
+    mc = _sgc(model)
+    seen: list[int] = []
+
+    def on_block(batch: Batch, block: int) -> bool:
+        seen.append(block)
+        return block == 1
+
+    HybridMCMD(
+        mc=mc,
+        md=DemoDynamics(model=model, n_steps=None, dt=0.01),
+        mc_steps=1,
+        md_steps=1,
+    ).run(_one_atom_batch(), n_blocks=5, on_block=on_block)
+
+    assert seen == [0, 1]
+    assert mc.step_count == 2

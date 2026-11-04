@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -258,7 +259,7 @@ class SimulationBatchPlanner:
                 points, points[1:]
             )
         )
-        incremental_bytes = max(1, int(incremental_bytes + 0.999999))
+        incremental_bytes = max(1, math.ceil(incremental_bytes))
         resident_bytes = max(
             0,
             max(memory - incremental_bytes * width for width, memory in points),

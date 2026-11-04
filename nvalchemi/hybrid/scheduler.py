@@ -51,6 +51,10 @@ class HybridMCMD:
     (:meth:`~nvalchemi.mc.base.BaseMonteCarlo.refresh_energy`), rather than
     adopting MD's, so every acceptance ratio compares energies from one
     evaluation path -- one extra model call per block.
+
+    ``md_steps=0`` gives MC-only blocks (e.g. rigid-lattice SGC); with an
+    ``after_md_block`` hook (e.g. a volume relaxation) the hook still runs
+    between MC blocks on a fresh force/stress evaluation.
     """
 
     def __init__(
@@ -61,6 +65,7 @@ class HybridMCMD:
         md_steps: int,
         mc_energy_only: bool = False,
         before_md_block: Callable[[Batch], None] | None = None,
+        after_md_block: Callable[[Batch], None] | None = None,
     ) -> None:
         """Initialize the hybrid scheduler.
 
@@ -80,6 +85,11 @@ class HybridMCMD:
             Called with the batch before each MD block's first force evaluation
             (including the initial one), after MC has updated the species. Use
             it to prepare a separate MD model for the current composition.
+        after_md_block
+            Called with the batch after each MD block (and after the initial
+            force evaluation), before MC adopts ``batch.energy``. It must leave
+            ``batch.energy`` evaluated at the geometry it leaves behind, e.g. a
+            cell relaxation that re-evaluates the model.
         """
         if mc_steps < 0 or md_steps < 0:
             raise ValueError("mc_steps and md_steps must both be non-negative")
@@ -91,6 +101,7 @@ class HybridMCMD:
         self.md_steps = md_steps
         self.mc_energy_only = mc_energy_only
         self.before_md_block = before_md_block
+        self.after_md_block = after_md_block
         self.separate_models = mc.model is not md.model
 
     @contextlib.contextmanager
@@ -112,9 +123,9 @@ class HybridMCMD:
 
         Applies ``mc_energy_only`` (narrowed outputs plus the baseline
         re-evaluation) and, with separate MC and MD models, the baseline
-        re-evaluation with the MC model. Call this, not ``self.mc.run``, from
-        any loop that reimplements :meth:`run` -- e.g. to record observables per
-        block -- or both are silently bypassed.
+        re-evaluation with the MC model. Prefer :meth:`run` with ``on_block``
+        for per-block observables; a loop that reimplements :meth:`run` must
+        call this, not ``self.mc.run``, or both are silently bypassed.
 
         Parameters
         ----------
@@ -129,33 +140,71 @@ class HybridMCMD:
             self.mc.run(batch, n_steps=self.mc_steps)
 
     def prepare_md_block(self, batch: Batch) -> None:
-        """Run ``before_md_block`` (if set) ahead of an MD block's first force call.
-
-        Like :meth:`run_mc_block`, call this from any loop that reimplements
-        :meth:`run`, right before ``md.compute``.
-        """
+        """Run ``before_md_block`` (if set) ahead of an MD block's first force call."""
         if self.before_md_block is not None:
             self.before_md_block(batch)
 
-    def run(self, batch: Batch, n_blocks: int) -> Batch:
+    def run_md_block(self, batch: Batch, n_steps: int | None = None) -> None:
+        """Run one MD block and hand the resulting energy to MC.
+
+        ``md.run`` evaluates forces before its first step, so derivatives left
+        by a rejected MC trial never reach the integrator. With zero steps
+        only that evaluation runs (for ``after_md_block``).
+
+        Parameters
+        ----------
+        batch
+            The shared hybrid batch, advanced in place.
+        n_steps
+            MD steps; defaults to ``md_steps``.
+        """
+        n_steps = self.md_steps if n_steps is None else n_steps
+        self.prepare_md_block(batch)
+        if n_steps > 0:
+            self.md.run(batch, n_steps=n_steps)
+        else:
+            self.md.compute(batch)
+        if self.after_md_block is not None:
+            self.after_md_block(batch)
+        self.mc.synchronize(batch)
+
+    def run(
+        self,
+        batch: Batch,
+        n_blocks: int,
+        on_block: Callable[[Batch, int], bool | None] | None = None,
+    ) -> Batch:
         """Run alternating MC and MD blocks on the supplied batch.
 
-        A force/energy evaluation follows each MC block before MD begins. It
-        prevents candidate-state derivatives from a rejected MC move being used
-        by the MD integrator.
+        Parameters
+        ----------
+        batch
+            The shared hybrid batch, advanced in place.
+        n_blocks
+            Number of MC + MD blocks.
+        on_block
+            Called after every block as ``on_block(batch, block_index)``, once
+            MC has adopted the block's final energy; record observables here.
+            Returning ``True`` stops the run early.
+
+        Returns
+        -------
+        Batch
+            The same batch object.
         """
         if n_blocks < 1:
             raise ValueError("n_blocks must be positive")
         if getattr(batch, "forces", None) is None:
             raise ValueError("hybrid MC-MD requires preallocated batch.forces")
+        # Without MD steps or a hook nothing changes the geometry between MC
+        # blocks, and MC's own accepted energies are already on the batch.
+        md_between_blocks = self.md_steps > 0 or self.after_md_block is not None
         with self.md:
-            self.prepare_md_block(batch)
-            self.md.compute(batch)
-            self.mc.synchronize(batch)
-            for _ in range(n_blocks):
+            self.run_md_block(batch, n_steps=0)
+            for block in range(n_blocks):
                 self.run_mc_block(batch)
-                self.prepare_md_block(batch)
-                self.md.compute(batch)
-                self.md.run(batch, n_steps=self.md_steps)
-                self.mc.synchronize(batch)
+                if md_between_blocks:
+                    self.run_md_block(batch)
+                if on_block is not None and on_block(batch, block):
+                    break
         return batch

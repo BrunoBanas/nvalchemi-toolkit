@@ -12,33 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Timeout-guarded smoke test for the hybrid SGC-NPT workflow with real UMA inference.
+"""Timeout-guarded smoke test for hybrid SGC-NPT with real UMA inference.
 
-Runs two hybrid MC-MD blocks on a 32-atom AuPt cell, batching two walkers at
-different delta_mu together -- seconds on a GPU, not the hours of
-benchmark/hybrid_sgc_npt/run_campaign.py's real 88-run campaign, which should
-never be used as a correctness/smoke check for the method itself. Imports
-run_campaign.py's own build_ase_structure/make_workload rather than
-reimplementing the workload, so this exercises the exact production code
-path instead of a parallel hand-rolled one.
+Two hybrid blocks on two 32-atom Au-Pt walkers at different delta_mu, built
+with ``run_campaign.py``'s own ``make_workload`` so the production code path
+is exercised. Guards against two past failures: ``_ensure_observables``
+calling an AtomicData-only method on a ``Batch``, and merged/compiled
+inference settings stalling once SGC makes the walkers' compositions diverge
+(``run_campaign.INFERENCE_SETTINGS`` keeps ``merge_mole=False``); the timeout
+turns a recurrence of the stall into a fast failure.
 
-This is a regression guard for two failures found debugging that campaign:
-
-1. ``nvalchemi/mc/base.py::_ensure_observables`` called the AtomicData-only
-   ``Batch.add_system_property`` on a real ``Batch`` -- ``AttributeError``.
-2. ``inference_settings="default"`` let fairchem's merge_mole/compile fast
-   path engage against the batch's initial (single) composition, then
-   silently stalled for minutes falling back once SGC's per-step atom swaps
-   made the two walkers' compositions diverge from what was merged/compiled.
-   ``inference_settings="batch"`` is the fix -- see run_campaign.py's
-   ``INFERENCE_SETTINGS``.
-
-``@pytest.mark.timeout`` turns a reoccurrence of #2 into a fast, loud
-failure instead of a silently hung GPU reservation.
-
-Skipped when fairchem-core isn't installed, no CUDA device is visible, or
-the UMA checkpoint can't be loaded (no HF access) -- mirrors
-test/models/test_uma_nve_stability.py's pattern.
+Skipped without fairchem-core, CUDA, or access to the UMA checkpoint.
 """
 
 from __future__ import annotations
@@ -54,9 +38,6 @@ pytest.importorskip(
     "fairchem.core", reason="fairchem-core not installed; skipping UMA tests"
 )
 
-# run_campaign.py lives in benchmark/, not the nvalchemi package -- import it
-# as a module (not reimplement its workload) so this test tracks the real
-# campaign script instead of a parallel implementation that could drift.
 _BENCHMARK_DIR = Path(__file__).resolve().parents[2] / "benchmark" / "hybrid_sgc_npt"
 if str(_BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCHMARK_DIR))
@@ -66,9 +47,6 @@ import run_campaign as campaign  # noqa: E402
 from nvalchemi.models.uma import UMAWrapper  # noqa: E402
 from nvalchemi.scheduling import RunSpec  # noqa: E402
 
-# Two blocks is enough to exercise one MC pass (composition changes) and one
-# MD pass (NPT dynamics) per walker. A hang here is a regression to fail on,
-# not something worth waiting out.
 _TIMEOUT_S = 180
 
 
@@ -100,9 +78,7 @@ def test_hybrid_sgc_npt_smoke(uma_model: UMAWrapper) -> None:
         cubic=campaign.CONVENTIONAL_CELL,
     )
 
-    # Two walkers at different delta_mu, same batch_group: batched together
-    # onto one graph, so their compositions diverge from each other under
-    # SGC swaps -- the exact heterogeneous-batch scenario "default" mishandles.
+    # Two walkers at different delta_mu in one batch: their compositions diverge.
     runs = tuple(
         RunSpec(
             run_id=f"smoke.mu{index}",

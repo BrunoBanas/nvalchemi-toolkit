@@ -12,20 +12,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for hybrid MC-MD batch capacity planning."""
+"""Tests for simulation batch capacity planning and GPU queue construction."""
 
 from __future__ import annotations
 
-from nvalchemi.hybrid import (
-    BatchMeasurement,
-    HybridBatchPlanner,
-    SimulationBatchPlanner,
-)
+import torch
+
+from nvalchemi.scheduling import BatchMeasurement, SimulationBatchPlanner
+from nvalchemi.scheduling.batching import _is_out_of_memory
 
 
 def test_estimate_width_uses_model_and_per_walker_memory() -> None:
     """The static estimate retains the configured memory headroom."""
-    planner = HybridBatchPlanner(memory_fraction=0.9)
+    planner = SimulationBatchPlanner(memory_fraction=0.9)
 
     width = planner.estimate_width(
         total_memory_bytes=40_000,
@@ -36,14 +35,9 @@ def test_estimate_width_uses_model_and_per_walker_memory() -> None:
     assert width == 16
 
 
-def test_generic_planner_preserves_hybrid_compatibility_name() -> None:
-    """The old hybrid name remains a direct alias of the generic planner."""
-    assert HybridBatchPlanner is SimulationBatchPlanner
-
-
 def test_recommend_width_prefers_smallest_near_peak_throughput() -> None:
     """The lowest width meeting the throughput threshold is selected."""
-    planner = HybridBatchPlanner(memory_fraction=0.9, throughput_fraction=0.95)
+    planner = SimulationBatchPlanner(memory_fraction=0.9, throughput_fraction=0.95)
     measurements = [
         BatchMeasurement(1, "ok", 100.0, 1_000),
         BatchMeasurement(2, "ok", 180.0, 2_000),
@@ -62,15 +56,15 @@ def test_infer_memory_model_can_port_a_profile_to_another_gpu() -> None:
         BatchMeasurement(4, "ok", 30.0, 1_800),
     ]
 
-    estimate = HybridBatchPlanner.infer_memory_model(measurements)
+    estimate = SimulationBatchPlanner.infer_memory_model(measurements)
 
     assert estimate.model_resident_bytes == 1_000
     assert estimate.bytes_per_walker == 200
 
 
-def test_assign_walkers_forms_serial_waves_per_gpu() -> None:
-    """Excess walkers are queued after one full batch per requested GPU."""
-    assignments = HybridBatchPlanner.assign_runs(
+def test_assign_runs_forms_serial_waves_per_gpu() -> None:
+    """Excess runs are queued after one full batch per requested GPU."""
+    assignments = SimulationBatchPlanner.assign_runs(
         total_runs=19, batch_width=4, gpu_ids=[2, 5]
     )
 
@@ -85,26 +79,8 @@ def test_assign_walkers_forms_serial_waves_per_gpu() -> None:
     ]
 
 
-def test_assign_runs_is_the_generic_queue_api() -> None:
-    """Generic campaigns use independent-run naming rather than walker naming."""
-    assignments = SimulationBatchPlanner.assign_runs(
-        total_runs=5,
-        batch_width=2,
-        gpu_ids=[0, 1],
-    )
-
-    assert [(item.gpu_id, item.wave, item.count) for item in assignments] == [
-        (0, 0, 2),
-        (1, 0, 2),
-        (0, 1, 1),
-    ]
-
-
 def test_compile_wrapped_oom_is_classified_as_oom() -> None:
     """An OOM raised inside torch.compile arrives wrapped, not as OutOfMemoryError."""
-    import torch
-
-    from nvalchemi.scheduling.batching import _is_out_of_memory
 
     class BackendCompilerFailed(Exception):  # mirrors torch._dynamo.exc's shape
         def __init__(self, inner: BaseException) -> None:

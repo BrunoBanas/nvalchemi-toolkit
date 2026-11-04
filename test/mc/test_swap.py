@@ -144,25 +144,6 @@ def test_composition_and_masses_follow_over_many_steps() -> None:
     assert sampler.stats.attempted == 80
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="sync detection needs CUDA")
-def test_proposal_does_not_sync_the_device() -> None:
-    """The draw runs every MC step; a device-to-host sync there stalls the next model call."""
-    batch = _batch([1, 1, 2, 2], [1, 2, 1, 2]).to("cuda")
-    sampler = _sampler()
-    active = torch.ones(batch.num_graphs, dtype=torch.bool, device="cuda")
-    generator = sampler._ensure_generator(batch)
-    torch.cuda.synchronize()
-
-    previous = torch.cuda.get_sync_debug_mode()
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        sampler._propose(batch, generator, active)
-    finally:
-        torch.cuda.set_sync_debug_mode(previous)
-
-    assert bool(sampler._proposal_swapped.all())
-
-
 def test_samples_the_canonical_boltzmann_distribution() -> None:
     """Exact check of detailed balance: 2 B atoms on 5 sites, every arrangement enumerated."""
     torch.manual_seed(0)

@@ -456,8 +456,13 @@ The models must represent the same energy surface -- same checkpoint and task,
 differing in inference settings -- or the chain samples no single ensemble.
 `before_md_block=fn` calls `fn(batch)` before each MD block's first force
 evaluation, after MC has updated the species: use it to prepare the MD model
-for the current composition. Custom loops call `scheduler.prepare_md_block(batch)`
-before `md.compute(batch)`, as they call `scheduler.run_mc_block(batch)` for MC.
+for the current composition. `after_md_block=fn` runs after each MD block (and
+after the initial evaluation), before MC adopts `batch.energy` -- e.g. a cell
+relaxation for rigid-lattice MC with `md_steps=0`. To record observables, pass
+`on_block=fn` to `run`: `fn(batch, block_index)` runs after every block, and
+returning `True` stops early. A custom loop must use `scheduler.run_mc_block`
+and `scheduler.run_md_block` rather than `mc.run` / `md.run`, or energy-only MC,
+the separate-model re-baseline and both hooks are silently skipped.
 
 ### Simulation batch planning
 
@@ -467,7 +472,7 @@ runner. Its `profile` method runs representative work at candidate widths,
 records actual CUDA reserved memory and throughput, then `recommend_width`
 selects the smallest width near peak throughput while retaining memory headroom.
 Its `assign_runs` method packs a larger campaign into concurrent per-GPU batches
-and serial queue waves. `HybridBatchPlanner` remains an alias for compatibility.
+and serial queue waves.
 
 ```python
 import torch

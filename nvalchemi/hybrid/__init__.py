@@ -12,26 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GPU-resident schedulers that compose Monte Carlo and molecular dynamics."""
+"""GPU-resident schedulers that compose Monte Carlo and molecular dynamics.
+
+Capacity planning and campaign scheduling live in :mod:`nvalchemi.scheduling`.
+"""
 
 from __future__ import annotations
 
-from nvalchemi.hybrid.batching import (
-    BatchMeasurement,
-    BatchMemoryEstimate,
-    HybridBatchPlanner,
-    RunAssignment,
-    SimulationBatchPlanner,
-    WalkerAssignment,
-)
 from nvalchemi.hybrid.scheduler import HybridMCMD
 
-__all__ = [
-    "BatchMemoryEstimate",
-    "BatchMeasurement",
-    "HybridBatchPlanner",
-    "RunAssignment",
-    "SimulationBatchPlanner",
-    "HybridMCMD",
-    "WalkerAssignment",
-]
+__all__ = ["HybridMCMD"]
