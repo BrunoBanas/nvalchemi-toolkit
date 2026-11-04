@@ -251,9 +251,9 @@ scheduler = HybridMCMD(mc=mc, md=npt, mc_steps=100, md_steps=20, mc_energy_only=
 
 `from_checkpoint` also accepts the same settings as one string,
 `inference_settings="compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`.
-`benchmark/hybrid_sgc_npt/run_campaign.py` uses exactly this as its default,
-with energy-only MC on (`--inference-settings` and `--no-mc-energy-only`
-override them).
+`benchmark/hybrid_sgc_npt/run_campaign.py` uses this for pure SGC and its
+compiled variant for hybrids (`--inference-settings auto`), with energy-only MC
+on (`--inference-settings` and `--no-mc-energy-only` override them).
 
 None of the named presets is right for SGC: `"default"` and `"turbo"` merge the
 mixture-of-experts weights for one composition, and `"batch"` enables

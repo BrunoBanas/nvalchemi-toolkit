@@ -25,10 +25,10 @@ walkers and MD blocks), so the MD phase compares directly across all three.
 Every hybrid-block parameter (CHECKPOINT, TASK, SPECIES, DT_FS,
 MD_STEPS_PER_BLOCK, MC_STEP_FRACTION, THERMOSTAT_TIME_FS, BAROSTAT_TIME_FS)
 except the inference settings is read from
-benchmark/hybrid_sgc_npt/run_campaign.py, so this benchmark cannot drift from
+benchmark/hybrid_sgc_npt/campaign_lib.py, so this benchmark cannot drift from
 the campaign's block definition.
 
-``--inference-settings`` defaults to run_campaign.py's INFERENCE_SETTINGS
+``--inference-settings`` defaults to campaign_lib.py's INFERENCE_SETTINGS
 (``compile=false,merge_mole=false,tf32=true,activation_checkpointing=false``),
 the recommended SGC-NPT spec; ``--mc-energy-only`` runs MC blocks energy-only.
 For Kawasaki-NPT and pure NPT (fixed composition) merge_mole without compile
@@ -51,11 +51,11 @@ from pathlib import Path
 
 import torch
 
-# run_campaign.py (workload builders, size tables) is in the sibling benchmark folder.
+# campaign_lib.py (workload builders, size tables) is in the sibling benchmark folder.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
+import campaign_lib as campaign  # noqa: E402 -- needs the sys.path insert above
 from _run_diagnostics import describe_inference  # noqa: E402 -- sibling module
 
 from nvalchemi.hybrid.scheduler import HybridMCMD  # noqa: E402
@@ -204,7 +204,7 @@ def main() -> None:
         default=campaign.INFERENCE_SETTINGS,
         help=(
             "fairchem UMA inference preset, or a key=value InferenceSettings spec "
-            "(parsed by UMAWrapper.from_checkpoint). Defaults to run_campaign.py's own "
+            "(parsed by UMAWrapper.from_checkpoint). Defaults to campaign_lib.py's own "
             f"INFERENCE_SETTINGS ({campaign.INFERENCE_SETTINGS!r}), the toolkit's "
             "recommended setting for SGC-NPT."
         ),
@@ -233,7 +233,7 @@ def main() -> None:
         type=int,
         default=1,
         help="Independent walkers batched into one hybrid run (the batch width); walker i "
-        "uses seed SEED + i, as in run_campaign.py.",
+        "uses seed SEED + i, as in campaign_lib.py.",
     )
     parser.add_argument(
         "--mc-energy-only",

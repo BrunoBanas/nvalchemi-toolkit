@@ -15,11 +15,11 @@
 """Timeout-guarded smoke test for hybrid SGC-NPT with real UMA inference.
 
 Two hybrid blocks on two 32-atom Au-Pt walkers at different delta_mu, built
-with ``run_campaign.py``'s own ``make_workload`` so the production code path
+with ``campaign_lib.py``'s own ``make_workload`` so the production code path
 is exercised. Guards against two past failures: ``_ensure_observables``
 calling an AtomicData-only method on a ``Batch``, and merged/compiled
 inference settings stalling once SGC makes the walkers' compositions diverge
-(``run_campaign.INFERENCE_SETTINGS`` keeps ``merge_mole=False``); the timeout
+(``campaign_lib.INFERENCE_SETTINGS`` keeps ``merge_mole=False``); the timeout
 turns a recurrence of the stall into a fast failure.
 
 Skipped without fairchem-core, CUDA, or access to the UMA checkpoint.
@@ -42,7 +42,7 @@ _BENCHMARK_DIR = Path(__file__).resolve().parents[2] / "benchmark" / "hybrid_sgc
 if str(_BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCHMARK_DIR))
 
-import run_campaign as campaign  # noqa: E402
+import campaign_lib as campaign  # noqa: E402
 
 from nvalchemi.models.uma import UMAWrapper  # noqa: E402
 from nvalchemi.scheduling import RunSpec  # noqa: E402

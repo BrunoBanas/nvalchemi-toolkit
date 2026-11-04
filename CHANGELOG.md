@@ -204,6 +204,14 @@
   `UMAWrapper`'s `key=value` settings specs and `active_outputs` gating);
   `export_structures.py` now also converts a single checkpoint (replacing
   `local_export_structure.py`). `AGENTS.md` gains a simulation-setup map.
+- `benchmark/hybrid_sgc_npt/run_campaign.py` is split into `campaign_lib.py`
+  (constants, `make_workload`, observables and equilibration gate, reference
+  calibration, `NvalchemiTraceEngine`) and the campaign CLI; the other drivers,
+  benchmarks and tests import `campaign_lib`. Helpers shared across scripts lose
+  their leading underscore (`equilibration_gate`, `run_hybrid_with_observables`,
+  `npt_wrap_hooks`, `wrap_batch_positions`, `cell_volumes`, `pt_fraction_per_graph`,
+  `batch_means_se`; `_pure_element_endpoint` becomes `pure_element_state`), and
+  `--no-mc-energy-only` is passed explicitly instead of through a module global.
 
 - The `check_fp_dtype_consistency` cast warning fires once per distinct
   `(field, source dtype, target dtype)` cast per process instead of on every

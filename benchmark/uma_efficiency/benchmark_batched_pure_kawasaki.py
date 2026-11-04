@@ -61,11 +61,11 @@ import torch
 import torch._dynamo
 import torch._inductor.config
 
-# run_campaign.py (workload builders, size tables) is in the sibling benchmark folder.
+# campaign_lib.py (workload builders, size tables) is in the sibling benchmark folder.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
+import campaign_lib as campaign  # noqa: E402 -- needs the sys.path insert above
 from _run_diagnostics import (  # noqa: E402 -- sibling module, same directory
     MCBlockRunner,
     RunDiagnostics,
@@ -130,6 +130,7 @@ def select_batch_width(
     call_labels = ("warmup", "measured") if warmup_blocks else ("measured",)
 
     def workload_factory(width: int, dev: torch.device):
+        """Build a fresh ``(runner, batch)`` profiling workload of *width* walkers."""
         # Static-shape compile recompiles per width; drop the previous width's graphs
         # so they neither hold memory nor exhaust dynamo's recompile limit (8).
         torch._dynamo.reset()

@@ -23,7 +23,7 @@ Why coexistence, not heating: a perfect crystal heated in MD superheats by
 solid|liquid interface already present there is no nucleation barrier: below
 T_m the crystal grows into the liquid, above T_m it melts back.
 
-Stages (same UMA checkpoint/task/inference settings as run_campaign.py):
+Stages (same UMA checkpoint/task/inference settings as campaign_lib.py):
 
 1. **Solid NPT.** Anisotropic NPT of an ``nx x nx x nz`` conventional fcc
    supercell at T, to get the equilibrium lateral lattice constant.
@@ -43,11 +43,11 @@ Stages (same UMA checkpoint/task/inference settings as run_campaign.py):
 Every integrator carries ``WrapPeriodicHook``: nvalchemi's UMA adapter passes
 positions to fairchem unwrapped, and a diffusing liquid otherwise loses
 interactions once atoms drift beyond one periodic image (see
-``_npt_wrap_hooks`` in run_campaign.py and the BUG note in
+``npt_wrap_hooks`` in campaign_lib.py and the BUG note in
 nvalchemi/models/uma.py).
 
 Alloy mode (``--delta-mu-ev``): every stage after the hot melt is hybrid SGC-MD at
-the absolute Pt chemical potential delta_mu (Au = 0, the run_campaign.py
+the absolute Pt chemical potential delta_mu (Au = 0, the campaign_lib.py
 convention): before each ``--log-every-steps`` MD chunk, ``--mc-step-fraction`` x N
 SGC transmutation trials (energy-only). Solid and liquid then each take their own
 equilibrium composition at (T, delta_mu), and the interface moves toward the
@@ -85,7 +85,7 @@ from ase.io import write as ase_write
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from run_campaign import (  # noqa: E402
+from campaign_lib import (  # noqa: E402
     BAROSTAT_TIME_FS,
     CHECKPOINT,
     INFERENCE_SETTINGS,
@@ -94,8 +94,8 @@ from run_campaign import (  # noqa: E402
     SPECIES,  # noqa: E402
     TASK,
     THERMOSTAT_TIME_FS,
-    _npt_wrap_hooks,
-    _wrap_batch_positions,
+    npt_wrap_hooks,
+    wrap_batch_positions,
 )
 
 from nvalchemi.data import AtomicData, Batch
@@ -214,7 +214,7 @@ def _npt(
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="anisotropic",
-        hooks=_npt_wrap_hooks(),
+        hooks=npt_wrap_hooks(),
     )
 
 
@@ -226,7 +226,7 @@ def _nvt(
     device: torch.device,
     max_force: float | None = None,
 ) -> NVTLangevin:
-    hooks: list = list(_npt_wrap_hooks())
+    hooks: list = list(npt_wrap_hooks())
     if max_force is not None:
         hooks.insert(0, MaxForceClampHook(max_force=max_force))
     return NVTLangevin(
@@ -264,7 +264,7 @@ def _integrate(
     """Run ``n_steps`` in chunks, calling ``on_chunk(steps_done)`` after each.
     ``on_chunk`` returning True stops early. With ``mc`` (an SGC sampler), each
     chunk is preceded by an ``mc_steps`` SGC block (hybrid MC-MD)."""
-    _wrap_batch_positions(batch)
+    wrap_batch_positions(batch)
     hybrid = (
         None
         if mc is None or mc_steps < 1

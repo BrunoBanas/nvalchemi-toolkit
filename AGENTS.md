@@ -278,7 +278,7 @@ the UMA skills:
   (`plan_run.py`), adaptable `driver_template.py` + `job_template.sbatch`.
 - `benchmark/hybrid_sgc_npt/`: Au-Pt SGC/VC-SGC-NPT campaigns, Δμ ladders,
   boundary tracer, free-energy and melting-point workflows. `run_campaign.py`
-  doubles as the helper library the others import.
+  is the campaign CLI; `campaign_lib.py` holds the helpers every driver imports.
 - `benchmark/phase_boundary/`: isotherm analysis and the numpy-only tracer
   self-test (`test_boundary_tracer.py`; writes to `--out`, never commit it).
 

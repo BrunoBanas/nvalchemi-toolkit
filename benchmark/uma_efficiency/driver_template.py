@@ -44,7 +44,7 @@ from nvalchemi.mc import SGC, VCSGC, Kawasaki
 from nvalchemi.models.uma import UMAWrapper
 
 KB_EV = 8.617333262e-5
-DT_FS, THERMOSTAT_FS, BAROSTAT_FS = 3.0, 100.0, 1000.0  # run_campaign.py's values
+DT_FS, THERMOSTAT_FS, BAROSTAT_FS = 3.0, 100.0, 1000.0  # campaign_lib.py's values
 PRESSURE_EV_PER_A3 = 1.01325 / 1.602176634e6  # 1 atm
 
 
@@ -73,7 +73,7 @@ def build_walker(
 
 def wrap_into_cells(batch: Batch) -> None:
     """Fold positions into their cells once, before the first force call
-    (run_campaign.py's _wrap_batch_positions: the NPT hook only fires after MD steps)."""
+    (campaign_lib.wrap_batch_positions: the NPT hook only fires after MD steps)."""
     cell = batch.cell
     pbc = getattr(batch, "pbc", None)
     if pbc is None:
@@ -166,6 +166,7 @@ def main() -> None:
     device = torch.device(args.device)
 
     def per_walker(values: list[float], name: str) -> torch.Tensor:
+        """Broadcast one value, or check one value per walker, as a device tensor."""
         if len(values) not in (1, args.width):
             raise SystemExit(
                 f"{name}: give one value or --width={args.width} values, got {len(values)}"

@@ -18,9 +18,9 @@ Drives ``nvalchemi.dynamics.integrators.npt.NPT`` directly (no Monte Carlo, no
 HybridMCMD) on an ``--n-atoms`` Au-Pt fcc cell. Every physical parameter
 (CHECKPOINT, TASK, SPECIES, LATTICE_A_ANG, DT_FS, THERMOSTAT_TIME_FS,
 BAROSTAT_TIME_FS, PRESSURE_EV_PER_A3, PT_FRACTION) except the inference
-settings is read from benchmark/hybrid_sgc_npt/run_campaign.py.
+settings is read from benchmark/hybrid_sgc_npt/campaign_lib.py.
 
-Positions come from run_campaign.py's ``build_ase_structure()``. Compositions
+Positions come from campaign_lib.py's ``build_ase_structure()``. Compositions
 are assigned by ``_build_state_matching_fcc_random_box()``: a CPU
 ``torch.Generator`` seeded with ``--composition-seed`` draws a
 ``torch.randperm`` and the first round(fractions[0] * n_atoms) indices get
@@ -47,10 +47,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
-# run_campaign.py (workload builders, size tables) is in the sibling benchmark folder.
+# campaign_lib.py (workload builders, size tables) is in the sibling benchmark folder.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 
-import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
+import campaign_lib as campaign  # noqa: E402 -- needs the sys.path insert above
 
 from nvalchemi.data import AtomicData, Batch  # noqa: E402
 from nvalchemi.dynamics.integrators.npt import NPT  # noqa: E402
@@ -72,7 +72,7 @@ def _build_state_matching_fcc_random_box(
 ) -> AtomicData:
     """Build one AtomicData with the seeded-randperm composition described in
     the module docstring and Maxwell-Boltzmann velocities (the same formula as
-    run_campaign.py's ``_walker()``).
+    campaign_lib.py's ``_walker()``).
     """
 
     data = AtomicData.from_atoms(template, device=device)

@@ -2,14 +2,16 @@
 
 Production drivers for Au-Pt phase diagrams with UMA: batched `SGC` / `VCSGC`
 Monte Carlo alternated with `NPT` through `HybridMCMD`, scheduled with
-`nvalchemi.scheduling`. `run_campaign.py` is also the shared library the other
-scripts import (constants, cell builders, `make_workload`, equilibration gate).
+`nvalchemi.scheduling`. Shared building blocks (constants, cell builders,
+`make_workload`, observables and the equilibration gate, reference calibration,
+the tracer engine) live in `campaign_lib.py`; every driver imports from there.
 The `nvalchemi-sgc-phase-boundary` and `nvalchemi-uma-submission` agent skills
 (`.claude/skills/`) explain when to use which.
 
 | File | Role |
 | --- | --- |
-| `run_campaign.py` | Coarse T x Δμ grid, Δμ hysteresis scans (`--mode delta-mu-scan`), boundary tracing (`--mode trace-boundary`); shared helpers. |
+| `campaign_lib.py` | Shared library: system/protocol constants, `make_workload`, `run_hybrid_with_observables`, `equilibration_gate`, `compute_reference_energies`, `NvalchemiTraceEngine`. |
+| `run_campaign.py` | CLI: coarse T x Δμ grid, Δμ hysteresis scans (`--mode delta-mu-scan`), boundary tracing (`--mode trace-boundary`). |
 | `submit_campaign.slurm` | 3-task Slurm array for `run_campaign.py`, one task per size. |
 | `run_mu_ladder.py` | Gated Δμ ladders warm-started from checkpoints (also rigid-lattice SGC with `md_steps_per_block: 0`). |
 | `run_vcsgc_scan.py` | VC-SGC-NPT walkers at fixed target compositions inside a miscibility gap. |
@@ -44,7 +46,7 @@ failure).
 
 Pass `--reference-energies-json <reference_energy_calibration.py output>`
 (recommended; `--mode delta-mu-scan` can also calibrate the reference
-in-process, see `compute_reference_energies` in `run_campaign.py`) to fix this: every
+in-process, see `compute_reference_energies` in `campaign_lib.py`) to fix this: every
 run's `chemical_potentials_ev` is rebuilt as `{Au: 0.0, Pt:
 reference[T]["delta_mu_ref_eV"] + delta_mu_excess}` at that run's own
 temperature, with `DELTA_MU_EV`'s per-column value reinterpreted as
@@ -54,6 +56,39 @@ unresolved `equilibration_gate` (not recommended). Omitting it keeps the
 old literal, uncalibrated behavior (a warning is printed at startup) — fine
 for a pure throughput/memory benchmark, not for drawing conclusions about
 the real Au-Pt phase boundary.
+
+In `--mode delta-mu-scan` the file is optional: temperatures it lacks are
+calibrated in-process (pure Au and pure Pt NPT on the already-loaded model),
+written to `<checkpoint-root>/atoms<N>/auto_reference_energies.json` for reuse,
+and held to the same equilibration gate as file-supplied entries.
+
+## Modes
+
+* `--mode cooling` (default): the grid above, one cooling chain per Δμ column
+  (see "Continuation").
+* `--mode delta-mu-scan`: A-rich and B-rich endpoints at every
+  `--scan-temperatures-k` (highest first), each seeding a Δμ_excess ladder that
+  marches toward 0.0 (`CampaignSpec.delta_mu_scan_runs`). Each lower
+  temperature's two endpoints continue from the previous temperature's
+  endpoints (not from its whole ladder), so a lower temperature starts as soon
+  as the higher one's seeds finish; `--scan-independent-temperatures` starts
+  every temperature fresh instead. All temperatures go into one
+  `CampaignSpec`, which must be a self-contained dependency graph, so run them
+  in one invocation rather than chaining invocations by run id.
+* `--mode trace-boundary`: integrate the coexistence line from one known point
+  with `boundary_tracer.py` and `NvalchemiTraceEngine`.
+
+## Δμ ladder spacing
+
+Each branch's ladder is non-uniform: every new point sits
+`--delta-mu-excess-refine-ratio` (default 0.5) of the way from the previous
+point to 0.0 until the step would drop below `--delta-mu-excess-min-step-ev`
+(default 0.01 eV), then lands on 0.0 (bracket 0.2: -0.2, -0.1, -0.05, -0.025,
+-0.0125, 0.0). Coarse deep inside a phase, fine near the transition.
+`--delta-mu-excess-overshoot-ev` continues each ladder past 0.0 (steps doubling)
+so the two branches share a Δμ window; without that overlap no walker is ever
+metastable where the other has data, so hysteresis, and with it a first-order
+boundary, cannot be resolved.
 
 ## Continuation
 

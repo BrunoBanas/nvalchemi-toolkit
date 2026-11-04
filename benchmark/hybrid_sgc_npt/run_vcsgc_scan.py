@@ -47,7 +47,7 @@ different c0 and progress. Every ``--chunk-blocks`` blocks each walker's state g
 a resubmission continues where the last job stopped, finishing partly-run walkers first.
 
 Live equilibration gate: after every chunk, once a walker has ``min_blocks`` blocks, its
-composition AND energy series are tested with the scan's gate (``run_campaign._equilibration_gate``:
+composition AND energy series are tested with the scan's gate (``campaign_lib.equilibration_gate``:
 the means of the last two ``EQUILIBRATION_WINDOW_BLOCKS``-block windows agree within twice their
 combined standard error). A walker that passes ``--gate-passes`` consecutive checks has stopped
 evolving and is stopped (``"stopped": "equilibrated"`` in its series); one that never passes
@@ -63,7 +63,7 @@ import time
 from pathlib import Path
 
 import torch
-from run_campaign import (
+from campaign_lib import (
     BAROSTAT_TIME_FS,
     CHECKPOINT,
     CRYSTAL_STRUCTURE,
@@ -77,12 +77,12 @@ from run_campaign import (
     SPECIES,
     TASK,
     THERMOSTAT_TIME_FS,
-    _cell_volumes,
-    _equilibration_gate,
-    _npt_wrap_hooks,
-    _pt_fraction_per_graph,
-    _wrap_batch_positions,
     build_ase_structure,
+    cell_volumes,
+    equilibration_gate,
+    npt_wrap_hooks,
+    pt_fraction_per_graph,
+    wrap_batch_positions,
 )
 
 from nvalchemi.data import AtomicData, Batch
@@ -210,7 +210,7 @@ def build_hybrid(
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
-        hooks=_npt_wrap_hooks(),
+        hooks=npt_wrap_hooks(),
     )
     return HybridMCMD(
         mc=vc, md=npt, mc_steps=mc_steps, md_steps=md_steps, mc_energy_only=True
@@ -224,9 +224,9 @@ def run_chunk(hybrid: HybridMCMD, batch: Batch, n_blocks: int, n_atoms: int) -> 
 
     def record(batch: Batch, _block: int) -> None:
         """Append each graph's c, U/atom and V/atom after one block."""
-        c = _pt_fraction_per_graph(batch, SPECIES[1], n)
+        c = pt_fraction_per_graph(batch, SPECIES[1], n)
         u = (batch.energy.detach().reshape(-1).double() / n_atoms).cpu().tolist()
-        v = (_cell_volumes(batch).detach().double() / n_atoms).cpu().tolist()
+        v = (cell_volumes(batch).detach().double() / n_atoms).cpu().tolist()
         for i in range(n):
             series["c"][i].append(c[i])
             series["u"][i].append(u[i])
@@ -494,7 +494,7 @@ def main() -> None:
                     )
                 )
         batch = Batch.from_data_list(states)
-        _wrap_batch_positions(batch)
+        wrap_batch_positions(batch)
         # A new MC stream per chunk, so resumed walkers never replay an earlier stream.
         done_total = sum(len(w["series"]["c"]) for w in walkers)
         hybrid = build_hybrid(
@@ -521,8 +521,8 @@ def main() -> None:
             s["acceptance"].append(dict(blocks=len(s["c"]), acceptance=acceptance))
             n_done = len(s["c"])
             if n_done >= max(w["min_blocks"], 2 * EQUILIBRATION_WINDOW_BLOCKS):
-                gc = _equilibration_gate(s["c"], EQUILIBRATION_WINDOW_BLOCKS)
-                ge = _equilibration_gate(s["u"], EQUILIBRATION_WINDOW_BLOCKS)
+                gc = equilibration_gate(s["c"], EQUILIBRATION_WINDOW_BLOCKS)
+                ge = equilibration_gate(s["u"], EQUILIBRATION_WINDOW_BLOCKS)
                 passed = bool(gc.get("resolved")) and bool(ge.get("resolved"))
                 s.setdefault("gate", []).append(
                     dict(

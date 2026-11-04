@@ -25,7 +25,7 @@ energy-only MC is `model.model_config.active_outputs = {"energy"}`, which the
 wrapper turns into skipping the forces/stress backward. The resolved MoLE
 implementation is `model.moe_layer_type`.
 
-The benchmarks build their Au-Pt cells with `../hybrid_sgc_npt/run_campaign.py`
+The benchmarks build their Au-Pt cells with `../hybrid_sgc_npt/campaign_lib.py`
 (sizes 108, 256, 500, 1372, 2048, 4000 atoms) and write `metrics.json` plus
 `progress.jsonl` / `partial_metrics.json`, which survive a time-limit kill.
 
