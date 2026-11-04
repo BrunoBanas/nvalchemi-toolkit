@@ -56,10 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
-from _uma_inference import (
-    describe as describe_inference_settings,  # noqa: E402 -- sibling module
-)
-from _uma_inference import resolve as resolve_inference_settings  # noqa: E402
+from _run_diagnostics import describe_inference  # noqa: E402 -- sibling module
 
 from nvalchemi.hybrid.scheduler import HybridMCMD  # noqa: E402
 from nvalchemi.mc import Kawasaki  # noqa: E402
@@ -72,10 +69,10 @@ class TimedHybridMCMD(HybridMCMD):
 
     Times each of the four calls HybridMCMD.run() already makes per block:
       - mc_seconds:             self.run_mc_block()   -- MC trial moves (+ energy-only re-baseline)
-      - md_compute_seconds:     self.md.compute()     -- force/energy recompute
-                                after MC, before MD resumes (so a rejected MC
-                                move's stale derivatives never reach the integrator)
-      - md_seconds:             self.md.run()         -- MD integration steps
+      - md_compute_seconds:     self.prepare_md_block() -- the before_md_block hook
+                                (the post-MC force evaluation runs inside md.run,
+                                which primes forces before its first step)
+      - md_seconds:             self.md.run()         -- force priming + MD steps
       - mc_synchronize_seconds: self.mc.synchronize() -- MC-state resync after MD,
                                 before the next block's MC trials
 
@@ -152,7 +149,7 @@ class TimedHybridMCMD(HybridMCMD):
                 self._sync()
                 t1 = time.perf_counter()
 
-                self.md.compute(batch)
+                self.prepare_md_block(batch)
                 self._sync()
                 t2 = time.perf_counter()
 
@@ -206,8 +203,8 @@ def main() -> None:
         "--inference-settings",
         default=campaign.INFERENCE_SETTINGS,
         help=(
-            "fairchem UMA inference preset, or a key=value InferenceSettings spec (see "
-            "_uma_inference.py). Defaults to run_campaign.py's own "
+            "fairchem UMA inference preset, or a key=value InferenceSettings spec "
+            "(parsed by UMAWrapper.from_checkpoint). Defaults to run_campaign.py's own "
             f"INFERENCE_SETTINGS ({campaign.INFERENCE_SETTINGS!r}), the toolkit's "
             "recommended setting for SGC-NPT."
         ),
@@ -255,12 +252,11 @@ def main() -> None:
     process_start = time.perf_counter()
 
     model_load_start = time.perf_counter()
-    inference_settings = resolve_inference_settings(args.inference_settings)
     model = UMAWrapper.from_checkpoint(
         campaign.CHECKPOINT,
         task_name=campaign.TASK,
         device=str(device),
-        inference_settings=inference_settings,
+        inference_settings=args.inference_settings,
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -377,7 +373,7 @@ def main() -> None:
         "checkpoint": campaign.CHECKPOINT,
         "task_name": campaign.TASK,
         "inference_settings": args.inference_settings,
-        "inference_settings_resolved": describe_inference_settings(inference_settings),
+        "inference_settings_resolved": describe_inference(model),
         "mc_energy_only": args.mc_energy_only,
         "md_steps_per_block": campaign.MD_STEPS_PER_BLOCK,
         "mc_step_fraction": campaign.MC_STEP_FRACTION,

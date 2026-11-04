@@ -194,8 +194,7 @@ def main() -> None:
 
     run_start = time.perf_counter()
     with npt:
-        npt.compute(batch)
-        npt.run(batch, n_steps=args.n_steps)
+        npt.run(batch, n_steps=args.n_steps)  # primes forces before its first step
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     run_seconds = time.perf_counter() - run_start

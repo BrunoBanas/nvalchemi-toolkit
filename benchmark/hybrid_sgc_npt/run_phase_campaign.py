@@ -601,7 +601,6 @@ def melt_fresh(data, model, hot_T: float, T: float, ps: float, device):
         hooks=_npt_wrap_hooks(),
     )
     with md:
-        md.compute(batch)
         md.run(batch, n_steps=max(1, round(ps * 1000 / 1.5)))
     batch.velocities = batch.velocities * math.sqrt(T / hot_T)
     out = batch.to_data_list()[0]

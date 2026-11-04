@@ -155,8 +155,8 @@ Equilibration gate
 -------------------
 Equilibration used to be *assumed* within the first ``EQUILIBRATION_BLOCKS``
 (50) and never checked. ``_run_hybrid_with_observables`` now records each
-block's per-graph Pt fraction and energy/atom (one extra small GPU->CPU
-transfer per block -- see its docstring for the cost/why), and after each
+block's per-graph Pt fraction and energy/atom (``HybridMCMD.run``'s
+``on_block`` callback, one small GPU->CPU transfer per block), and after each
 run ``_equilibration_gate`` (PHASE_DIAGRAM_MANUAL.md section 7, the same
 one-shot pattern reference_energy_calibration.py already uses) compares the
 last two ``EQUILIBRATION_WINDOW_BLOCKS``-block windows of both series
@@ -200,11 +200,6 @@ from ase.build import bulk
 from ase.data import chemical_symbols
 
 from nvalchemi.data import AtomicData, Batch
-from nvalchemi.data.atomic_data import (
-    _default_mass_table,  # noqa: PLC2701 -- reused for
-)
-
-# refresh_masses_after_transmutation, to stay bit-identical with AtomicData.use_default_masses()
 from nvalchemi.dynamics import DynamicsStage
 from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.hooks import WrapPeriodicHook
@@ -1167,7 +1162,7 @@ def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> 
     otherwise select a batch width that OOMs once a long unattended
     production run reaches a worst-case composition). Downgraded to a
     warning: the linear-in-n_atoms floor itself doesn't hold at larger
-    sizes -- a dedicated benchmark/uma_efficiency/memory_profile_matrix.py run (far more
+    sizes -- a dedicated memory-profile run (far more
     samples than this profiler's PROFILE_MEASURED_BLOCKS=2) measured
     real per-walker costs of 3.96 GB/500 atoms, 8.59 GB/1372, but only
     1.71 GB/2048 -- resident cost dominates and marginal per-walker cost
@@ -1278,34 +1273,6 @@ def _equilibration_gate(series: list[float], window: int) -> dict:
     }
 
 
-def _refresh_masses_after_transmutation(batch: Batch) -> None:
-    """Resync ``batch.atomic_masses`` with the current ``atomic_numbers``.
-
-    REDUNDANT since 2026-09-27: ``BaseMonteCarlo`` now updates the mass of
-    every atom whose species an accepted move changes (see
-    ``nvalchemi/mc/base.py``), so no MC/MD loop needs this any more and the
-    campaign no longer calls it. Kept only so scripts that still import it keep
-    working; calling it is harmless for default-mass batches. The description
-    below is the bug it used to work around.
-
-    ``_walker`` sets ``atomic_masses`` once, from the composition at
-    construction time, via ``AtomicData.use_default_masses()``. Nothing
-    else in the SGC/NPT stack ever refreshes it afterwards: ``SGC`` only
-    ever mutates ``atomic_numbers`` (see ``nvalchemi/mc/sgc.py`` --
-    ``_mutable_fields`` on ``BaseMonteCarlo`` deliberately excludes
-    masses), so every accepted transmutation silently leaves that atom's
-    mass pinned to its *previous* species for the rest of the run. NPT's
-    force/velocity update and its Nose-Hoover kinetic-energy terms both
-    consume ``batch.atomic_masses`` directly (``nph_velocity_half_step``,
-    ``_compute_ke`` in ``nvalchemi/dynamics/integrators/npt.py``), so a
-    transmuted atom is integrated with the wrong mass in every subsequent
-    MD block until this is called. Call once per MC block, right after
-    ``hybrid.mc.run(...)`` and before the next ``hybrid.md.compute(...)``.
-    """
-    table = _default_mass_table().to(device=batch.device, dtype=batch.positions.dtype)
-    batch.atomic_masses = table[batch.atomic_numbers.long()]
-
-
 def _run_hybrid_with_observables(
     hybrid: HybridMCMD,
     batch: Batch,
@@ -1316,76 +1283,42 @@ def _run_hybrid_with_observables(
 ) -> tuple[Batch, list[list[float]], list[list[float]]]:
     """Run n_blocks hybrid MC-MD blocks, recording each block's per-graph Pt
     fraction and energy/atom -- the observable series _equilibration_gate
-    needs, which a plain ``hybrid.run(batch, n_blocks=n_blocks)`` call
-    doesn't expose (it returns only the final batch).
+    needs -- through ``HybridMCMD.run``'s ``on_block`` callback (one small
+    GPU->CPU transfer per block).
 
-    Reimplements ``HybridMCMD.run``'s loop body locally, using only its
-    public ``mc``/``md``/``md_steps`` attributes and ``run_mc_block``, instead of
-    calling ``hybrid.run(batch, n_blocks=1)`` in a Python loop: that would
-    re-enter ``with self.md:`` (a CUDA-stream context, see BaseDynamics) and
-    re-run ``md.compute``/``mc.synchronize`` once per recorded block instead
-    of once for the whole run, roughly doubling the compute cost. This
-    version enters the stream context exactly once, matching the original
-    method's cost, at the price of one extra small GPU->CPU transfer per
-    block for the recorded series (the same per-block-transfer pattern
-    reference_energy_calibration.py already uses).
-
-    ``cell_hook(batch)``, if given, runs after the initial compute and after
-    every block's MD sub-step, before ``mc.synchronize`` adopts the energy --
-    e.g. ``relax_cell_volume`` for rigid-lattice SGC (``md_steps=0``) whose
-    lattice constant follows the composition. It must leave ``batch.energy``
-    evaluated at the geometry it leaves behind.
+    ``cell_hook(batch)``, if given, becomes the scheduler's ``after_md_block``:
+    it runs after the initial compute and after every block's MD sub-step,
+    before MC adopts the energy -- e.g. ``relax_cell_volume`` for rigid-lattice
+    SGC (``md_steps=0``) whose lattice constant follows the composition. It must
+    leave ``batch.energy`` evaluated at the geometry it leaves behind.
     """
-    if n_blocks < 1:
-        raise ValueError("n_blocks must be positive")
-    if getattr(batch, "forces", None) is None:
-        raise ValueError("hybrid MC-MD requires preallocated batch.forces")
+    hybrid.after_md_block = cell_hook
     atoms_per_graph = batch.num_nodes // n_graphs
     pt_fraction_series: list[list[float]] = []
     energy_per_atom_series: list[list[float]] = []
+    device = batch.device
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
 
-    def _record() -> None:
+    def record(batch: Batch, block_index: int) -> None:
         pt_fraction_series.append(_pt_fraction_per_graph(batch, pt_number, n_graphs))
         energies = batch.energy.flatten().detach().cpu().tolist()
         energy_per_atom_series.append([e / atoms_per_graph for e in energies])
+        if device.type == "cuda":
+            # Printed every block so a crash mid-run still leaves a memory trace in
+            # the .out file. allocated/reserved show the residual baseline (a leak
+            # climbs block over block); peak_reserved shows this block's transient
+            # high-water mark (e.g. an anomalously large neighbor list).
+            print(
+                f"[memory] block {block_index + 1}/{n_blocks}: "
+                f"allocated={torch.cuda.memory_allocated(device) / 1024**3:.3f} GB "
+                f"reserved={torch.cuda.memory_reserved(device) / 1024**3:.3f} GB "
+                f"peak_reserved_this_block={torch.cuda.max_memory_reserved(device) / 1024**3:.3f} GB",
+                flush=True,
+            )
+            torch.cuda.reset_peak_memory_stats(device)
 
-    device = batch.device
-    with hybrid.md:
-        hybrid.md.compute(batch)
-        if cell_hook is not None:
-            cell_hook(batch)
-        hybrid.mc.synchronize(batch)
-        for block_index in range(n_blocks):
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(device)
-            hybrid.run_mc_block(
-                batch
-            )  # not hybrid.mc.run: that would bypass mc_energy_only
-            hybrid.md.compute(batch)
-            hybrid.md.run(batch, n_steps=hybrid.md_steps)
-            if cell_hook is not None:
-                cell_hook(batch)
-            hybrid.mc.synchronize(batch)
-            _record()
-            if device.type == "cuda":
-                # Printed (not just logged to the throughput CSV) every block so
-                # a crash mid-run still leaves a memory trace in the .out file
-                # up to the last completed block -- the CSV row for this whole
-                # call is only written after all n_blocks finish, so it never
-                # gets written for a run that OOMs partway through.
-                # allocated/reserved (no reset) show the *residual* baseline
-                # still held after this block -- a genuine leak shows this
-                # climbing block over block; peak_reserved shows this block's
-                # transient high-water mark -- a one-off spike (e.g. an
-                # anomalously large neighbor list from a close-contact defect)
-                # shows there without moving the residual baseline.
-                print(
-                    f"[memory] block {block_index + 1}/{n_blocks}: "
-                    f"allocated={torch.cuda.memory_allocated(device) / 1024**3:.3f} GB "
-                    f"reserved={torch.cuda.memory_reserved(device) / 1024**3:.3f} GB "
-                    f"peak_reserved_this_block={torch.cuda.max_memory_reserved(device) / 1024**3:.3f} GB",
-                    flush=True,
-                )
+    hybrid.run(batch, n_blocks=n_blocks, on_block=record)
     return batch, pt_fraction_series, energy_per_atom_series
 
 

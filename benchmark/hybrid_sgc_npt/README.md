@@ -1,14 +1,24 @@
-# Hybrid SGC-NPT efficiency campaign
+# Hybrid SGC-NPT campaigns and phase-diagram drivers
 
-Throughput benchmark for `HybridMCMD` (batched `SGC` + `NPT`) across a coarse
-Au-Pt temperature / chemical-potential grid, at three system sizes, on a
-single 40 GB A100 GPU per size.
+Production drivers for Au-Pt phase diagrams with UMA: batched `SGC` / `VCSGC`
+Monte Carlo alternated with `NPT` through `HybridMCMD`, scheduled with
+`nvalchemi.scheduling`. `run_campaign.py` is also the shared library the other
+scripts import (constants, cell builders, `make_workload`, equilibration gate).
+The `nvalchemi-sgc-phase-boundary` and `nvalchemi-uma-submission` agent skills
+(`.claude/skills/`) explain when to use which.
 
 | File | Role |
 | --- | --- |
-| `run_campaign.py` | The app: builds the grid, profiles a batch width, runs the campaign, logs throughput. |
-| `submit_campaign.slurm` | The input script: a 3-task SLURM array job, one task per size. |
-| `debug_npt_then_sgc_mace.py` | MACE counterpart of the sibling standalone diagnostic below -- see its module docstring. |
+| `run_campaign.py` | Coarse T x Δμ grid, Δμ hysteresis scans (`--mode delta-mu-scan`), boundary tracing (`--mode trace-boundary`); shared helpers. |
+| `submit_campaign.slurm` | 3-task Slurm array for `run_campaign.py`, one task per size. |
+| `run_mu_ladder.py` | Gated Δμ ladders warm-started from checkpoints (also rigid-lattice SGC with `md_steps_per_block: 0`). |
+| `run_vcsgc_scan.py` | VC-SGC-NPT walkers at fixed target compositions inside a miscibility gap. |
+| `run_phase_campaign.py` | One-GPU pool mixing ladders, fan-out points, VC-SGC walkers and boundary traces. |
+| `boundary_tracer.py` | Engine-agnostic eq. 29 coexistence-line tracer (self-test in `../phase_boundary/`). |
+| `vcsgc_analysis.py` | Δμ(c), g(c) and common tangent from VC-SGC series (numpy only). |
+| `pure_free_energy.py` / `pure_free_energy_analysis.py` | Pure-element Gibbs free energies (lattice, Hessian, NPT ladder; then numpy-only analysis). |
+| `uma_melting_coexistence.py` / `uma_melting_bisect.py` / `uma_melting_analysis.py` | Solid-liquid coexistence melting points (one run, bisection driver, analysis). |
+| `export_structures.py` | Checkpoints (a directory or one `.pt`) to extended XYZ for OVITO / VMD / `ase gui`. |
 
 ## Grid
 
@@ -67,19 +77,13 @@ atoms, 274 at 1372, 410 at 2048.
 
 ## Equilibration gate
 
-Equilibration used to be *assumed* within the first `EQUILIBRATION_BLOCKS`
-(50) and never checked. Every block's per-graph Pt fraction and
-energy/atom are now recorded during the run, and afterward
-`_equilibration_gate` (PHASE_DIAGRAM_MANUAL.md section 7, the same
-one-shot pattern `reference_energy_calibration.py` already uses) compares
-the last two `EQUILIBRATION_WINDOW_BLOCKS`-block (25) windows of both
-series against twice their combined standard error. This is a single
-end-of-run check, not the manual's full three-consecutive-checks
-promotion protocol — a run that fails it is logged as unresolved, not
-retried or extended automatically. Recording adds one small GPU->CPU
-transfer per block; see `_run_hybrid_with_observables`'s docstring for why
-that's the cheaper option relative to the alternative of calling
-`hybrid.run(batch, n_blocks=1)` in a loop.
+Every block's per-graph Pt fraction and energy/atom are recorded through
+`HybridMCMD.run(..., on_block=...)` (one small GPU->CPU transfer per block).
+After the run, `_equilibration_gate` compares the last two
+`EQUILIBRATION_WINDOW_BLOCKS`-block (25) windows of both series against twice
+their combined standard error. It is a single end-of-run check: a run that
+fails it is logged as unresolved, not retried or extended automatically
+(`run_mu_ladder.py` repeats the gate until it passes).
 
 ## Batch width
 
@@ -146,9 +150,4 @@ gate" above), and appends to `checkpoints/atoms<N>_throughput.csv`
 (`run_id, n_atoms, batch_width, n_blocks, wall_seconds,
 walker_blocks_per_second, mc_acceptance, continuation,
 composition_gate_resolved, energy_gate_resolved, resolved`) — the
-efficiency record for this benchmark. A `checkpoints/atoms<N>_throughput.csv`
-left over from before this fix has the old 8-column header; new rows
-appended to it will have 11 columns instead (no migration -- per the
-companion repo's `phase_diagram_guide.md` status table, this campaign has
-never actually been run yet) -- delete it and let the header be rewritten
-if you hit this.
+efficiency record for this benchmark.

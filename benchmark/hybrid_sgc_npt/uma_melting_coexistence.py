@@ -263,8 +263,7 @@ def _integrate(
 ) -> None:
     """Run ``n_steps`` in chunks, calling ``on_chunk(steps_done)`` after each.
     ``on_chunk`` returning True stops early. With ``mc`` (an SGC sampler), each
-    chunk is preceded by an ``mc_steps`` SGC block (hybrid MC-MD, the same loop
-    as run_campaign._run_hybrid_with_observables)."""
+    chunk is preceded by an ``mc_steps`` SGC block (hybrid MC-MD)."""
     _wrap_batch_positions(batch)
     hybrid = (
         None
@@ -274,20 +273,16 @@ def _integrate(
         )
     )
     with dynamics:
-        dynamics.compute(batch)
         if hybrid is not None:
-            hybrid.mc.synchronize(batch)
+            hybrid.run_md_block(batch, n_steps=0)
         done = 0
         while done < n_steps:
             k = min(chunk, n_steps - done)
             if hybrid is not None:
                 hybrid.run_mc_block(batch)
-                if hasattr(hybrid, "prepare_md_block"):
-                    hybrid.prepare_md_block(batch)
-                dynamics.compute(batch)
-            dynamics.run(batch, n_steps=k)
-            if hybrid is not None:
-                hybrid.mc.synchronize(batch)
+                hybrid.run_md_block(batch, n_steps=k)
+            else:
+                dynamics.run(batch, n_steps=k)  # primes forces on its first step
             done += k
             if on_chunk is not None and on_chunk(done):
                 return

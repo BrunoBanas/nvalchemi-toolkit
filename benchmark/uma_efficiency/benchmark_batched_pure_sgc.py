@@ -33,7 +33,7 @@ toolkit's recommended SGC spec
 (see "UMA settings for SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md).
 merge_mole assumes a fixed composition, so it gains nothing here (fairchem 2.22
 falls back to an unmerged model after the first composition change).
-``--energy-only`` skips the forces/stress backward pass (see _uma_inference.py).
+``--energy-only`` skips the forces/stress backward pass (UMAWrapper gates derivatives on ``active_outputs``).
 
 ``--delta-mu-ev`` (mu(Pt) - mu(Au), eV) defaults to 0.5: this is a timing and
 memory benchmark, not a calibrated state point, and 0.5 keeps transmutations
@@ -73,12 +73,10 @@ import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
 from _run_diagnostics import (  # noqa: E402 -- sibling module, same directory
     MCBlockRunner,
     RunDiagnostics,
+    describe_inference,
     profile_widths_incrementally,
     run_production_blocks,
 )
-from _uma_inference import describe as describe_inference_settings  # noqa: E402
-from _uma_inference import resolve as resolve_inference_settings  # noqa: E402
-from _uma_inference import restrict_to_energy_only  # noqa: E402
 from benchmark_npt_md_only_single_point import (  # noqa: E402 -- sibling module, same directory
     _build_state_matching_fcc_random_box,
     _composition_fingerprint,
@@ -322,20 +320,19 @@ def _run(
 
     diag.set_phase("model_load")
     model_load_start = time.perf_counter()
-    inference_settings = resolve_inference_settings(args.inference_settings)
     model = UMAWrapper.from_checkpoint(
         campaign.CHECKPOINT,
         task_name=campaign.TASK,
         device=str(device),
-        inference_settings=inference_settings,
+        inference_settings=args.inference_settings,
     )
-    energy_only = {"applied": False}
     if args.energy_only:
-        energy_only = restrict_to_energy_only(model)
-        diag.event("energy_only", **energy_only)
+        # UMAWrapper then skips the forces/stress backward on every MC trial.
+        model.model_config.active_outputs = {"energy"}
+    energy_only = {"applied": bool(args.energy_only)}
     diag.update(
         energy_only=energy_only,
-        inference_settings_resolved=describe_inference_settings(inference_settings),
+        inference_settings_resolved=describe_inference(model),
     )
     torch.cuda.synchronize(device)
     model_load_seconds = time.perf_counter() - model_load_start
@@ -441,7 +438,7 @@ def _run(
         "checkpoint": campaign.CHECKPOINT,
         "task_name": campaign.TASK,
         "inference_settings": args.inference_settings,
-        "inference_settings_resolved": describe_inference_settings(inference_settings),
+        "inference_settings_resolved": describe_inference(model),
         "energy_only": energy_only,
         "inductor_shape_padding": args.inductor_shape_padding,
         "composition_fingerprints": initial_composition_fingerprints,

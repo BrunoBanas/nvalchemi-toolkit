@@ -204,7 +204,6 @@ def stage_ladder(
         v_series = [[] for _ in temps]
         start = time.perf_counter()
         with npt:
-            npt.compute(batch)
             for _ in range(n_blocks):
                 npt.run(batch, n_steps=md_steps)
                 energies = batch.energy.detach().reshape(-1).double().cpu()

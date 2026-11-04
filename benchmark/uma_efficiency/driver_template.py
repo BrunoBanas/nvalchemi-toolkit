@@ -288,7 +288,6 @@ def main() -> None:
                 "forces",
             }  # NVT needs no stress
         with md:
-            md.compute(batch)
             md.run(batch, n_steps=args.n_blocks * args.md_steps)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
