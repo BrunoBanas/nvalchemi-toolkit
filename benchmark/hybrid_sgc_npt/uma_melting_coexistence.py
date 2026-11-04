@@ -59,6 +59,15 @@ built from (Au for the Au-rich branch, Pt for the Pt-rich one); merge_mole must
 be off because the composition changes. uma_melting_bisect.py --delta-mu-ev
 bisects T at fixed delta_mu.
 
+Canonical mode (``--x-pt``): fixed overall Pt fraction, for a tie-line check at a chosen
+composition. Both slabs start as the same random alloy (``--element`` only names the output and
+the hot-melt default), and every stage after the hot melt is hybrid MC-MD with non-local swaps
+(``nvalchemi.mc.NonlocalSwap``: any Au-Pt pair, so solute moves between the slabs without
+diffusing). Inside the solid+liquid region the interface settles at the lever-rule position instead
+of running away, and ``x_pt_solid``/``x_pt_liquid`` (solid-like vs liquid-like atoms, second half
+of the run) are the two ends of the tie-line at T. Outputs go to ``--out-dir/x<x_pt>/T<T>/``.
+merge_mole=true is valid here (the composition never changes).
+
 Outputs in ``--out-dir/<element>/T<temperature>/``: ``series.csv`` (time,
 potential energy/atom, temperature, box lengths, solid fraction),
 ``trajectory.extxyz``, ``snapshots.npz``, ``summary.json``.
@@ -101,7 +110,7 @@ from run_campaign import SPECIES  # noqa: E402
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.hybrid import HybridMCMD
-from nvalchemi.mc import SGC
+from nvalchemi.mc import SGC, NonlocalSwap
 from nvalchemi.dynamics.hooks import MaxForceClampHook
 from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.dynamics.integrators.nvt_langevin import NVTLangevin
@@ -348,7 +357,14 @@ def main() -> None:
         "--mc-step-fraction",
         type=float,
         default=0.1,
-        help="alloy mode: SGC trials per MD chunk, as a fraction of the atom count",
+        help="alloy/canonical mode: MC trials per MD chunk, as a fraction of the atom count",
+    )
+    ap.add_argument(
+        "--x-pt",
+        type=float,
+        default=None,
+        help="canonical mode: fixed overall Pt fraction (random alloy in both slabs, non-local "
+        "swap MC); excludes --delta-mu-ev",
     )
     ap.add_argument("--device", default="cuda")
     ap.add_argument(
@@ -361,18 +377,28 @@ def main() -> None:
 
     device = torch.device(args.device)
     T, el, dt = args.temperature_k, args.element, args.dt_fs
-    melt_T = args.melt_temperature_k or max(DEFAULT_MELT_TEMPERATURE_K[el], 1.8 * T)
+    x_pt = args.x_pt
+    if x_pt is None:
+        default_melt = DEFAULT_MELT_TEMPERATURE_K[el]
+    else:
+        default_melt = (1 - x_pt) * DEFAULT_MELT_TEMPERATURE_K["Au"] + x_pt * DEFAULT_MELT_TEMPERATURE_K["Pt"]
+    melt_T = args.melt_temperature_k or max(default_melt, 1.8 * T)
     dmu = args.delta_mu_ev
+    if dmu is not None and x_pt is not None:
+        raise SystemExit("--x-pt (canonical) and --delta-mu-ev (SGC) exclude each other")
+    if x_pt is not None and not 0.0 < x_pt < 1.0:
+        raise SystemExit("--x-pt must be strictly between 0 and 1")
     if dmu is not None and "merge_mole=true" in args.inference_settings.replace(" ", ""):
         raise SystemExit("--delta-mu-ev changes the composition: use merge_mole=false")
-    out = args.out_dir / el / f"T{T:g}"
+    out = args.out_dir / (el if x_pt is None else f"x{x_pt:.2f}") / f"T{T:g}"
     out.mkdir(parents=True, exist_ok=True)
     t_wall = time.perf_counter()
     print(
         f"[setup] {el} T={T:g} K (exp. T_m {EXPERIMENTAL_TM_K[el]:g} K) nx={args.nx} nz/phase={args.nz} "
         f"dt={dt} fs melt_T={melt_T:g} K checkpoint={CHECKPOINT} task={TASK} device={device} "
         f"(single-graph batch, no multi-walker batching)"
-        + ("" if dmu is None else f" SGC delta_mu={dmu:+.4f} eV, MC trials/chunk frac={args.mc_step_fraction}"),
+        + ("" if dmu is None else f" SGC delta_mu={dmu:+.4f} eV, MC trials/chunk frac={args.mc_step_fraction}")
+        + ("" if x_pt is None else f" canonical x_Pt={x_pt:.3f}, swap trials/chunk frac={args.mc_step_fraction}"),
         flush=True,
     )
 
@@ -384,7 +410,15 @@ def main() -> None:
     )
 
     # --- 1. solid NPT
-    solid0 = bulk(el, "fcc", cubic=True) * (args.nx, args.nx, args.nz)
+    if x_pt is None:
+        solid0 = bulk(el, "fcc", cubic=True) * (args.nx, args.nx, args.nz)
+    else:
+        # random alloy on a Vegard lattice (ASE reference lattice constants); NPT relaxes it
+        a0 = (1 - x_pt) * bulk("Au", "fcc", cubic=True).cell[0, 0] + x_pt * bulk("Pt", "fcc", cubic=True).cell[0, 0]
+        solid0 = bulk(el, "fcc", a=a0, cubic=True) * (args.nx, args.nx, args.nz)
+        z = np.full(len(solid0), SPECIES[0])
+        z[np.random.default_rng(args.seed).permutation(len(z))[: round(x_pt * len(z))]] = SPECIES[1]
+        solid0.set_atomic_numbers(z)
     data = _data_from_arrays(
         solid0.numbers,
         solid0.positions,
@@ -410,11 +444,15 @@ def main() -> None:
         return False
 
     def _mc(seed: int) -> dict:
-        """Hybrid SGC arguments for _integrate in alloy mode (none for a pure element)."""
-        if dmu is None:
-            return {}
+        """Hybrid MC arguments for _integrate: SGC (alloy), non-local swaps (canonical) or none (pure)."""
         n = len(batch.atomic_numbers)
-        return dict(mc=_sgc(model, T, dmu, seed, device), mc_steps=max(1, round(args.mc_step_fraction * n)))
+        mc_steps = max(1, round(args.mc_step_fraction * n))
+        if dmu is not None:
+            return dict(mc=_sgc(model, T, dmu, seed, device), mc_steps=mc_steps)
+        if x_pt is not None:
+            return dict(mc=NonlocalSwap(model=model, temperature=torch.tensor([T], device=device), random_seed=seed),
+                        mc_steps=mc_steps)
+        return {}
 
     _integrate(
         _npt(model, T, dt, device),
@@ -581,7 +619,7 @@ def main() -> None:
             print(
                 f"[prod] {t_ps:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  T={_temperature(s):6.0f}  "
                 f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}"
-                + ("" if dmu is None else f"  x_Pt solid/liquid={(s['numbers'][m] == SPECIES[1]).mean():.3f}/"
+                + ("" if dmu is None and x_pt is None else f"  x_Pt solid/liquid={(s['numbers'][m] == SPECIES[1]).mean():.3f}/"
                    f"{(s['numbers'][~m] == SPECIES[1]).mean() if (~m).any() else float('nan'):.3f}"),
                 flush=True,
             )
@@ -657,7 +695,8 @@ def main() -> None:
         production_ps_run=float(t.max()) if len(t) else 0.0,
         verdict=verdict,
         delta_mu_ev=dmu,
-        mc_step_fraction=args.mc_step_fraction if dmu is not None else 0.0,
+        x_pt_target=x_pt,
+        mc_step_fraction=args.mc_step_fraction if dmu is not None or x_pt is not None else 0.0,
         x_pt_solid=x_solid,
         x_pt_liquid=x_liquid,
         x_pt_total=x_total,
