@@ -184,6 +184,27 @@
 
 ### Changed
 
+- `HybridMCMD.run(batch, n_blocks, on_block=fn)` calls `fn(batch, block)` after
+  every block (returning `True` stops early), and the new `after_md_block` hook
+  runs after each MD block before MC adopts the energy; `run_md_block` is the
+  public MD half of a block. The benchmark drivers (`run_campaign.py`,
+  `run_vcsgc_scan.py`, `uma_melting_coexistence.py`) use these instead of
+  private copies of the block loop, which also skipped `before_md_block`.
+- `CampaignSpec` computes its topological order and `by_id` index once
+  (Kahn's algorithm) instead of on every `ready()` / `complete()` call, which
+  was quadratic in the campaign size; new `CampaignSpec.is_ready`.
+- Removed the `nvalchemi.hybrid` planner aliases (`HybridBatchPlanner`,
+  `WalkerAssignment` and the re-exported planning types); import
+  `SimulationBatchPlanner`, `RunAssignment`, `BatchMeasurement` and
+  `BatchMemoryEstimate` from `nvalchemi.scheduling`.
+- Benchmark cleanup: removed one-off debugging and profiling scripts
+  (`debug_npt_then_sgc*.py`, `hybrid_diagnostic.py`, `profile_mole_overhead.py`,
+  `check_mole_layer_type.py`, `memory_profile_matrix.py`), the generated
+  `tracer_selftest/` outputs, and `_uma_inference.py` (superseded by
+  `UMAWrapper`'s `key=value` settings specs and `active_outputs` gating);
+  `export_structures.py` now also converts a single checkpoint (replacing
+  `local_export_structure.py`). `AGENTS.md` gains a simulation-setup map.
+
 - The `check_fp_dtype_consistency` cast warning fires once per distinct
   `(field, source dtype, target dtype)` cast per process instead of on every
   `AtomicData` construction, which flooded logs in training loops. Casting
@@ -597,6 +618,23 @@
   the Hessian with respect to Cartesian positions.
 
 ### Fixed
+
+- `HybridMCMD` evaluated the model twice at the start of every MD block: an
+  explicit `md.compute` followed by `md.run`, which primes forces itself since
+  the dynamics hook-order fix (#182). One evaluation per block is saved
+  (e.g. 11 -> 9 model calls for 2 blocks of 3 MD steps); trajectories are
+  unchanged. The same redundant call is removed from the benchmark drivers.
+- `HybridMCMD` with `md_steps=0` (rigid-lattice MC, e.g. `run_mu_ladder.py`
+  plans with `md_steps_per_block: 0`) raised `ValueError: n_steps must be
+  positive` from `md.run(n_steps=0)`; MC-only blocks now skip MD, and an
+  `after_md_block` hook still gets a fresh force/stress evaluation.
+- `SGC`, `Kawasaki` and `NonlocalSwap` proposals and rejections used
+  boolean-mask indexing, a device-to-host sync on every MC step despite their
+  "sync-free" docstrings; they now write through `torch.where`. A Python-float
+  temperature was also re-uploaded (a blocking host-to-device copy) at every
+  acceptance; it is now cached on device with the other sampler parameters.
+  The CUDA sync-detection test now covers a full proposal + acceptance for all
+  four samplers.
 
 - Enable periodic stress outputs for `UMAWrapper` with `task_name="omol"`,
   convert stress to the configured base precision, and preserve dynamic

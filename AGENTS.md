@@ -187,9 +187,21 @@ be skippable with the `NVALCHEMI_SPHINX_BUILD` flag (see `docs/conf.py`)
 - `nvalchemi/models/`: `BaseModelMixin`, demo/LJ/DFTD3/Ewald/PME models,
   optional AIMNet2/MACE/UMA wrappers, neighbor filters, and composable pipelines.
 - `nvalchemi/dynamics/`: base dynamics, demo dynamics, integrators, optimizers,
-  sampler, sinks, hooks, and low-level ops.
+  sampler, sinks, hooks, and low-level ops; `dynamics/mep/` holds path
+  interpolation, IDPP and batched NEB.
 - `nvalchemi/hooks/`: shared hook protocol/registry/context plus reporting,
   periodic, neighbor-list, profiling, and timing hooks.
+- `nvalchemi/mc/`: GPU-resident batched Monte Carlo on `BaseDynamics`
+  (`BaseMonteCarlo`; `SGC`, `VCSGC`, `Kawasaki`, `NonlocalSwap`). One proposal
+  per graph per step, sync-free acceptance, masses follow species.
+- `nvalchemi/hybrid/`: `HybridMCMD`, alternating MC and MD blocks on one batch.
+- `nvalchemi/scheduling/`: `SimulationBatchPlanner` (measured batch width, GPU
+  waves) and `CampaignSpec` / `CampaignScheduler` / `FinalStateStore`
+  (dependency-ordered, restartable state-point campaigns).
+- `nvalchemi/enhanced_sampling/`: bias potentials (metadynamics, ABF,
+  umbrella), collective variables, replica exchange.
+- `nvalchemi/csp/`, `nvalchemi/gen/`: crystal-structure prediction and
+  generative-model drivers.
 - `nvalchemi/training/`: CLI, strategy/spec validation, runtime, distributed
   helpers, finetuning, checkpoints, losses, optimizers, and training hooks.
 - `nvalchemi/distributed/` (package): distributed utilities used by training
@@ -201,6 +213,77 @@ be skippable with the `NVALCHEMI_SPHINX_BUILD` flag (see `docs/conf.py`)
 Import from concrete modules when optional exports might pull unavailable extras.
 For example, prefer `from nvalchemi.models.base import BaseModelMixin` in code
 that should not import optional model backends.
+
+## Setting Up a New Simulation
+
+Compose existing pieces; do not copy-paste loops out of `benchmark/` scripts.
+
+1. **Structure**: `AtomicData.from_atoms(ase_atoms)` per system, then
+   `Batch.from_data_list([...])`. Independent replicas or state points share one
+   batch (one model call); per-graph `temperature` / `pressure` / chemical
+   potentials are 1-D tensors of length `num_graphs`. Preallocate
+   `batch.forces` (and `energy`, `stress` for NPT) before MD.
+2. **Model**: a `BaseModelMixin` wrapper (`nvalchemi/models/`), e.g.
+   `UMAWrapper.from_checkpoint(name, task_name=..., device=...,
+   inference_settings=...)` or `MACEWrapper.from_checkpoint(...)`. Models with a
+   `model_config.neighbor_config` (MACE, LJ, ...) need
+   `NeighborListHook(model.model_config.neighbor_config,
+   stage=DynamicsStage.BEFORE_COMPUTE)` on the stage; UMA builds its own graph
+   and folds positions into the cell itself.
+3. **Stage**: pick the class, then attach hooks (`nvalchemi/dynamics/hooks/`,
+   `nvalchemi/hooks/`) for logging, snapshots, convergence, wrapping.
+
+| Goal | Building blocks | Start from |
+| --- | --- | --- |
+| Relax geometry / cell | `FIRE2`, `LBFGS`, `*VariableCell`, `ConvergenceHook` | `examples/basic/02_*`, `06_*` |
+| NVE / NVT / NPT MD | `NVE`, `NVTLangevin`, `NVTNoseHoover`, `NPT`, `initialize_velocities` | `examples/basic/04_*`, `05_*`, `examples/intermediate/03_*` |
+| Many structures through stages | `FusedStage` (`a + b`), `SizeAwareSampler`, sinks | `examples/intermediate/01_*`, `04_*` |
+| Fixed-composition MC | `Kawasaki` (neighbour swaps), `NonlocalSwap` | `docs/userguide/dynamics_simulations.md` "Monte Carlo" |
+| Open-composition MC | `SGC` (Δμ), `VCSGC` (target c, inside gaps) | same; `nvalchemi-uma-submission` skill |
+| MC + MD (e.g. SGC-NPT) | `HybridMCMD(mc, md, mc_steps, md_steps, mc_energy_only=True)` | `examples/advanced/17_uma_hybrid_sgc_npt.py` |
+| Batch width, multi-GPU waves | `SimulationBatchPlanner.profile` / `recommend_width` / `assign_runs` | `benchmark/uma_efficiency/plan_run.py` (UMA, no GPU needed) |
+| Restartable T / Δμ campaigns | `CampaignSpec` (`cooling_from_reference`, `delta_mu_scan_*`), `CampaignScheduler`, `FinalStateStore` | `benchmark/hybrid_sgc_npt/run_campaign.py` |
+| Phase boundaries from SGC data | analysis + eq. 29 tracer | `nvalchemi-sgc-phase-boundary` skill |
+| Reaction paths | `nvalchemi.dynamics.mep` | `nvalchemi-mep` skill, `examples/advanced/11_*` |
+| Biased / enhanced sampling | `nvalchemi.enhanced_sampling` | `examples/advanced/12_*`-`16_*` |
+| New integrator or MC move | subclass `BaseDynamics` / `BaseMonteCarlo` | `nvalchemi-dynamics-implementation` skill |
+
+Invariants that are easy to get wrong:
+
+- `BaseDynamics.run()` evaluates forces before its first step, so never call
+  `md.compute(batch)` right before `md.run(...)` (a wasted model call).
+- Per-block observables in hybrid runs: `HybridMCMD.run(batch, n_blocks,
+  on_block=fn)`; `fn(batch, block)` returning `True` stops early. Use
+  `after_md_block` for between-block geometry work (e.g. cell relaxation with
+  `md_steps=0`) and `before_md_block` to prepare a separate MD model. A custom
+  loop must call `run_mc_block` / `run_md_block`, never `mc.run` / `md.run`.
+- MC acceptance needs one energy per graph from one evaluation path:
+  `mc_energy_only=True` (or `model.model_config.active_outputs = {"energy"}` for
+  MC-only runs) lets `UMAWrapper` skip the forces/stress backward.
+- UMA settings: never `merge_mole=True` when composition changes (SGC, VC-SGC)
+  or batched walkers differ; compile only for long MD runs. Read
+  `nvalchemi-uma-submission` before sizing a UMA job.
+- Persist final states with `FinalStateStore` and resume through
+  `CampaignScheduler`, which rebuilds completion from the files on disk.
+- Exercise new code on CPU with `DemoModelWrapper` + `DemoDynamics` (see
+  `test/hybrid/test_scheduler.py`) before spending GPU time.
+
+## Benchmarks
+
+`benchmark/distributed/` (upstream) measures domain-decomposed inference and
+MD. The fork's directories are research drivers and the measurements behind
+the UMA skills:
+
+- `benchmark/uma_efficiency/`: UMA cost/memory calibration, planner
+  (`plan_run.py`), adaptable `driver_template.py` + `job_template.sbatch`.
+- `benchmark/hybrid_sgc_npt/`: Au-Pt SGC/VC-SGC-NPT campaigns, Δμ ladders,
+  boundary tracer, free-energy and melting-point workflows. `run_campaign.py`
+  doubles as the helper library the others import.
+- `benchmark/phase_boundary/`: isotherm analysis and the numpy-only tracer
+  self-test (`test_boundary_tracer.py`; writes to `--out`, never commit it).
+
+Each directory's `README.md` lists its files. Keep generated outputs
+(checkpoints, `tracer_selftest/`, efficiency matrices) out of git.
 
 ## Documentation
 
@@ -234,6 +317,7 @@ chains are documented in `.claude/skills/README.md`.
 | `nvalchemi-dynamics-hooks` | Per-step callbacks: neighbor lists, convergence, logging |
 | `nvalchemi-mep` | Reaction paths and minimum-energy paths: interpolation, IDPP, batched NEB |
 | `nvalchemi-dynamics-implementation` | Implementing a new integrator, optimizer, or sampler class |
+| `nvalchemi-distributed` | Domain-decomposed multi-GPU simulations with `DomainParallel` |
 | `nvalchemi-reporting` | Progress dashboards, TensorBoard, or CSV observability |
 | `nvalchemi-uma-submission` | UMA inference settings, batch width, GPU memory and Slurm jobs for MC, MD or hybrid MC-MD |
 | `nvalchemi-sgc-phase-boundary` | Phase boundaries, coexistence Δμ or T-x lines from SGC Monte Carlo data |

@@ -94,9 +94,10 @@ Each knob pays under exactly one condition.
   for large SGC-NPT it costs only ~4% (2048 atoms: 122 vs 117 s/block at 13 vs 36
   GiB). With merge it also slows MC ~3.4x (Kawasaki-NPT 2048 atoms: 112 vs 36
   s/block), so it is a poor fallback there; merged MD fits 40 GB up to ~2048 atoms
-  anyway (16 GiB). Checkpointed memory has a knee: ~3 GiB per 1000 batch atoms up to ~2,200, then ~0.5
-  GiB per 1000 (fixed-size edge chunks), so one walker fits ~47,000 atoms on 40 GB and
-  ~100,000 on 80 GB (measured to 28,728 atoms; beyond that extrapolated). Large
+  anyway (16 GiB). Checkpointed memory has a knee: ~3 GiB per 1000 batch atoms
+  up to ~2,200, then ~0.5 GiB per 1000 (fixed-size edge chunks), so one walker
+  fits ~47,000 atoms on 40 GB and ~100,000 on 80 GB (measured to 28,728 atoms;
+  beyond that extrapolated). Large
   checkpointed runs are limited by time, not memory: an SGC-NPT production block
   (0.2 N trials + 50 MD steps) takes ~2.5 h at 20,000 atoms. Set
   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (without it reserved memory
@@ -275,9 +276,10 @@ GPU request:
 
 Physics:
 
-- MD in a periodic cell has `WrapPeriodicHook(frequency=1,
-  stage=DynamicsStage.AFTER_POST_UPDATE)` and an initial wrap before the first
-  force call; otherwise diffusing atoms lose their minimum image and collapse.
+- `UMAWrapper` folds positions into the cell before every evaluation, so UMA
+  MD needs no `WrapPeriodicHook` for correctness; other models whose neighbour
+  lists assume wrapped input still do (`frequency=1,
+  stage=DynamicsStage.AFTER_POST_UPDATE`, plus one wrap before the first call).
 - Isolated nanoparticles: MC or NVT in a vacuum box, with at least the 6 A cutoff
   plus a margin of vacuum. NPT on a vacuum-padded box rescales mostly vacuum.
   Give the planner the structure file so the lower neighbour count is used.
@@ -285,8 +287,9 @@ Physics:
   correction for the changing pair count is built in.
 - VC-SGC gets a calibrated `reference_exchange_potential`; UMA's per-element
   energies differ by eV and otherwise drive walkers to an end member.
-- Custom hybrid loops call `hybrid.run_mc_block(batch)` (never `mc.run`) and, with
-  a separate MD model, `hybrid.prepare_md_block(batch)` before `md.compute`.
+- Record per-block observables with `hybrid.run(batch, n_blocks, on_block=fn)`;
+  a custom loop calls `hybrid.run_mc_block` / `hybrid.run_md_block`, never
+  `mc.run` / `md.run`, and never `md.compute` before `md.run` (it primes forces).
   Samplers built on `BaseMonteCarlo` keep masses in step with species.
 - Seeds differ per walker and per job.
 
