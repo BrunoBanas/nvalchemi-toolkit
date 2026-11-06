@@ -15,7 +15,9 @@ models
 gen
 mc
 training/index
+enhanced_sampling
 distributed
 distributed_runtime
+csp
 typing
 ```
