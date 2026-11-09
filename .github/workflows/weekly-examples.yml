@@ -50,6 +50,9 @@ jobs:
   # EXAMPLES STAGE (GPU Runner)
   # ============================================================================
   examples:
+    # NVIDIA's H100 runners are not available to forks: skip there instead of
+    # queueing until GitHub cancels the job.
+    if: github.repository == 'NVIDIA/nvalchemi-toolkit'
     runs-on: linux-amd64-gpu-h100-latest-1
     timeout-minutes: 60
     container:
