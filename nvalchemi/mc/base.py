@@ -253,7 +253,12 @@ class BaseMonteCarlo(BaseDynamics):
         generator: torch.Generator,
         active: torch.Tensor,
     ) -> None:
-        """Apply one trial proposal per active graph in-place."""
+        """Apply one trial proposal per active graph in-place.
+
+        *active* is the sampler's own mask for this step: a sampler may narrow
+        it in place to drop graphs with no legal move, which then count as
+        neither attempted nor accepted.
+        """
 
     @abstractmethod
     def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
@@ -373,7 +378,9 @@ class BaseMonteCarlo(BaseDynamics):
         else:
             self._energy = batch.energy.detach().reshape(batch.num_graphs).clone()
         self._ensure_mass_table(batch)
-        self._active = mask.reshape(batch.num_graphs)
+        # A copy: ``_propose`` may narrow it in place (graphs with no legal move),
+        # which must not leak into the FusedStage's own mask.
+        self._active = mask.reshape(batch.num_graphs).clone()
         with torch.no_grad():
             self._propose(batch, self._ensure_generator(batch), self._active)
 
