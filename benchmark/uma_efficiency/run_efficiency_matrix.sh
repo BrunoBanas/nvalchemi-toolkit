@@ -46,7 +46,6 @@
 #                   recording the code that ran; npt adds turbo_static, to test whether
 #                   static shapes alone reproduce the MD recompiles.
 #   Config names ending in _static / _dynamic set NVALCHEMI_UMA_COMPILE_SHAPES.
-#   mole_profile    profile_mole_overhead.py
 #
 # Environment:
 #   KERNELS        space- or '+'-separated kernel list (KERNEL=... also works)
@@ -123,21 +122,6 @@ print(f"torch={torch.__version__}\nfairchem_core={fairchem.core.__version__}\nnv
 PY
 widths="${WIDTHS}"
 echo "$(stamp) === kernel ${KERNEL} ==="
-
-if [[ "${KERNEL}" == mole_profile ]]; then
-  set +e
-  /usr/bin/time -f 'wall_seconds=%e\nmax_rss_kib=%M\nexit_status=%x' -o "${root}/time.txt" \
-    timeout --kill-after=300 "${CASE_TIMEOUT}" \
-    env PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 \
-      OMP_NUM_THREADS="${THREADS}" MKL_NUM_THREADS=1 \
-      "${PYTHON}" "${TESTS}/profile_mole_overhead.py" --output-dir "${root}" \
-      > "${root}/stdout.log" 2> "${root}/stderr.log"
-  status=$?
-  set -e
-  printf 'exit_status=%s\n' "${status}" > "${root}/status.txt"
-  echo "  -> exit ${status}"
-  continue
-fi
 
 case "${KERNEL}" in
   kawasaki)

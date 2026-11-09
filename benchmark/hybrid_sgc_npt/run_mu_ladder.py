@@ -17,7 +17,7 @@
 Refines a delta_mu scan where the first pass was too coarse: each *chain* is one walker that
 starts from a saved state (e.g. a scan checkpoint) and steps through its own list of delta_mu
 values. At every step it runs until the composition AND energy series pass the scan's
-equilibration gate (``run_campaign._equilibration_gate``: last two 25-block windows agree within
+equilibration gate (``campaign_lib.equilibration_gate``: last two 25-block windows agree within
 2 combined SE) on ``gate_passes`` consecutive checks, with at least ``min_blocks`` and at most
 ``max_blocks`` blocks, then moves to the next delta_mu warm-started from where it is. All chains
 of a plan run side by side in one batch (one walker each, possibly at different delta_mu and
@@ -43,7 +43,7 @@ Optional plan keys:
     "volume_relax": {"bulk_modulus_ev_per_a3": 1.2, "tolerance_ev_per_a3": 2e-4, "max_iterations": 4}
         Rigid-lattice SGC with a relaxed lattice constant (use with ``md_steps_per_block: 0``):
         after every block each walker's cell and positions are scaled together until P ~ 0
-        (``run_campaign.relax_cell_volume``), so atoms stay on ideal sites but the lattice constant
+        (``campaign_lib.relax_cell_volume``), so atoms stay on ideal sites but the lattice constant
         follows the composition. The per-block lattice constant is recorded (``a_series``).
     "static_references": true
         Before the ladders, relax pure Au and pure Pt the same way and write their static energies
@@ -67,7 +67,7 @@ import time
 from pathlib import Path
 
 import torch
-from run_campaign import (
+from campaign_lib import (
     CHECKPOINT,
     CONVENTIONAL_CELL,
     CRYSTAL_STRUCTURE,
@@ -81,12 +81,12 @@ from run_campaign import (
     SPECIES,
     TASK,
     TEMPLATE_SYMBOL,
-    _equilibration_gate,
-    _run_hybrid_with_observables,
     build_ase_structure,
+    equilibration_gate,
     lattice_constant_per_graph,
     make_workload,
     relax_cell_volume,
+    run_hybrid_with_observables,
 )
 
 from nvalchemi.data import AtomicData
@@ -95,6 +95,7 @@ from nvalchemi.scheduling import FinalStateStore, RunSpec
 
 
 def load_state(path: str | Path, device) -> AtomicData:
+    """Load a ``FinalStateStore`` checkpoint (or a bare ``model_dump``) onto *device*."""
     payload = torch.load(Path(path), map_location=device, weights_only=True)
     return AtomicData.model_validate(
         payload["state"] if "state" in payload else payload
@@ -108,12 +109,14 @@ PURE_START = {
 
 
 def step_run_id(n_atoms: int, T: float, chain: dict, step: int, mu: float) -> str:
+    """Return the run id of one ladder step of *chain*."""
     return (
         f"atoms{n_atoms}.T{T:g}.{chain['branch']}.{chain['name']}.dmu{step}.mu{mu:.5f}"
     )
 
 
 def main() -> None:
+    """Run every chain of a ladder plan side by side, resumably."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -196,6 +199,7 @@ def main() -> None:
         log: list[tuple[list[float], float]] = []
 
         def hook(b):
+            """Relax each graph's volume after the block and log lattice constant and pressure."""
             pressure = relax_cell_volume(hybrid.md, b, **volume_relax)
             log.append((lattice_constant_per_graph(b), float(pressure.abs().max())))
 
@@ -265,6 +269,7 @@ def main() -> None:
         )
 
     def save(ch) -> None:
+        """Atomically rewrite one chain's progress file."""
         tmp = ch["path"].with_suffix(".tmp")
         tmp.write_text(json.dumps(ch["prog"]) + "\n")
         tmp.replace(ch["path"])
@@ -307,7 +312,7 @@ def main() -> None:
             n_chunks + 1
         )  # fresh stream per chunk (generator is created lazily)
         start = time.perf_counter()
-        result, xs, es = _run_hybrid_with_observables(
+        result, xs, es = run_hybrid_with_observables(
             hybrid, batch, chunk, len(active), SPECIES[1], cell_hook=hook
         )
         a_blocks = [
@@ -327,8 +332,8 @@ def main() -> None:
             n = len(p["x"])
             gx, ge = {}, {}
             if n >= max(min_blocks, 2 * EQUILIBRATION_WINDOW_BLOCKS):
-                gx = _equilibration_gate(p["x"], EQUILIBRATION_WINDOW_BLOCKS)
-                ge = _equilibration_gate(p["e"], EQUILIBRATION_WINDOW_BLOCKS)
+                gx = equilibration_gate(p["x"], EQUILIBRATION_WINDOW_BLOCKS)
+                ge = equilibration_gate(p["e"], EQUILIBRATION_WINDOW_BLOCKS)
                 p["gate"].append(
                     dict(
                         blocks=n,

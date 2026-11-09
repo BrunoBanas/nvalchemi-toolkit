@@ -54,7 +54,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# The tracer itself lives next to the nvalchemi engine adapter (run_campaign.py).
+# The tracer itself lives next to the nvalchemi engine adapter (campaign_lib.py).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 from boundary_tracer import (  # noqa: E402
     BoundaryTracer,
@@ -242,6 +242,7 @@ def sl_x(phase, T, mu):
 
 
 def sl_phi(phase, T, mu):
+    """Return the semi-grand potential of *phase* at (T, mu) in the solid-liquid test model."""
     gA, gB, W, _, _ = _sl_params(phase, T)
     kT = 8.617333262e-5 * T
     x = sl_x(phase, T, mu)
@@ -388,6 +389,7 @@ def main():
     ok = True
 
     def quiet(*_):
+        """Discard tracer log messages."""
         return None
 
     # 1. downward from the exact start point

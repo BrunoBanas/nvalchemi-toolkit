@@ -27,13 +27,13 @@ are zero. SGC changes each replica's composition by design, so the final
 composition fingerprint is recorded next to the initial one as a check that
 composition actually moved.
 
-``--inference-settings`` defaults to run_campaign.py's INFERENCE_SETTINGS, the
+``--inference-settings`` defaults to campaign_lib.py's INFERENCE_SETTINGS, the
 toolkit's recommended SGC spec
 ``compile=false,merge_mole=false,tf32=true,activation_checkpointing=false``
 (see "UMA settings for SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md).
 merge_mole assumes a fixed composition, so it gains nothing here (fairchem 2.22
 falls back to an unmerged model after the first composition change).
-``--energy-only`` skips the forces/stress backward pass (see _uma_inference.py).
+``--energy-only`` skips the forces/stress backward pass (UMAWrapper gates derivatives on ``active_outputs``).
 
 ``--delta-mu-ev`` (mu(Pt) - mu(Au), eV) defaults to 0.5: this is a timing and
 memory benchmark, not a calibrated state point, and 0.5 keeps transmutations
@@ -65,20 +65,18 @@ import torch
 import torch._dynamo
 import torch._inductor.config
 
-# run_campaign.py (workload builders, size tables) is in the sibling benchmark folder.
+# campaign_lib.py (workload builders, size tables) is in the sibling benchmark folder.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "hybrid_sgc_npt"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import run_campaign as campaign  # noqa: E402 -- needs the sys.path insert above
+import campaign_lib as campaign  # noqa: E402 -- needs the sys.path insert above
 from _run_diagnostics import (  # noqa: E402 -- sibling module, same directory
     MCBlockRunner,
     RunDiagnostics,
+    describe_inference,
     profile_widths_incrementally,
     run_production_blocks,
 )
-from _uma_inference import describe as describe_inference_settings  # noqa: E402
-from _uma_inference import resolve as resolve_inference_settings  # noqa: E402
-from _uma_inference import restrict_to_energy_only  # noqa: E402
 from benchmark_npt_md_only_single_point import (  # noqa: E402 -- sibling module, same directory
     _build_state_matching_fcc_random_box,
     _composition_fingerprint,
@@ -146,6 +144,7 @@ def select_batch_width(
     call_labels = ("warmup", "measured") if warmup_blocks else ("measured",)
 
     def workload_factory(width: int, dev: torch.device):
+        """Build a fresh ``(runner, batch)`` profiling workload of *width* walkers."""
         # Static-shape compile recompiles per width; drop the previous width's graphs
         # so they neither hold memory nor exhaust dynamo's recompile limit (8).
         torch._dynamo.reset()
@@ -322,20 +321,19 @@ def _run(
 
     diag.set_phase("model_load")
     model_load_start = time.perf_counter()
-    inference_settings = resolve_inference_settings(args.inference_settings)
     model = UMAWrapper.from_checkpoint(
         campaign.CHECKPOINT,
         task_name=campaign.TASK,
         device=str(device),
-        inference_settings=inference_settings,
+        inference_settings=args.inference_settings,
     )
-    energy_only = {"applied": False}
     if args.energy_only:
-        energy_only = restrict_to_energy_only(model)
-        diag.event("energy_only", **energy_only)
+        # UMAWrapper then skips the forces/stress backward on every MC trial.
+        model.model_config.active_outputs = {"energy"}
+    energy_only = {"applied": bool(args.energy_only)}
     diag.update(
         energy_only=energy_only,
-        inference_settings_resolved=describe_inference_settings(inference_settings),
+        inference_settings_resolved=describe_inference(model),
     )
     torch.cuda.synchronize(device)
     model_load_seconds = time.perf_counter() - model_load_start
@@ -441,7 +439,7 @@ def _run(
         "checkpoint": campaign.CHECKPOINT,
         "task_name": campaign.TASK,
         "inference_settings": args.inference_settings,
-        "inference_settings_resolved": describe_inference_settings(inference_settings),
+        "inference_settings_resolved": describe_inference(model),
         "energy_only": energy_only,
         "inductor_shape_padding": args.inductor_shape_padding,
         "composition_fingerprints": initial_composition_fingerprints,

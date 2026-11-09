@@ -24,7 +24,7 @@ python benchmark/phase_boundary/sgc_phase_boundary.py <data.csv | json_dir> \
 python benchmark/hybrid_sgc_npt/boundary_tracer.py report down/trace.json \
     up/trace.json --out <dir> --species A B [--beta-c 0.326]
 python benchmark/phase_boundary/make_synthetic.py <dir> --design overlap
-python benchmark/phase_boundary/test_boundary_tracer.py
+python benchmark/phase_boundary/test_boundary_tracer.py [--out /tmp/tracer_selftest]
 ```
 
 Input CSV, one row per SGC run: `T`, `mu` (Δμ = μ_B − μ_A, eV) and `x` (<x_B>) are

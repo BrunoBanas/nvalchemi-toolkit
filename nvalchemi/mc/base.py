@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 
 __all__ = ["BaseMonteCarlo", "MonteCarloStats"]
 
+# The helpers below avoid ops whose output size depends on the data (boolean-mask
+# indexing, ``nonzero``, ``bincount``): on CUDA those force a device-to-host sync
+# every MC step, stalling the queue ahead of the next model call.
+
 
 def _is_batch(ref: weakref.ref[Batch] | None, batch: Batch) -> bool:
     """Whether *ref* still points at *batch*.
@@ -43,6 +47,55 @@ def _is_batch(ref: weakref.ref[Batch] | None, batch: Batch) -> bool:
     freed batch, so a new batch could otherwise inherit the old one's state.
     """
     return ref is not None and ref() is batch
+
+
+def _draw_from_mask(
+    selectable: torch.Tensor,
+    starts: torch.Tensor,
+    counts: torch.Tensor,
+    draws: torch.Tensor,
+) -> torch.Tensor:
+    """Return one uniformly drawn selectable row per segment.
+
+    Parameters
+    ----------
+    selectable
+        ``[R]`` 0/1 integer flags over rows ordered by segment.
+    starts
+        ``[G]`` first row of every segment.
+    counts
+        ``[G]`` number of selectable rows in every segment.
+    draws
+        ``[G]`` uniforms in ``[0, 1)``.
+
+    Returns
+    -------
+    torch.Tensor
+        ``[G]`` row indices; a segment without selectable rows returns its start.
+    """
+    cumulative = torch.cumsum(selectable, dim=0)
+    # Rank of the drawn entry among all selectable rows, then the first row whose
+    # running total reaches it.
+    before = cumulative[starts] - selectable[starts]
+    ranks = before + torch.floor(draws * counts.clamp(min=1)).to(torch.long)
+    rows = torch.searchsorted(cumulative, ranks + 1)
+    return torch.where(counts > 0, rows, starts)
+
+
+def _swap_pairs(
+    numbers: torch.Tensor,
+    first: torch.Tensor,
+    second: torch.Tensor,
+    swap: torch.Tensor,
+) -> None:
+    """Exchange ``numbers[first]`` and ``numbers[second]`` where *swap* is set.
+
+    One pair per graph, so indices never collide; unswapped pairs are rewritten
+    with their own values.
+    """
+    first_z, second_z = numbers[first], numbers[second]
+    numbers[first] = torch.where(swap, second_z, first_z)
+    numbers[second] = torch.where(swap, first_z, second_z)
 
 
 @dataclass(frozen=True)
@@ -123,6 +176,13 @@ class BaseMonteCarlo(BaseDynamics):
             )
         self._temperature = temperature
         self._random_seed = random_seed
+        # Device copies of constructor parameters (temperature, species, chemical
+        # potentials, ...), made once per device and dtype rather than uploaded by
+        # a blocking host-to-device copy every step. Treat the attributes they are
+        # built from as read-only after construction.
+        self._device_parameters: dict[
+            tuple[str, torch.device, torch.dtype], torch.Tensor
+        ] = {}
         self._generator: torch.Generator | None = None
         self._generator_device: torch.device | None = None
         self._energy: torch.Tensor | None = None
@@ -137,10 +197,26 @@ class BaseMonteCarlo(BaseDynamics):
         self._mass_numbers: torch.Tensor | None = None
         self._mass_batch: weakref.ref[Batch] | None = None
 
+    def _on_device(
+        self,
+        name: str,
+        value: Any,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Return the cached copy of parameter *name* on *device* in *dtype*."""
+        key = (name, device, dtype)
+        cached = self._device_parameters.get(key)
+        if cached is None:
+            cached = self._device_parameters[key] = torch.as_tensor(
+                value, dtype=dtype, device=device
+            )
+        return cached
+
     def _temperature_for(self, batch: Batch) -> torch.Tensor:
         """Return one positive temperature in K for every graph."""
-        temperature = torch.as_tensor(
-            self._temperature, dtype=batch.positions.dtype, device=batch.device
+        temperature = self._on_device(
+            "temperature", self._temperature, batch.device, batch.positions.dtype
         )
         if temperature.ndim == 0:
             return temperature.expand(batch.num_graphs)
@@ -168,12 +244,8 @@ class BaseMonteCarlo(BaseDynamics):
 
     def _ensure_observables(self, batch: Batch) -> None:
         """Allocate graph-level energy and acceptance storage if absent."""
-        # NOTE: Batch has no ``add_system_property`` -- that method only exists
-        # on AtomicData. A new per-graph tensor is added to a Batch by plain
-        # attribute/item assignment instead: MultiLevelStorage.__setitem__
-        # (invoked via Batch.__setattr__) routes an unrecognized key straight
-        # into the "system" group. This mirrors how "energy" is already set
-        # elsewhere in this codebase (e.g. test/mc/test_kawasaki.py).
+        # Plain assignment routes an unknown [num_graphs, ...] key into the
+        # system level (Batch has no ``add_system_property``).
         energy = getattr(batch, "energy", None)
         if energy is None:
             batch.energy = torch.zeros(
@@ -406,3 +478,43 @@ class BaseMonteCarlo(BaseDynamics):
             self._call_hooks(DynamicsStage.ON_CONVERGE, batch)
         self.step_count += 1
         return batch, converged
+
+
+class _PairSwapMonteCarlo(BaseMonteCarlo):
+    """Shared state and rejection for canonical samplers that swap two atoms."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the sampler; see :class:`BaseMonteCarlo`."""
+        super().__init__(*args, **kwargs)
+        self._proposal_first: torch.Tensor | None = None
+        self._proposal_second: torch.Tensor | None = None
+        self._proposal_swapped: torch.Tensor | None = None
+
+    def _apply_swap(
+        self,
+        batch: Batch,
+        first: torch.Tensor,
+        second: torch.Tensor,
+        active: torch.Tensor,
+    ) -> None:
+        """Swap each active graph's unlike pair in place and record the proposal."""
+        numbers = batch.atomic_numbers
+        swap = active & (numbers[first] != numbers[second])
+        with torch.no_grad():
+            _swap_pairs(numbers, first, second, swap)
+        self._proposal_first = first
+        self._proposal_second = second
+        self._proposal_swapped = swap
+
+    def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
+        """Swap back rejected trial pairs that were actually exchanged."""
+        if self._proposal_swapped is None:
+            raise RuntimeError(
+                f"{type(self).__name__} rejection attempted without a proposal"
+            )
+        _swap_pairs(
+            batch.atomic_numbers,
+            self._proposal_first,
+            self._proposal_second,
+            rejected & self._proposal_swapped,
+        )

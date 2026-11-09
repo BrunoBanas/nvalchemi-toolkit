@@ -51,12 +51,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from ase.build import bulk
-from pure_free_energy_analysis import (
-    assemble_force_constants,
-    fit_lattice,
-    harmonic_summary,
-)
-from run_campaign import (
+from campaign_lib import (
     BAROSTAT_TIME_FS,
     CHECKPOINT,
     CRYSTAL_STRUCTURE,
@@ -67,11 +62,16 @@ from run_campaign import (
     SIZE_REPEATS,
     TASK,
     THERMOSTAT_TIME_FS,
-    _batch_means_se,
-    _cell_volumes,
-    _equilibration_gate,
-    _npt_wrap_hooks,
-    _pure_element_endpoint,
+    batch_means_se,
+    cell_volumes,
+    equilibration_gate,
+    npt_wrap_hooks,
+    pure_element_state,
+)
+from pure_free_energy_analysis import (
+    assemble_force_constants,
+    fit_lattice,
+    harmonic_summary,
 )
 
 from nvalchemi.data import Batch
@@ -99,7 +99,7 @@ def _template(symbol: str, a: float, n_atoms: int):
 
 def _evaluate(model, templates, device):
     """Energies (eV/atom) and forces (eV/A) of static structures, one batch."""
-    data = [_pure_element_endpoint(t, 1.0, 0, device) for t in templates]
+    data = [pure_element_state(t, 1.0, 0, device) for t in templates]
     batch = Batch.from_data_list(data)
     npt = NPT(
         model=model,
@@ -120,6 +120,7 @@ def _evaluate(model, templates, device):
 
 
 def stage_lattice(model, symbol, n_atoms, a_guess, device) -> dict:
+    """Fit the static lattice constant a0 and per-atom energy e0 from E(a) on a strain grid."""
     a = np.array([a_guess * (1 + s) for s in LATTICE_STRAINS])
     e, f, s = _evaluate(model, [_template(symbol, ai, n_atoms) for ai in a], device)
     a0, _, curv = fit_lattice(a, e)
@@ -186,7 +187,7 @@ def stage_ladder(
     for k in range(0, len(todo), width):
         temps = todo[k : k + width]
         data = [
-            _pure_element_endpoint(_template(symbol, a0, n_atoms), t, 1000 + i, device)
+            pure_element_state(_template(symbol, a0, n_atoms), t, 1000 + i, device)
             for i, t in enumerate(temps)
         ]
         batch = Batch.from_data_list(data)
@@ -198,17 +199,16 @@ def stage_ladder(
             thermostat_time=THERMOSTAT_TIME_FS,
             barostat_time=BAROSTAT_TIME_FS,
             pressure_coupling="isotropic",
-            hooks=_npt_wrap_hooks(),
+            hooks=npt_wrap_hooks(),
         )
         u_series = [[] for _ in temps]
         v_series = [[] for _ in temps]
         start = time.perf_counter()
         with npt:
-            npt.compute(batch)
             for _ in range(n_blocks):
                 npt.run(batch, n_steps=md_steps)
                 energies = batch.energy.detach().reshape(-1).double().cpu()
-                volumes = _cell_volumes(batch).detach().double().cpu()
+                volumes = cell_volumes(batch).detach().double().cpu()
                 for i in range(len(temps)):
                     u_series[i].append(float(energies[i]) / n_atoms)
                     v_series[i].append(float(volumes[i]) / n_atoms)
@@ -219,12 +219,12 @@ def stage_ladder(
             results[f"{t:g}"] = dict(
                 T=t,
                 u_mean=statistics.fmean(prod_u),
-                u_se=_batch_means_se(prod_u),
+                u_se=batch_means_se(prod_u),
                 v_mean=statistics.fmean(prod_v),
-                v_se=_batch_means_se(prod_v),
+                v_se=batch_means_se(prod_v),
                 n_production_blocks=len(prod_u),
-                u_gate=_equilibration_gate(u_series[i], EQUILIBRATION_WINDOW_BLOCKS),
-                v_gate=_equilibration_gate(v_series[i], EQUILIBRATION_WINDOW_BLOCKS),
+                u_gate=equilibration_gate(u_series[i], EQUILIBRATION_WINDOW_BLOCKS),
+                v_gate=equilibration_gate(v_series[i], EQUILIBRATION_WINDOW_BLOCKS),
                 u_series=u_series[i],
                 v_series=v_series[i],
             )
@@ -241,6 +241,7 @@ def stage_ladder(
 
 
 def main() -> None:
+    """Run the lattice, Hessian and NPT-ladder stages for one element, resumably."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -296,6 +297,7 @@ def main() -> None:
     state["meta"] = meta
 
     def save() -> None:
+        """Atomically rewrite the element's JSON state file."""
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=1) + "\n")
         tmp.replace(path)

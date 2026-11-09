@@ -12,171 +12,28 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Hybrid SGC-NPT efficiency benchmark: coarse Au-Pt T / delta_mu grid.
+"""Au-Pt hybrid SGC-NPT campaigns: T x delta_mu grid, delta_mu scans, boundary tracing.
 
-One process runs one system size end-to-end (see ``--n-atoms``); submit
-``submit_campaign.slurm`` to fill three single-GPU jobs, one per size.
-
-Grid
-----
-* Temperature: 3000 K -> 1600 K in 200 K steps (8 points).
-* Chemical potential: DELTA_MU_EV, -1.0 -> 1.0 eV in 0.2 eV steps (11
-  points). What this quantity actually means depends on
-  --reference-energies-json (see "Chemical-potential calibration" below):
-  uncalibrated, it is the literal, raw mu(Pt, Z=78) - mu(Au, Z=79); with a
-  calibration file it is delta_mu_excess added on top of the calibrated
-  delta_mu_ref(T) at each run's own temperature.
-* Sizes: 500 / 1372 / 2048 atom conventional-cubic Au fcc supercells
-  (5x5x5 / 7x7x7 / 8x8x8 conventional cells).
-
-That is 8 * 11 = 88 state points per size, 264 total across all three sizes.
-
-Chemical-potential calibration
--------------------------------
-`nvalchemi.mc.SGC`'s chemical_potentials is a literal, absolute per-atom
-energy, not a relative bias: {Au: 0.0, Pt: delta_mu} does not mean "Au and
-Pt are equally favorable," it means "whatever this checkpoint's own raw
-energy convention already encodes between the two species, uncorrected."
-That raw offset is 1-3 eV/atom on this UMA checkpoint -- large enough to
-swamp the +-1.0 eV DELTA_MU_EV sweep above and drive every run to one pure
-phase regardless of delta_mu (a scouting run at delta_mu=0.0 showed exactly
-this failure mode).
-
---reference-energies-json <reference_energy_calibration.py output>
-(recommended; ``--mode delta-mu-scan`` can also calibrate it in-process, see
-compute_reference_energies) fixes this: every run's chemical_potentials_ev is rebuilt as
-{Au: 0.0, Pt: reference[T]["delta_mu_ref_eV"] + delta_mu_excess}, looked up
-at THAT RUN'S OWN temperature_k -- not just the 3000 K reference row's --
-since delta_mu_ref(T) genuinely varies with T. delta_mu_excess is
-DELTA_MU_EV's per-column value, recovered from each run's
-metadata["delta_mu_ev"] (identical across every reference and
-continuation-child row in that column, since cooling_from_reference and the
-flat-grid branch both copy metadata unchanged). Refuses to run if a
-requested temperature is missing from the file, if its species order
-doesn't match SPECIES, or if either species' equilibration_gate.resolved
-at that temperature isn't true, unless --allow-unresolved-reference is
-passed (not recommended). Omitting --reference-energies-json keeps the old
-literal, uncalibrated behavior (a runtime warning is printed) -- fine for a
-pure throughput/memory benchmark, not for drawing conclusions about the
-real Au-Pt phase boundary.
+One process runs one system size (``--n-atoms``) end to end. Completed state
+points are checkpointed with ``FinalStateStore`` and skipped on restart.
 
 Modes
 -----
-``--mode cooling`` (default) is the grid described above. ``--mode
-delta-mu-scan`` instead runs ``CampaignSpec.delta_mu_scan_runs`` (see also
-its convenience wrapper ``delta_mu_scan_from_endpoints``, for a single
-temperature with no cross-temperature continuation) across one or more
-``--scan-temperatures-k`` (highest first): at the highest
-temperature, two fresh A-rich/B-rich endpoints are built from scratch; at
-every next (lower) temperature, new endpoints are built as CONTINUATION
-CHILDREN of the immediately preceding temperature's own endpoints; then EACH
-temperature's own endpoint pair seeds its own two-branch delta_mu_excess scan,
-marching from +-``--delta-mu-excess-bracket-ev`` toward 0.0
-(``--delta-mu-excess-min-step-ev`` / ``--delta-mu-excess-refine-ratio``;
-non-uniform -- see "Delta_mu ladder spacing" below) (PHASE_DIAGRAM_MANUAL.md
-section 4, all of steps 1-4). Every temperature is built into ONE combined
-``CampaignSpec`` in a single script invocation -- a ``CampaignSpec`` must be
-a self-contained dependency graph, so chaining across separate script
-invocations by a bare run_id string does not work: the later invocation's
-campaign would reference a parent outside its own run set, which
-``CampaignSpec`` rejects at construction. A single-element
-``--scan-temperatures-k`` degenerates to one from-scratch scan with no
-cross-temperature continuation.
+``cooling`` (default)
+    8 temperatures (3000 -> 1600 K) x 11 delta_mu columns (-1 -> 1 eV); each
+    column cools from a 3000 K reference run through ``RunSpec.parent_id``.
+``delta-mu-scan``
+    Two-branch (A-rich / B-rich) delta_mu_excess ladders at every
+    ``--scan-temperatures-k`` (highest first), endpoints chained across
+    temperatures; missing reference energies are calibrated in-process.
+``trace-boundary``
+    Integrate the coexistence line from one known point (``boundary_tracer.py``).
 
-Cross-temperature continuation chains each temperature's two SEED runs to
-the previous temperature's two seeds only -- not to that temperature's
-whole delta_mu ladder -- so a lower temperature becomes ready once the
-higher temperature's seeds finish, and from there ``ready_batches`` can
-pack that ladder together with the next temperature's seeds (batch
-compatibility ignores temperature). Generation 1 is still only the highest
-temperature's 2 seeds, though, regardless of how many temperatures are
-requested. Pass ``--scan-independent-temperatures`` to drop the chaining
-altogether: every temperature's seed pair gets ``parent_id=None`` and all
-of them (``2 * len(--scan-temperatures-k)`` walkers) are ready at once in
-generation 1, at the cost of a fresh random-composition start at each
-temperature instead of a warm start from a neighboring one.
-
-Delta_mu ladder spacing
-------------------------
-Each branch's ladder is NON-uniform (``_endpoint_ladder``): every new point
-sits ``--delta-mu-excess-refine-ratio`` (default 0.5, i.e. halving) of the
-way from the previous point to 0.0, so the absolute step size shrinks
-geometrically approaching 0.0 and refinement stops once it would fall
-tighter than ``--delta-mu-excess-min-step-ev`` (default 0.01 eV) -- coarse
-sampling near the safe bracket endpoint (deep in one pure/near-pure phase,
-flat response, extra points buy nothing), fine sampling near the
-transition (steep response, where the coexistence boundary actually sits).
-E.g. bracket=0.2, min_step=0.01: -0.2, -0.1, -0.05, -0.025, -0.0125, 0.0.
-
-Auto-calibration
------------------
-``--reference-energies-json`` is now OPTIONAL in ``--mode delta-mu-scan``
-(it remains required-if-given-must-be-complete for ``--mode cooling``, via
-``_load_delta_mu_ref``). In scan mode, ``_load_available_delta_mu_ref`` uses
-whatever entries the file already has (or nothing, if the flag is omitted)
-and reports which requested ``--scan-temperatures-k`` are still missing;
-``compute_reference_energies`` then runs the missing temperatures' pure-Au/
-pure-Pt NPT calibration in-process, with the model already loaded for the
-alloy runs above -- one script invocation, one GPU, no manual pre-step. The
-result is written to ``<--checkpoint-root>/atoms<n>/auto_reference_energies.json``
-for provenance and reuse (pass it back in as ``--reference-energies-json``
-next time to skip recalibrating). Each auto-calibrated temperature's own
-``equilibration_gate`` is still checked, exactly as for a file-supplied one
-(``--allow-unresolved-reference`` governs both).
-
-Continuation
-------------
-Each delta_mu column is one ``CampaignSpec.cooling_from_reference`` chain: an
-independent 3000 K reference state seeds seven cooling children (2800 K,
-..., 1600 K) through ``RunSpec.parent_id``. 200 K is a coarse step for this
-alloy, so a cooled child is not already equilibrated at its new set point,
-but it inherits a plausible composition and a lattice constant close to the
-target, which still cuts the required re-equilibration relative to a random
-start. Reference runs therefore get the full block budget
-(``N_BLOCKS_REFERENCE``); continuation children get a reduced budget
-(``N_BLOCKS_CONTINUATION``) that keeps the same ~50-block equilibration
-window described below. Set ``USE_CONTINUATION = False`` to run every state
-point independently from a fresh random 50/50 composition instead (a clean
-per-state-point throughput comparison, at roughly 2x the total block count).
-
-Hybrid block
-------------
-One block is ``MD_STEPS_PER_BLOCK`` MD steps at ``DT_FS`` followed by
-``round(MC_STEP_FRACTION * n_atoms)`` MC trials (one attempted transmutation
-per graph per MC step), overridable with ``--mc-step-fraction``. Reference runs run ``N_BLOCKS_REFERENCE`` blocks
-total, continuation children run ``N_BLOCKS_CONTINUATION``. ``--md-steps-
-per-block`` overrides ``MD_STEPS_PER_BLOCK`` for the whole campaign (both
-modes); ``--md-steps-per-block 0`` runs pure SGC (MC moves only, no MD
-sub-step) for a direct SGC-vs-hybrid comparison -- use a different
-``--checkpoint-root`` for each, since run_ids (and therefore every output
-filename) are otherwise identical between the two.
-
-Equilibration gate
--------------------
-Equilibration used to be *assumed* within the first ``EQUILIBRATION_BLOCKS``
-(50) and never checked. ``_run_hybrid_with_observables`` now records each
-block's per-graph Pt fraction and energy/atom (one extra small GPU->CPU
-transfer per block -- see its docstring for the cost/why), and after each
-run ``_equilibration_gate`` (PHASE_DIAGRAM_MANUAL.md section 7, the same
-one-shot pattern reference_energy_calibration.py already uses) compares the
-last two ``EQUILIBRATION_WINDOW_BLOCKS``-block windows of both series
-against twice their combined standard error. This is a single end-of-run
-check, not the manual's full three-consecutive-checks promotion protocol --
-a run that fails it is logged as unresolved (throughput CSV's ``resolved``
-column, plus a per-run ``<run_id>.equilibration.json`` sidecar in the
-checkpoint directory with both gates' window means/difference/standard
-error), not retried or extended automatically.
-
-Batch width
------------
-``SimulationBatchPlanner`` profiles representative reference-row workloads at
-candidate widths and recommends the smallest width within
-``BATCH_THROUGHPUT_FRACTION`` of peak throughput while reserving
-``BATCH_MEMORY_FRACTION`` of device memory. A 500-atom walker is expected to
-reserve about 3.5 GB; ``_verify_memory_floor`` fits a linear memory model
-from the profile and raises if the fitted per-walker cost falls far below
-that (atom-count-scaled) expectation, since a profiler that under-counts
-memory would otherwise pick an unsafely large width for an unattended run.
+Pass ``--reference-energies-json`` (or let delta-mu-scan calibrate) so that
+delta_mu is an excess over the calibrated delta_mu_ref(T); the literal sweep
+drives every run to a pure end member. Background (calibration, ladder spacing,
+continuation, equilibration gate, batch width) is in this directory's
+``README.md``; shared helpers are in ``campaign_lib.py``.
 """
 
 from __future__ import annotations
@@ -184,33 +41,42 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
-import os
-import statistics
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
 import torch
 import torch._inductor.config
 from ase import Atoms
-from ase.build import bulk
 from ase.data import chemical_symbols
-
-from nvalchemi.data import AtomicData, Batch
-from nvalchemi.data.atomic_data import (
-    _default_mass_table,  # noqa: PLC2701 -- reused for
+from campaign_lib import (
+    CHECKPOINT,
+    CONVENTIONAL_CELL,
+    CRYSTAL_STRUCTURE,
+    EQUILIBRATION_WINDOW_BLOCKS,
+    LATTICE_A_ANG,
+    MC_ENERGY_ONLY,
+    MC_STEP_FRACTION,
+    MD_STEPS_PER_BLOCK,
+    PRESSURE_EV_PER_A3,
+    SEED,
+    SIZE_REPEATS,
+    SPECIES,
+    TASK,
+    TEMPLATE_SYMBOL,
+    NvalchemiTraceEngine,
+    build_ase_structure,
+    compute_reference_energies,
+    equilibration_gate,
+    make_workload,
+    resolve_inference_settings,
+    run_hybrid_with_observables,
 )
 
-# refresh_masses_after_transmutation, to stay bit-identical with AtomicData.use_default_masses()
-from nvalchemi.dynamics import DynamicsStage
-from nvalchemi.dynamics.integrators.npt import NPT
-from nvalchemi.hooks import WrapPeriodicHook
-from nvalchemi.hooks.periodic import wrap_positions_into_cell
+from nvalchemi.data import Batch
 from nvalchemi.hybrid import HybridMCMD
-from nvalchemi.mc import SGC
 from nvalchemi.models.uma import UMAWrapper
 from nvalchemi.scheduling import (
     BatchMeasurement,
@@ -221,89 +87,12 @@ from nvalchemi.scheduling import (
     SimulationBatchPlanner,
 )
 
-# %%
-# Grid definition
-# ---------------
-
-# Overridable per cluster (Perlmutter's env.sh sets uma-s-1p2p1); every driver importing CHECKPOINT follows it.
-# Never mix checkpoints within one isotherm / boundary trace.
-CHECKPOINT = os.environ.get("NVALCHEMI_UMA_CHECKPOINT", "uma-s-1p2")
-TASK = "omat"
-# SGC changes atomic composition every step, so no MoLE merge (it assumes a
-# fixed composition). Activation checkpointing off and tf32 on: 1.9x faster per
-# step than the old "batch" preset, same sampled chain -- see "UMA settings for
-# SGC and SGC-NPT" in docs/userguide/dynamics_simulations.md. Key=value specs,
-# which UMAWrapper.from_checkpoint parses into InferenceSettings.
-#
-# INFERENCE_SETTINGS is the uncompiled spec (also imported by other scripts here).
-# --inference-settings auto (the default) uses INFERENCE_SETTINGS_COMPILED for
-# hybrid runs: with UMAWrapper's dynamic compile shapes, SGC-NPT runs 1.06x faster
-# with ~12% less memory after a ~2 min one-time compile per process (500 atoms,
-# A100-SXM), which campaign processes of hundreds of blocks repay (break-even ~125
-# blocks at width 1, ~45 at width 4). Pure SGC (--md-steps-per-block 0) stays
-# uncompiled: compile measured slower there.
-INFERENCE_SETTINGS = (
-    "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
-)
-INFERENCE_SETTINGS_COMPILED = (
-    "compile=true,merge_mole=false,tf32=true,activation_checkpointing=false"
-)
-
-
-def resolve_inference_settings(spec: str, md_steps_per_block: int) -> str:
-    """Resolve ``--inference-settings auto``: compiled for hybrids, eager for pure SGC.
-
-    Parameters
-    ----------
-    spec : str
-        ``"auto"``, a fairchem preset name or a key=value spec.
-    md_steps_per_block : int
-        MD steps per block; 0 is pure SGC MC.
-
-    Returns
-    -------
-    str
-        The spec passed to ``UMAWrapper.from_checkpoint``.
-    """
-    if spec != "auto":
-        return spec
-    return INFERENCE_SETTINGS_COMPILED if md_steps_per_block > 0 else INFERENCE_SETTINGS
-
-
 # Inductor's pad_mm pass benchmarks real, padded copies of large batched
 # matmul operands while compiling (a ~20 GiB one-shot allocation at wide
 # batches), so a compiled model can OOM during compilation at a batch width
 # whose steady-state run fits. Applied in main(), not at import, so modules
 # that import this one for its constants keep their own inductor config.
 INDUCTOR_SHAPE_PADDING = False
-# Evaluate energies only (no forces/stress autograd) during MC blocks; MD blocks
-# keep full outputs. Measured 2.1x per MC step for Kawasaki (turbo) and ~1.4x for
-# SGC on A100, same sampled chain. On by default; --no-mc-energy-only in main()
-# turns it off.
-MC_ENERGY_ONLY = True
-
-TEMPLATE_SYMBOL = "Au"
-CRYSTAL_STRUCTURE = "fcc"
-LATTICE_A_ANG = 4.00
-CONVENTIONAL_CELL = True
-PT_FRACTION = 0.50
-PRESSURE_EV_PER_A3 = 1.01325 / 1.602176634e6  # 1 atmosphere
-SPECIES = (79, 78)  # Au, Pt
-
-SIZE_REPEATS: dict[int, tuple[int, int, int]] = {
-    # 108 and 256: small cells for batching benchmarks (the 108-atom cell is
-    # 12 A across, twice UMA's 6 A cutoff; the graph builder handles images).
-    108: (3, 3, 3),
-    256: (4, 4, 4),
-    500: (5, 5, 5),
-    # 1000: the 500-atom cell doubled along z (the only fcc supercell with exactly 1000 atoms);
-    # 20 A x 20 A x 40 A, so a slab of the other phase across the short axes costs the same
-    # interface area as at 500 atoms while the volume doubles.
-    1000: (5, 5, 10),
-    1372: (7, 7, 7),
-    2048: (8, 8, 8),
-    4000: (10, 10, 10),
-}
 BATCH_WIDTH_CANDIDATES: dict[int, tuple[int, ...]] = {
     108: (4, 8, 16, 24, 32, 48, 64),
     256: (2, 4, 8, 12, 16, 24, 32),
@@ -317,254 +106,19 @@ BATCH_WIDTH_CANDIDATES: dict[int, tuple[int, ...]] = {
     # extra data point above the naive extrapolation, not a verified-safe one.
     4000: (1, 2, 3),
 }
-
 TEMPERATURES_K: tuple[float, ...] = tuple(float(t) for t in range(3000, 1599, -200))
 DELTA_MU_EV: tuple[float, ...] = tuple(round(-1.0 + 0.2 * i, 2) for i in range(11))
-
-MC_STEP_FRACTION = 0.2  # MC trials per block = round(MC_STEP_FRACTION * n_atoms)
-MD_STEPS_PER_BLOCK = 50
-DT_FS = 3.0
-THERMOSTAT_TIME_FS = 100.0
-BAROSTAT_TIME_FS = 1000.0
-SEED = 20260827
-
-EQUILIBRATION_BLOCKS = 50
 N_BLOCKS_REFERENCE = 200  # 50 equilibration + 150 production; no parent state.
 N_BLOCKS_CONTINUATION = 100  # 50 equilibration + 50 production; warm-started.
 N_BLOCKS_SCAN_SEED = 200  # Fresh A-rich/B-rich endpoint burn-in; no parent state.
 N_BLOCKS_SCAN_STEP = 100  # Per delta_mu_excess step along a scan branch; warm-started.
-EQUILIBRATION_WINDOW_BLOCKS = (
-    25  # _equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
-)
-
 USE_CONTINUATION = True
-
 BATCH_MEMORY_FRACTION = 0.85
 BATCH_THROUGHPUT_FRACTION = 0.95
 PROFILE_WARMUP_BLOCKS = 1
 PROFILE_MEASURED_BLOCKS = 2
-
-KB_EV = 8.617333262e-5  # Boltzmann constant, eV/K.
 EXPECTED_BYTES_PER_ATOM = (3.5 * 1024**3) / 500  # ~3.5 GB reserved @ 500 atoms.
 MEMORY_FLOOR_TOLERANCE = 0.75  # Require >= 75% of the atom-count-scaled estimate.
-
-
-def _npt_wrap_hooks() -> list[WrapPeriodicHook]:
-    """Keep positions inside the cell during NPT.
-
-    NPT's position update (``r += (v + eps_dot . r) dt``) never wraps, and the
-    UMA adapter hands raw positions to fairchem, whose periodic graph builder
-    only scans image offsets of +-ceil(cutoff / L) (+-1 here). Once an atom has
-    diffused more than about one cell length from a neighbour in *unwrapped*
-    coordinates (liquid-like Au-rich cells at 1200-1400 K do this within one or
-    two 15 ps ladder steps), that pair's minimum image is never generated. The
-    two atoms feel no repulsion and can fall onto each other: every
-    collapsed (< 1.5 A) pair in the scan_1200_1400_hybrid checkpoints needed an
-    image offset > +-1. Wrapping every step keeps every pair within +-1 image.
-    """
-    return [WrapPeriodicHook(frequency=1, stage=DynamicsStage.AFTER_POST_UPDATE)]
-
-
-def _wrap_batch_positions(batch: Batch) -> None:
-    """Wrap a (restored) batch into its cells once, before its first force call.
-
-    The hook above only fires after an MD step, but ``md.compute`` and
-    ``mc.synchronize`` (and every MC trial of the first block) run first, so a
-    warm-started parent saved with unwrapped positions must be folded back here.
-    """
-    cell = batch.cell
-    pbc = getattr(batch, "pbc", None)
-    if pbc is None:
-        pbc = torch.ones((batch.num_graphs, 3), dtype=torch.bool, device=batch.device)
-    # Same shape normalisation as WrapPeriodicHook._wrap_positions.
-    if cell.dim() == 4:
-        cell = cell.squeeze(1)
-    if pbc.dim() == 3:
-        pbc = pbc.squeeze(1)
-    with torch.no_grad():
-        wrap_positions_into_cell(
-            batch.positions, cell, pbc.to(torch.bool), batch.batch_idx
-        )
-
-
-def relax_cell_volume(
-    md: NPT,
-    batch: Batch,
-    *,
-    bulk_modulus_ev_per_a3: float = 1.2,
-    tolerance_ev_per_a3: float = 2e-4,
-    max_iterations: int = 4,
-    target_pressure_ev_per_a3: float = 0.0,
-) -> torch.Tensor:
-    """Relax each graph's volume at fixed fractional coordinates (rigid-lattice MC).
-
-    Scales cell and positions together, isotropically, so every atom keeps its lattice site and
-    only the lattice constant follows the composition: one Newton step on V per iteration,
-    ``V <- V (1 + (P - P_target) / B)`` with P = -tr(stress)/3 from the last ``md.compute`` (stress
-    is tensile-positive, see NPT), re-evaluating after each step until every graph has
-    ``|P - P_target| < tolerance``. A rough B only slows convergence (error shrinks by
-    ``|1 - B_true/B|`` per step); B ~ 1.1-1.4 eV/A^3 for Au-Pt. Static lattice: no kinetic term.
-    Expects ``batch.stress`` from a compute at the current geometry; leaves energy/forces/stress
-    evaluated at the relaxed geometry. Returns the final per-graph pressure (eV/A^3).
-    """
-    n_graphs = batch.num_graphs
-    for iteration in range(max_iterations + 1):
-        pressure = (
-            -batch.stress.reshape(n_graphs, 3, 3).diagonal(dim1=-2, dim2=-1).sum(-1)
-            / 3.0
-        )
-        excess = pressure - target_pressure_ev_per_a3
-        if iteration == max_iterations or bool(
-            (excess.abs() < tolerance_ev_per_a3).all()
-        ):
-            return pressure.detach()
-        scale = (1.0 + excess / bulk_modulus_ev_per_a3).clamp(0.85, 1.15) ** (1.0 / 3.0)
-        with torch.no_grad():
-            batch.cell.mul_(scale.view(-1, *([1] * (batch.cell.dim() - 1))))
-            batch.positions.mul_(scale[batch.batch_idx].unsqueeze(-1))
-        md.compute(batch)
-    return pressure.detach()
-
-
-def lattice_constant_per_graph(
-    batch: Batch, atoms_per_cubic_cell: int = 4
-) -> list[float]:
-    """Cubic-equivalent lattice constant (4 atoms per fcc cube) of each graph's cell."""
-    n_graphs = batch.num_graphs
-    volumes = torch.linalg.det(batch.cell.reshape(n_graphs, 3, 3)).abs()
-    counts = torch.bincount(batch.batch_idx, minlength=n_graphs).to(volumes.dtype)
-    return (atoms_per_cubic_cell * volumes / counts).pow(1.0 / 3.0).tolist()
-
-
-def build_ase_structure(
-    symbol: str,
-    crystal_structure: str,
-    lattice_a: float,
-    repeats: tuple[int, int, int],
-    *,
-    cubic: bool,
-) -> Atoms:
-    """Build a periodic ASE crystal template for one independent run."""
-    unit_cell = bulk(
-        symbol, crystalstructure=crystal_structure, a=lattice_a, cubic=cubic
-    )
-    return unit_cell * repeats
-
-
-def _walker(
-    template: Atoms,
-    run: RunSpec,
-    seed: int,
-    parent_state: AtomicData | None,
-    device: torch.device,
-) -> AtomicData:
-    """Create a fresh state or restore the parent state for continuation."""
-    if parent_state is not None:
-        return parent_state.to(device)
-
-    data = AtomicData.from_atoms(template, device=device)
-    n_atoms = data.num_nodes
-    generator = torch.Generator(device=device).manual_seed(seed)
-    numbers = torch.full_like(data.atomic_numbers, SPECIES[0])
-    pt_fraction = float(run.metadata.get("pt_fraction", PT_FRACTION))
-    pt_count = round(pt_fraction * n_atoms)
-    numbers[torch.randperm(n_atoms, device=device, generator=generator)[:pt_count]] = (
-        SPECIES[1]
-    )
-    data.atomic_numbers = numbers
-    data.atomic_masses = None
-    data.use_default_masses()
-    velocity_std = torch.sqrt(
-        torch.as_tensor(KB_EV * run.temperature_k, device=device) / data.atomic_masses
-    )
-    data.velocities = (
-        torch.randn((n_atoms, 3), device=device, generator=generator)
-        * velocity_std[:, None]
-    )
-    data.velocities -= data.velocities.mean(dim=0, keepdim=True)
-    data.forces = torch.zeros_like(data.positions)
-    data.energy = torch.zeros(1, 1, device=device)
-    data.stress = torch.zeros(1, 3, 3, device=device)
-    return data
-
-
-def _make_batch(
-    template: Atoms,
-    runs: tuple[RunSpec, ...],
-    parent_states: tuple[AtomicData | None, ...],
-    device: torch.device,
-) -> Batch:
-    """Build a batch of fresh states or restored continuation states."""
-    if len(runs) != len(parent_states):
-        raise ValueError("runs and parent_states must have equal lengths")
-    # mc_accepted (per-graph MC bookkeeping) exists only on states saved after an MC run; drop it
-    # so saved and freshly built states can share a batch. The sampler re-creates it on first use.
-    return Batch.from_data_list(
-        [
-            _walker(template, run, SEED + index, parent_state, device)
-            for index, (run, parent_state) in enumerate(zip(runs, parent_states))
-        ],
-        exclude_keys=["mc_accepted"],
-    )
-
-
-def make_workload(
-    model: UMAWrapper,
-    template: Atoms,
-    runs: tuple[RunSpec, ...],
-    parent_states: tuple[AtomicData | None, ...],
-    device: torch.device,
-    md_steps_per_block: int = MD_STEPS_PER_BLOCK,
-    mc_step_fraction: float = MC_STEP_FRACTION,
-) -> tuple[HybridMCMD, Batch]:
-    """Return one per-graph hybrid MC-MD workload for compatible runs.
-
-    The same model object is deliberately passed to both stages: ``HybridMCMD``
-    requires every trial energy and MD force to come from one potential.
-    ``md_steps_per_block=0`` degenerates to pure SGC (MC moves only, no MD
-    sub-step) -- see ``--md-steps-per-block``.
-    """
-    if not runs:
-        raise ValueError("a workload requires at least one run")
-    species = runs[0].species
-    if any(run.species != species for run in runs):
-        raise ValueError("all runs in a workload must share reservoir species")
-    temperatures = torch.tensor([run.temperature_k for run in runs], device=device)
-    pressures = torch.tensor([run.pressure_ev_per_a3 for run in runs], device=device)
-    chemical_potentials = {
-        number: torch.tensor(
-            [run.chemical_potentials_ev[number] for run in runs], device=device
-        )
-        for number in species
-    }
-    mc_steps = max(1, round(mc_step_fraction * len(template)))
-    sgc = SGC(
-        model=model,
-        temperature=temperatures,
-        species=species,
-        chemical_potentials=chemical_potentials,
-        random_seed=SEED,
-    )
-    npt = NPT(
-        model=model,
-        dt=DT_FS,
-        temperature=temperatures,
-        pressure=pressures,
-        thermostat_time=THERMOSTAT_TIME_FS,
-        barostat_time=BAROSTAT_TIME_FS,
-        pressure_coupling="isotropic",
-        hooks=_npt_wrap_hooks(),
-    )
-    hybrid = HybridMCMD(
-        mc=sgc,
-        md=npt,
-        mc_steps=mc_steps,
-        md_steps=md_steps_per_block,
-        mc_energy_only=MC_ENERGY_ONLY,
-    )
-    batch = _make_batch(template, runs, parent_states, device)
-    _wrap_batch_positions(batch)
-    return hybrid, batch
 
 
 def _build_reference_runs(n_atoms: int) -> tuple[RunSpec, ...]:
@@ -686,7 +240,7 @@ def _build_delta_mu_scan_schedule(
     (``CampaignSpec.delta_mu_scan_from_endpoints``, step 3). Every run across
     every temperature lands in the one returned ``CampaignSpec`` -- required,
     since a ``CampaignSpec`` must be a self-contained dependency graph (see
-    module docstring "Modes").
+    README "Modes").
 
     ``temperatures_k`` must be strictly decreasing (a single-element sequence
     is a from-scratch scan with no cross-temperature continuation).
@@ -791,204 +345,6 @@ def _build_delta_mu_scan_schedule(
         runs=tuple(runs), name=f"aupt_{n_atoms}atoms_deltamu_scan_schedule"
     )
     return campaign, tuple(endpoints)
-
-
-def _build_pure_element_template(symbol: str, n_atoms: int) -> Atoms:
-    """A pure-element supercell at ASE's own reference lattice constant,
-    matching the alloy's crystal structure/repeat count. Deliberately omits
-    ``a=`` (unlike ``build_ase_structure``, which always uses the shared,
-    Au-based ``LATTICE_A_ANG``): each end-member should start near its OWN
-    equilibrium volume -- reusing the shared lattice constant would just
-    reintroduce the volume-relaxation skew this calibration removes. NPT's
-    barostat does the actual equilibration; this only sets a physically
-    reasonable starting point. Lets ``--mode delta-mu-scan`` auto-calibrate
-    in-process with the model already loaded for the alloy runs; see
-    ``compute_reference_energies`` below for the physical rationale.
-    """
-    repeats = SIZE_REPEATS[n_atoms]
-    unit_cell = bulk(
-        symbol, crystalstructure=CRYSTAL_STRUCTURE, cubic=CONVENTIONAL_CELL
-    )
-    template = unit_cell * repeats
-    if len(template) != n_atoms:
-        raise ValueError(
-            f"expected {n_atoms} atoms for pure {symbol}, repeats={repeats} built {len(template)}"
-        )
-    return template
-
-
-def _pure_element_endpoint(
-    template: Atoms,
-    temperature_k: float,
-    velocity_seed: int,
-    device: torch.device,
-) -> AtomicData:
-    """One pure-element ``AtomicData`` with a Maxwell-Boltzmann velocity draw
-    at ``temperature_k``. Adapted from reference_energy_calibration.py."""
-    data = AtomicData.from_atoms(template, device=device)
-    n = data.num_nodes
-    data.atomic_masses = None
-    data.use_default_masses()
-    generator = torch.Generator(device=device).manual_seed(velocity_seed)
-    velocity_std = torch.sqrt(
-        torch.as_tensor(KB_EV * temperature_k, device=device) / data.atomic_masses
-    )
-    data.velocities = (
-        torch.randn((n, 3), device=device, generator=generator) * velocity_std[:, None]
-    )
-    data.velocities -= data.velocities.mean(dim=0, keepdim=True)
-    data.forces = torch.zeros_like(data.positions)
-    data.energy = torch.zeros(1, 1, device=device)
-    data.stress = torch.zeros(1, 3, 3, device=device)
-    return data
-
-
-def _cell_volumes(batch: Batch) -> torch.Tensor:
-    """Per-graph cell volume (A^3), robust to a possibly-unbatched cell tensor."""
-    cell = batch.cell if batch.cell.ndim == 3 else batch.cell.unsqueeze(0)
-    return torch.linalg.det(cell)
-
-
-def compute_reference_energies(
-    model: UMAWrapper,
-    temperatures_k: Sequence[float],
-    n_atoms: int,
-    *,
-    n_blocks: int,
-    md_steps_per_block: int,
-    equilibration_window_blocks: int,
-    velocity_seed: int,
-    device: torch.device,
-) -> dict:
-    """Pure Au/Pt NPT reference-energy calibration, in-process, on an
-    ALREADY-LOADED model -- PHASE_DIAGRAM_MANUAL.md section 6.2's
-    ``delta_mu_ref(T) = g_Pt(T) - g_Au(T)``, computed at every requested
-    temperature. This is what lets ``--mode delta-mu-scan`` run completely
-    automatically on a single GPU: no second checkpoint load, no separate
-    script invocation, no manually-prepared ``reference_energies.json``.
-
-    Kept in this script so the campaign entry point is self-sufficient. Each
-    pure element is equilibrated independently, from its own ASE reference
-    lattice constant, through a real NPT trajectory at the target temperature
-    and the alloy's own pressure/thermostat/barostat settings, one graph per
-    (element, temperature) in a single batch.
-
-    Returns a ``reference_energies.json``-shaped dict
-    (``reference[T][symbol]`` plus, for the 2-species case,
-    ``delta_mu_ref_eV`` per temperature) -- the caller decides whether/where
-    to persist it and whether its ``equilibration_gate`` is trustworthy
-    enough to use.
-    """
-    temperatures = tuple(float(t) for t in temperatures_k)
-    if not temperatures:
-        raise ValueError("at least one temperature is required")
-    symbols = [chemical_symbols[z] for z in SPECIES]
-    templates = {
-        number: _build_pure_element_template(symbol, n_atoms)
-        for number, symbol in zip(SPECIES, symbols)
-    }
-
-    graph_index: list[tuple[int, float]] = [
-        (number, t) for number in SPECIES for t in temperatures
-    ]
-    data_list = [
-        _pure_element_endpoint(templates[number], t, velocity_seed + i, device)
-        for i, (number, t) in enumerate(graph_index)
-    ]
-    batch = Batch.from_data_list(data_list)
-    n_graphs = len(graph_index)
-
-    temperatures_tensor = torch.tensor([t for _, t in graph_index], device=device)
-    npt = NPT(
-        model=model,
-        dt=DT_FS,
-        temperature=temperatures_tensor,
-        pressure=torch.full((n_graphs,), PRESSURE_EV_PER_A3, device=device),
-        thermostat_time=THERMOSTAT_TIME_FS,
-        barostat_time=BAROSTAT_TIME_FS,
-        pressure_coupling="isotropic",
-        hooks=_npt_wrap_hooks(),
-    )
-
-    energy_per_atom_series: list[list[float]] = [[] for _ in range(n_graphs)]
-    volume_per_atom_series: list[list[float]] = [[] for _ in range(n_graphs)]
-
-    def _record() -> None:
-        energies = batch.energy.detach().reshape(-1)
-        counts = batch.num_nodes_per_graph.to(energies.dtype)
-        volumes = _cell_volumes(batch)
-        for i in range(n_graphs):
-            energy_per_atom_series[i].append(float(energies[i] / counts[i]))
-            volume_per_atom_series[i].append(float(volumes[i] / counts[i]))
-
-    with npt:
-        npt.compute(batch)
-        _record()
-        for _ in range(n_blocks):
-            npt.run(batch, n_steps=md_steps_per_block)
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            _record()
-
-    window = equilibration_window_blocks
-    n_rep = SIZE_REPEATS[n_atoms][0]
-    reference: dict[str, dict] = {}
-    for i, (number, t) in enumerate(graph_index):
-        symbol = chemical_symbols[number]
-        energy_gate = _equilibration_gate(energy_per_atom_series[i][1:], window)
-        volume_gate = _equilibration_gate(volume_per_atom_series[i][1:], window)
-        resolved = (
-            bool(energy_gate.get("resolved")) and bool(volume_gate.get("resolved"))
-            if energy_gate.get("resolved") is not None
-            and volume_gate.get("resolved") is not None
-            else None
-        )
-        tail = min(window, len(energy_per_atom_series[i]))
-        mean_energy = statistics.fmean(energy_per_atom_series[i][-tail:])
-        mean_volume = statistics.fmean(volume_per_atom_series[i][-tail:])
-        se_energy = (
-            statistics.pstdev(energy_per_atom_series[i][-tail:]) / (tail**0.5)
-            if tail > 1
-            else float("nan")
-        )
-        lattice_a = (mean_volume * n_atoms) ** (1 / 3) / n_rep
-        reference.setdefault(f"{t:g}", {})[symbol] = {
-            "atomic_number": number,
-            "energy_eV_per_atom": mean_energy,
-            "energy_eV_per_atom_standard_error": se_energy,
-            "volume_A3_per_atom": mean_volume,
-            "lattice_constant_a_ang": lattice_a,
-            "averaging_window_blocks": tail,
-            "equilibration_gate": {
-                "energy": energy_gate,
-                "volume": volume_gate,
-                "resolved": resolved,
-            },
-        }
-
-    s0, s1 = symbols
-    for t_entry in reference.values():
-        t_entry["delta_mu_ref_eV"] = (
-            t_entry[s1]["energy_eV_per_atom"] - t_entry[s0]["energy_eV_per_atom"]
-        )
-        t_entry["delta_mu_ref_definition"] = (
-            f"mu({s1}) - mu({s0}), per PHASE_DIAGRAM_MANUAL.md section 6.2"
-        )
-
-    return {
-        "checkpoint": CHECKPOINT,
-        "task_name": TASK,
-        "species": list(SPECIES),
-        "symbols": symbols,
-        "crystal_structure": CRYSTAL_STRUCTURE,
-        "conventional_cell": CONVENTIONAL_CELL,
-        "n_atoms_per_graph": n_atoms,
-        "pressure_ev_per_a3": PRESSURE_EV_PER_A3,
-        "n_blocks": n_blocks,
-        "md_steps_per_block": md_steps_per_block,
-        "equilibration_window_blocks": window,
-        "reference": reference,
-    }
 
 
 def _load_available_delta_mu_ref(
@@ -1140,6 +496,7 @@ def profile_workload(
     device: torch.device,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
     mc_step_fraction: float = MC_STEP_FRACTION,
+    mc_energy_only: bool = MC_ENERGY_ONLY,
 ) -> tuple[HybridMCMD, Batch]:
     """Build representative reference-row states for a capacity profile."""
     runs = tuple(
@@ -1154,6 +511,7 @@ def profile_workload(
         device,
         md_steps_per_block,
         mc_step_fraction,
+        mc_energy_only,
     )
 
 
@@ -1167,7 +525,7 @@ def _verify_memory_floor(measurements: list[BatchMeasurement], n_atoms: int) -> 
     otherwise select a batch width that OOMs once a long unattended
     production run reaches a worst-case composition). Downgraded to a
     warning: the linear-in-n_atoms floor itself doesn't hold at larger
-    sizes -- a dedicated benchmark/uma_efficiency/memory_profile_matrix.py run (far more
+    sizes -- a dedicated memory-profile run (far more
     samples than this profiler's PROFILE_MEASURED_BLOCKS=2) measured
     real per-walker costs of 3.96 GB/500 atoms, 8.59 GB/1372, but only
     1.71 GB/2048 -- resident cost dominates and marginal per-walker cost
@@ -1203,6 +561,7 @@ def select_batch_width(
     device: torch.device,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
     mc_step_fraction: float = MC_STEP_FRACTION,
+    mc_energy_only: bool = MC_ENERGY_ONLY,
 ) -> int:
     """Profile candidate widths, verify the memory floor, and recommend one."""
     planner = SimulationBatchPlanner(
@@ -1218,6 +577,7 @@ def select_batch_width(
             dev,
             md_steps_per_block,
             mc_step_fraction,
+            mc_energy_only,
         ),
         BATCH_WIDTH_CANDIDATES[n_atoms],
         device=device,
@@ -1238,157 +598,6 @@ def select_batch_width(
     return width
 
 
-def _pt_fraction_per_graph(batch: Batch, pt_number: int, n_graphs: int) -> list[float]:
-    """Per-graph Pt atomic fraction, one GPU->CPU sync."""
-    dtype = batch.positions.dtype
-    pt_mask = (batch.atomic_numbers == pt_number).to(dtype)
-    n_pt = torch.bincount(batch.batch_idx, weights=pt_mask, minlength=n_graphs)
-    n_total = torch.bincount(batch.batch_idx, minlength=n_graphs).to(dtype)
-    return (n_pt / n_total).detach().cpu().tolist()
-
-
-def _equilibration_gate(series: list[float], window: int) -> dict:
-    """PHASE_DIAGRAM_MANUAL.md section 7's live gate, one-shot: compare the
-    last two `window`-block windows' means against twice their combined
-    standard error. A single check run once at the end of a fixed-length run
-    -- NOT that section's full three-consecutive-checks protocol. Identical
-    to reference_energy_calibration.py's helper of the same name (different
-    repo, no shared import path).
-    """
-    if len(series) < 2 * window:
-        return {
-            "resolved": False,
-            "reason": f"fewer than {2 * window} blocks recorded ({len(series)})",
-        }
-    penultimate, last = series[-2 * window : -window], series[-window:]
-    mean_a, mean_b = statistics.fmean(penultimate), statistics.fmean(last)
-    se_a = statistics.pstdev(penultimate) / (window**0.5) if window > 1 else 0.0
-    se_b = statistics.pstdev(last) / (window**0.5) if window > 1 else 0.0
-    combined_se = (se_a**2 + se_b**2) ** 0.5
-    difference = mean_b - mean_a
-    return {
-        "resolved": bool(abs(difference) < 2 * combined_se)
-        if combined_se > 0
-        else None,
-        "window_blocks": window,
-        "mean_penultimate_window": mean_a,
-        "mean_last_window": mean_b,
-        "difference": difference,
-        "combined_standard_error": combined_se,
-    }
-
-
-def _refresh_masses_after_transmutation(batch: Batch) -> None:
-    """Resync ``batch.atomic_masses`` with the current ``atomic_numbers``.
-
-    REDUNDANT since 2026-09-27: ``BaseMonteCarlo`` now updates the mass of
-    every atom whose species an accepted move changes (see
-    ``nvalchemi/mc/base.py``), so no MC/MD loop needs this any more and the
-    campaign no longer calls it. Kept only so scripts that still import it keep
-    working; calling it is harmless for default-mass batches. The description
-    below is the bug it used to work around.
-
-    ``_walker`` sets ``atomic_masses`` once, from the composition at
-    construction time, via ``AtomicData.use_default_masses()``. Nothing
-    else in the SGC/NPT stack ever refreshes it afterwards: ``SGC`` only
-    ever mutates ``atomic_numbers`` (see ``nvalchemi/mc/sgc.py`` --
-    ``_mutable_fields`` on ``BaseMonteCarlo`` deliberately excludes
-    masses), so every accepted transmutation silently leaves that atom's
-    mass pinned to its *previous* species for the rest of the run. NPT's
-    force/velocity update and its Nose-Hoover kinetic-energy terms both
-    consume ``batch.atomic_masses`` directly (``nph_velocity_half_step``,
-    ``_compute_ke`` in ``nvalchemi/dynamics/integrators/npt.py``), so a
-    transmuted atom is integrated with the wrong mass in every subsequent
-    MD block until this is called. Call once per MC block, right after
-    ``hybrid.mc.run(...)`` and before the next ``hybrid.md.compute(...)``.
-    """
-    table = _default_mass_table().to(device=batch.device, dtype=batch.positions.dtype)
-    batch.atomic_masses = table[batch.atomic_numbers.long()]
-
-
-def _run_hybrid_with_observables(
-    hybrid: HybridMCMD,
-    batch: Batch,
-    n_blocks: int,
-    n_graphs: int,
-    pt_number: int,
-    cell_hook: Callable[[Batch], None] | None = None,
-) -> tuple[Batch, list[list[float]], list[list[float]]]:
-    """Run n_blocks hybrid MC-MD blocks, recording each block's per-graph Pt
-    fraction and energy/atom -- the observable series _equilibration_gate
-    needs, which a plain ``hybrid.run(batch, n_blocks=n_blocks)`` call
-    doesn't expose (it returns only the final batch).
-
-    Reimplements ``HybridMCMD.run``'s loop body locally, using only its
-    public ``mc``/``md``/``md_steps`` attributes and ``run_mc_block``, instead of
-    calling ``hybrid.run(batch, n_blocks=1)`` in a Python loop: that would
-    re-enter ``with self.md:`` (a CUDA-stream context, see BaseDynamics) and
-    re-run ``md.compute``/``mc.synchronize`` once per recorded block instead
-    of once for the whole run, roughly doubling the compute cost. This
-    version enters the stream context exactly once, matching the original
-    method's cost, at the price of one extra small GPU->CPU transfer per
-    block for the recorded series (the same per-block-transfer pattern
-    reference_energy_calibration.py already uses).
-
-    ``cell_hook(batch)``, if given, runs after the initial compute and after
-    every block's MD sub-step, before ``mc.synchronize`` adopts the energy --
-    e.g. ``relax_cell_volume`` for rigid-lattice SGC (``md_steps=0``) whose
-    lattice constant follows the composition. It must leave ``batch.energy``
-    evaluated at the geometry it leaves behind.
-    """
-    if n_blocks < 1:
-        raise ValueError("n_blocks must be positive")
-    if getattr(batch, "forces", None) is None:
-        raise ValueError("hybrid MC-MD requires preallocated batch.forces")
-    atoms_per_graph = batch.num_nodes // n_graphs
-    pt_fraction_series: list[list[float]] = []
-    energy_per_atom_series: list[list[float]] = []
-
-    def _record() -> None:
-        pt_fraction_series.append(_pt_fraction_per_graph(batch, pt_number, n_graphs))
-        energies = batch.energy.flatten().detach().cpu().tolist()
-        energy_per_atom_series.append([e / atoms_per_graph for e in energies])
-
-    device = batch.device
-    with hybrid.md:
-        hybrid.md.compute(batch)
-        if cell_hook is not None:
-            cell_hook(batch)
-        hybrid.mc.synchronize(batch)
-        for block_index in range(n_blocks):
-            if device.type == "cuda":
-                torch.cuda.reset_peak_memory_stats(device)
-            hybrid.run_mc_block(
-                batch
-            )  # not hybrid.mc.run: that would bypass mc_energy_only
-            hybrid.md.compute(batch)
-            hybrid.md.run(batch, n_steps=hybrid.md_steps)
-            if cell_hook is not None:
-                cell_hook(batch)
-            hybrid.mc.synchronize(batch)
-            _record()
-            if device.type == "cuda":
-                # Printed (not just logged to the throughput CSV) every block so
-                # a crash mid-run still leaves a memory trace in the .out file
-                # up to the last completed block -- the CSV row for this whole
-                # call is only written after all n_blocks finish, so it never
-                # gets written for a run that OOMs partway through.
-                # allocated/reserved (no reset) show the *residual* baseline
-                # still held after this block -- a genuine leak shows this
-                # climbing block over block; peak_reserved shows this block's
-                # transient high-water mark -- a one-off spike (e.g. an
-                # anomalously large neighbor list from a close-contact defect)
-                # shows there without moving the residual baseline.
-                print(
-                    f"[memory] block {block_index + 1}/{n_blocks}: "
-                    f"allocated={torch.cuda.memory_allocated(device) / 1024**3:.3f} GB "
-                    f"reserved={torch.cuda.memory_reserved(device) / 1024**3:.3f} GB "
-                    f"peak_reserved_this_block={torch.cuda.max_memory_reserved(device) / 1024**3:.3f} GB",
-                    flush=True,
-                )
-    return batch, pt_fraction_series, energy_per_atom_series
-
-
 def _run_campaign(
     model: UMAWrapper,
     template: Atoms,
@@ -1401,6 +610,7 @@ def _run_campaign(
     n_blocks_continuation: int,
     md_steps_per_block: int = MD_STEPS_PER_BLOCK,
     mc_step_fraction: float = MC_STEP_FRACTION,
+    mc_energy_only: bool = MC_ENERGY_ONLY,
 ) -> None:
     """Run every ready batch to completion, logging per-batch throughput.
 
@@ -1455,13 +665,14 @@ def _run_campaign(
                     device,
                     md_steps_per_block,
                     mc_step_fraction,
+                    mc_energy_only,
                 )
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
                     torch.cuda.reset_peak_memory_stats(device)
                 start = time.perf_counter()
                 result, pt_fraction_series, energy_per_atom_series = (
-                    _run_hybrid_with_observables(
+                    run_hybrid_with_observables(
                         hybrid,
                         batch,
                         n_blocks,
@@ -1494,10 +705,10 @@ def _run_campaign(
                     energy_series = [
                         block[graph_index] for block in energy_per_atom_series
                     ]
-                    composition_gate = _equilibration_gate(
+                    composition_gate = equilibration_gate(
                         composition_series, EQUILIBRATION_WINDOW_BLOCKS
                     )
-                    energy_gate = _equilibration_gate(
+                    energy_gate = equilibration_gate(
                         energy_series, EQUILIBRATION_WINDOW_BLOCKS
                     )
                     resolved = (
@@ -1573,226 +784,6 @@ def _run_campaign(
     )
 
 
-def _batch_means_se(series: list[float], n_batches: int = 5) -> float:
-    """SE of the mean of ``series`` from n_batches contiguous batch means (tolerates autocorrelation
-    that the gate's per-block standard error ignores)."""
-    n = len(series) // n_batches
-    if n < 2:
-        return float("nan")
-    means = [statistics.fmean(series[i * n : (i + 1) * n]) for i in range(n_batches)]
-    return statistics.stdev(means) / n_batches**0.5
-
-
-class NvalchemiTraceEngine:
-    """boundary_tracer engine: runs ``replicas`` independent walkers per phase -- all at the same
-    (T, dmu) in ONE batch of width 2 * replicas -- saves their final states, and reports per phase
-    the replica-mean x and E (per atom), their SEs, the composition drift between the last two
-    gate windows, and the gate verdict. Replicas of one phase start from the same state and
-    decorrelate through independent MC draws; their mean halves the variance fed to eq. (29) at
-    replicas=2, and a replica that disagrees with its partner beyond noise (``replica_split``)
-    makes the tracer reject the step. A phase's state is the list of its replicas' checkpoint
-    run_ids in ``store`` (or, for the starting walkers, one .pt path used by every replica)."""
-
-    def __init__(
-        self,
-        model,
-        template,
-        device,
-        store,
-        md_steps_per_block,
-        mc_step_fraction,
-        n_blocks,
-        label,
-        log_path,
-        replicas=1,
-        z=2.576,
-        min_jump=0.03,
-    ):
-        self.model, self.template, self.device, self.store = (
-            model,
-            template,
-            device,
-            store,
-        )
-        self.md_steps, self.mc_fraction, self.n_blocks, self.label = (
-            md_steps_per_block,
-            mc_step_fraction,
-            n_blocks,
-            label,
-        )
-        self.log_path, self.replicas, self.z, self.min_jump = (
-            log_path,
-            replicas,
-            z,
-            min_jump,
-        )
-
-    def _load(self, state: str) -> AtomicData:
-        path = Path(state)
-        if path.suffix == ".pt" and path.is_file():
-            payload = torch.load(path, map_location=self.device, weights_only=True)
-            return AtomicData.model_validate(
-                payload["state"] if "state" in payload else payload
-            ).to(self.device)
-        return self.store.load(state, device=self.device)
-
-    def _states(self, state) -> list[str]:
-        states = [state] if isinstance(state, str) else list(state)
-        if len(states) == 1:
-            states = states * self.replicas
-        if len(states) != self.replicas:
-            raise ValueError(
-                f"expected {self.replicas} replica states, got {len(states)} (was --trace-replicas changed "
-                "mid-trace? keep it fixed for one trace.json)"
-            )
-        return states
-
-    def _observe(self, xs: list[float], es: list[float]) -> dict:
-        gx = _equilibration_gate(xs, EQUILIBRATION_WINDOW_BLOCKS)
-        ge = _equilibration_gate(es, EQUILIBRATION_WINDOW_BLOCKS)
-        tail_x, tail_e = (
-            xs[-2 * EQUILIBRATION_WINDOW_BLOCKS :],
-            es[-2 * EQUILIBRATION_WINDOW_BLOCKS :],
-        )
-        return dict(
-            x=gx.get(
-                "mean_last_window", statistics.fmean(xs[-EQUILIBRATION_WINDOW_BLOCKS:])
-            ),
-            x_se=max(
-                _batch_means_se(tail_x),
-                (gx.get("combined_standard_error") or 0) / 2**0.5,
-            ),
-            E=ge.get(
-                "mean_last_window", statistics.fmean(es[-EQUILIBRATION_WINDOW_BLOCKS:])
-            ),
-            E_se=max(
-                _batch_means_se(tail_e),
-                (ge.get("combined_standard_error") or 0) / 2**0.5,
-            ),
-            drift=gx.get("difference", 0.0),
-            resolved=bool(gx.get("resolved")) and bool(ge.get("resolved")),
-        )
-
-    def _combine(self, reps: list[dict]) -> dict:
-        n = len(reps)
-        xs = [r["x"] for r in reps]
-        within = math.sqrt(sum(r["x_se"] ** 2 for r in reps)) / n
-        between = statistics.stdev(xs) / math.sqrt(n) if n > 1 else 0.0
-        e_within = math.sqrt(sum(r["E_se"] ** 2 for r in reps)) / n
-        e_between = (
-            statistics.stdev([r["E"] for r in reps]) / math.sqrt(n) if n > 1 else 0.0
-        )
-        spread = max(xs) - min(xs)
-        split_tol = max(
-            self.z * math.sqrt(2) * max(r["x_se"] for r in reps), self.min_jump
-        )
-        return dict(
-            x=statistics.fmean(xs),
-            x_se=max(within, between),
-            E=statistics.fmean(r["E"] for r in reps),
-            E_se=max(e_within, e_between),
-            drift=statistics.fmean(r["drift"] for r in reps),
-            resolved=all(r["resolved"] for r in reps),
-            x_replicas=[round(v, 5) for v in xs],
-            replica_split=bool(n > 1 and spread > split_tol),
-        )
-
-    def run(self, T, mu, state_a, state_g, tag=""):
-        """Equilibrate both phases at ``(T, mu)`` and return their observables and final states."""
-        tag = f"{self.label}.{tag}".replace("+", "")
-        obs, new_states = self._execute(
-            T, mu, tag, {"alpha": state_a, "gamma": state_g}
-        )
-        with self.log_path.open("a") as fh:
-            fh.write(
-                json.dumps(
-                    dict(tag=tag, T=T, mu=mu, alpha=obs["alpha"], gamma=obs["gamma"])
-                )
-                + "\n"
-            )
-        a, g = obs["alpha"], obs["gamma"]
-        print(
-            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} x_a={a['x']:.4f}{a['x_replicas']} x_g={g['x']:.4f}{g['x_replicas']} "
-            f"E_a={a['E']:.4f} E_g={g['E']:.4f} acc={a['acceptance']:.3f} width={a['width']} {a['wall_seconds']:.0f}s",
-            flush=True,
-        )
-        return a, g, new_states["alpha"], new_states["gamma"]
-
-    def run_one(self, T, mu, state, phase, tag=""):
-        """One phase's replicas only, for the tracer's Fig. 6 recentering sweeps (half the batch)."""
-        tag = f"{self.label}.{tag}".replace("+", "")
-        name = "alpha" if phase == "a" else "gamma"
-        obs, new_states = self._execute(T, mu, tag, {name: state})
-        o = obs[name]
-        with self.log_path.open("a") as fh:
-            fh.write(
-                json.dumps(dict(tag=tag, T=T, mu=mu, recentering=name, **{name: o}))
-                + "\n"
-            )
-        print(
-            f"[trace-run] {tag}: T={T:g} mu={mu:.5f} {name} x={o['x']:.4f}{o['x_replicas']} (recentering) "
-            f"acc={o['acceptance']:.3f} width={o['width']} {o['wall_seconds']:.0f}s",
-            flush=True,
-        )
-        return o, new_states[name]
-
-    def _execute(self, T, mu, tag, phase_states):
-        """Run ``replicas`` walkers per phase in ``phase_states`` at ``(T, mu)`` in one batch."""
-        phases = tuple(phase_states)
-        runs = tuple(
-            RunSpec(
-                run_id=f"{tag}.{phase}.r{k}",
-                temperature_k=float(T),
-                pressure_ev_per_a3=PRESSURE_EV_PER_A3,
-                chemical_potentials_ev={SPECIES[0]: 0.0, SPECIES[1]: float(mu)},
-                species=SPECIES,
-                batch_group="trace",
-                metadata={"phase": phase, "replica": k},
-            )
-            for phase in phases
-            for k in range(self.replicas)
-        )
-        parents = tuple(
-            self._load(st) for p in phases for st in self._states(phase_states[p])
-        )
-        width = len(runs)
-        hybrid, batch = make_workload(
-            self.model,
-            self.template,
-            runs,
-            parents,
-            self.device,
-            self.md_steps,
-            self.mc_fraction,
-        )
-        start = time.perf_counter()
-        result, x_series, e_series = _run_hybrid_with_observables(
-            hybrid, batch, self.n_blocks, width, SPECIES[1]
-        )
-        elapsed = time.perf_counter() - start
-        acceptance = hybrid.mc.stats.acceptance
-        per_run = []
-        for i, (run, final_state) in enumerate(zip(runs, result.to_data_list())):
-            self.store.save(run.run_id, final_state)
-            per_run.append(
-                self._observe([b[i] for b in x_series], [b[i] for b in e_series])
-            )
-        obs, new_states = {}, {}
-        for j, phase in enumerate(phases):
-            sl = slice(j * self.replicas, (j + 1) * self.replicas)
-            obs[phase] = self._combine(per_run[sl]) | dict(
-                acceptance=acceptance, wall_seconds=elapsed, width=width
-            )
-            new_states[phase] = [r.run_id for r in runs[sl]]
-        # Each workload enters a fresh CUDA stream (BaseDynamics.__enter__), stranding the previous
-        # stream's cached blocks; release them so reserved memory stays at one run's footprint.
-        del hybrid, batch, result
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
-            torch.cuda.empty_cache()
-        return obs, new_states
-
-
 def _run_trace(
     args, model, template, device, md_steps_per_block, checkpoint_dir
 ) -> None:
@@ -1828,13 +819,14 @@ def _run_trace(
         args.trace_label,
         trace_dir / "runs.jsonl",
         replicas=args.trace_replicas,
+        mc_energy_only=args.mc_energy_only,
     )
     print(
         f"[trace] {args.trace_label}: T {cfg.t0:g} -> {cfg.t_stop:g} K from dmu={cfg.mu0:.5f} eV, "
         f"{args.trace_n_blocks} blocks/run, md_steps_per_block={md_steps_per_block}, "
         f"mc_step_fraction={args.mc_step_fraction}, replicas/phase={args.trace_replicas} "
         f"(batch width {2 * args.trace_replicas}), inference_settings={args.inference_settings!r}, "
-        f"mc_energy_only={MC_ENERGY_ONLY}; trace file {trace_dir / 'trace.json'}",
+        f"mc_energy_only={args.mc_energy_only}; trace file {trace_dir / 'trace.json'}",
         flush=True,
     )
     result = BoundaryTracer(cfg, engine, trace_dir / "trace.json").run(
@@ -1850,7 +842,6 @@ def main() -> None:
     """Entry point: run one system size's cooling campaign, or its
     two-branch delta_mu-scan schedule across one or more temperatures
     (--mode delta-mu-scan), end-to-end."""
-    global MC_ENERGY_ONLY  # noqa: PLW0603 -- read by make_workload, which every run path calls
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1920,7 +911,7 @@ def main() -> None:
         help="reference_energy_calibration.py output. Rebuilds every run's "
         "chemical_potentials_ev as {Au: 0.0, Pt: delta_mu_ref_eV(T) + delta_mu_excess} "
         "at each run's own temperature, replacing the literal, uncalibrated DELTA_MU_EV "
-        "sweep. Recommended -- see module docstring 'Chemical-potential calibration'. "
+        "sweep. Recommended -- see README 'Chemical-potential calibration'. "
         "Omit to keep the old literal behavior (a warning is printed).",
     )
     parser.add_argument(
@@ -1940,8 +931,7 @@ def main() -> None:
         "steps 1-4). Fully automatic: any requested temperature missing "
         "from --reference-energies-json (or its complete absence) is "
         "calibrated in-process first, on the same GPU and the same already-"
-        "loaded model, via compute_reference_energies -- see 'Auto-"
-        "calibration' below.",
+        "loaded model, via compute_reference_energies -- see README 'Modes'.",
     )
     parser.add_argument(
         "--scan-temperatures-k",
@@ -1954,7 +944,7 @@ def main() -> None:
         "continuation children of the previous temperature's own endpoints "
         "(section 4 steps 2 and 4), UNLESS --scan-independent-temperatures "
         "is passed -- run every temperature in this ONE invocation, not as "
-        "separate script calls (see module docstring 'Modes'). Required in "
+        "separate script calls (see README 'Modes'). Required in "
         "delta-mu-scan mode.",
     )
     parser.add_argument(
@@ -2143,7 +1133,6 @@ def main() -> None:
     )
     args = parser.parse_args()
     torch._inductor.config.shape_padding = INDUCTOR_SHAPE_PADDING
-    MC_ENERGY_ONLY = args.mc_energy_only
     md_steps_per_block = (
         args.md_steps_per_block
         if args.md_steps_per_block is not None
@@ -2153,7 +1142,7 @@ def main() -> None:
         args.inference_settings, md_steps_per_block
     )
     print(
-        f"[hybrid] mc_energy_only={MC_ENERGY_ONLY} inference_settings={args.inference_settings!r}",
+        f"[hybrid] mc_energy_only={args.mc_energy_only} inference_settings={args.inference_settings!r}",
         flush=True,
     )
     if "compile=true" in args.inference_settings and args.batch_width is None:
@@ -2292,7 +1281,7 @@ def main() -> None:
                 "[delta_mu] WARNING: no --reference-energies-json given -- using the "
                 "literal, uncalibrated DELTA_MU_EV sweep (chemical_potentials_ev="
                 "{Au: 0.0, Pt: delta_mu}). This does not locate the real Au-Pt phase "
-                "boundary; see module docstring 'Chemical-potential calibration'."
+                "boundary; see README.md 'Chemical-potential calibration'."
             )
     scheduler = CampaignScheduler(campaign, FinalStateStore(checkpoint_dir))
     print(
@@ -2311,6 +1300,7 @@ def main() -> None:
             device,
             md_steps_per_block,
             args.mc_step_fraction,
+            args.mc_energy_only,
         )
     else:
         batch_width = 1
@@ -2336,6 +1326,7 @@ def main() -> None:
         n_blocks_continuation,
         md_steps_per_block,
         args.mc_step_fraction,
+        args.mc_energy_only,
     )
 
 

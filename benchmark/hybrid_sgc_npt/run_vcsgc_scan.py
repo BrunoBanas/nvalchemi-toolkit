@@ -47,7 +47,7 @@ different c0 and progress. Every ``--chunk-blocks`` blocks each walker's state g
 a resubmission continues where the last job stopped, finishing partly-run walkers first.
 
 Live equilibration gate: after every chunk, once a walker has ``min_blocks`` blocks, its
-composition AND energy series are tested with the scan's gate (``run_campaign._equilibration_gate``:
+composition AND energy series are tested with the scan's gate (``campaign_lib.equilibration_gate``:
 the means of the last two ``EQUILIBRATION_WINDOW_BLOCKS``-block windows agree within twice their
 combined standard error). A walker that passes ``--gate-passes`` consecutive checks has stopped
 evolving and is stopped (``"stopped": "equilibrated"`` in its series); one that never passes
@@ -63,7 +63,7 @@ import time
 from pathlib import Path
 
 import torch
-from run_campaign import (
+from campaign_lib import (
     BAROSTAT_TIME_FS,
     CHECKPOINT,
     CRYSTAL_STRUCTURE,
@@ -77,12 +77,12 @@ from run_campaign import (
     SPECIES,
     TASK,
     THERMOSTAT_TIME_FS,
-    _cell_volumes,
-    _equilibration_gate,
-    _npt_wrap_hooks,
-    _pt_fraction_per_graph,
-    _wrap_batch_positions,
     build_ase_structure,
+    cell_volumes,
+    equilibration_gate,
+    npt_wrap_hooks,
+    pt_fraction_per_graph,
+    wrap_batch_positions,
 )
 
 from nvalchemi.data import AtomicData, Batch
@@ -100,11 +100,13 @@ INITS = ("slab", "random", "checkpoint")
 def run_id_for(
     n_atoms: int, temperature: float, kappa: float, c0: float, init: str
 ) -> str:
+    """Return the stable run id of one walker (used for its output files)."""
     tag = {"checkpoint": "ckpt"}.get(init, init)
     return f"atoms{n_atoms}.T{temperature:g}.vcsgc.k{kappa:g}.c{c0:.3f}.{tag}"
 
 
 def load_state(path: str | Path, device) -> AtomicData:
+    """Load a ``FinalStateStore`` checkpoint (or a bare ``model_dump``) onto *device*."""
     payload = torch.load(Path(path), map_location=device, weights_only=True)
     return AtomicData.model_validate(
         payload["state"] if "state" in payload else payload
@@ -112,6 +114,7 @@ def load_state(path: str | Path, device) -> AtomicData:
 
 
 def state_composition(path: str | Path) -> float:
+    """Return the Pt fraction of a saved state."""
     data = load_state(path, "cpu")
     return float((data.atomic_numbers == SPECIES[1]).double().mean())
 
@@ -187,6 +190,7 @@ def initial_state(
 def build_hybrid(
     model, n_graphs, temperature, c0s, kappa, dmu_ref, mc_steps, md_steps, seed, device
 ):
+    """Build the VC-SGC + NPT ``HybridMCMD`` for one batch of walkers (one c0 each)."""
     temps = torch.full((n_graphs,), float(temperature), device=device)
     vc = VCSGC(
         model=model,
@@ -206,7 +210,7 @@ def build_hybrid(
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
-        hooks=_npt_wrap_hooks(),
+        hooks=npt_wrap_hooks(),
     )
     return HybridMCMD(
         mc=vc, md=npt, mc_steps=mc_steps, md_steps=md_steps, mc_energy_only=True
@@ -216,30 +220,24 @@ def build_hybrid(
 def run_chunk(hybrid: HybridMCMD, batch: Batch, n_blocks: int, n_atoms: int) -> dict:
     """``n_blocks`` hybrid blocks; per-graph c, U/atom, V/atom after each block."""
     n = batch.num_graphs
-    series = {
-        "c": [[] for _ in range(n)],
-        "u": [[] for _ in range(n)],
-        "v": [[] for _ in range(n)],
-    }
-    with hybrid.md:
-        hybrid.md.compute(batch)
-        hybrid.mc.synchronize(batch)
-        for _ in range(n_blocks):
-            hybrid.run_mc_block(batch)
-            hybrid.md.compute(batch)
-            hybrid.md.run(batch, n_steps=hybrid.md_steps)
-            hybrid.mc.synchronize(batch)
-            c = _pt_fraction_per_graph(batch, SPECIES[1], n)
-            u = (batch.energy.detach().reshape(-1).double() / n_atoms).cpu().tolist()
-            v = (_cell_volumes(batch).detach().double() / n_atoms).cpu().tolist()
-            for i in range(n):
-                series["c"][i].append(c[i])
-                series["u"][i].append(u[i])
-                series["v"][i].append(v[i])
+    series = {key: [[] for _ in range(n)] for key in ("c", "u", "v")}
+
+    def record(batch: Batch, _block: int) -> None:
+        """Append each graph's c, U/atom and V/atom after one block."""
+        c = pt_fraction_per_graph(batch, SPECIES[1], n)
+        u = (batch.energy.detach().reshape(-1).double() / n_atoms).cpu().tolist()
+        v = (cell_volumes(batch).detach().double() / n_atoms).cpu().tolist()
+        for i in range(n):
+            series["c"][i].append(c[i])
+            series["u"][i].append(u[i])
+            series["v"][i].append(v[i])
+
+    hybrid.run(batch, n_blocks=n_blocks, on_block=record)
     return series
 
 
 def resolve_width(arg: str, device) -> int:
+    """Return the batch width: an explicit integer, or a memory-based default for ``auto``."""
     if arg != "auto":
         return int(arg)
     if device.type != "cuda":
@@ -252,6 +250,7 @@ def resolve_width(arg: str, device) -> int:
 
 
 def plan_entries(args) -> list[dict]:
+    """Return the walker list from ``--plan`` or ``--c0``, with defaults filled in."""
     if args.plan:
         entries = json.loads(args.plan.read_text())
     else:
@@ -284,6 +283,7 @@ def plan_entries(args) -> list[dict]:
 
 
 def main() -> None:
+    """Run the VC-SGC-NPT walkers of one plan, resumably."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -449,12 +449,14 @@ def main() -> None:
         )
 
     def finished(w) -> bool:
+        """Whether walker *w* reached its block budget or was stopped."""
         return (
             w["series"].get("stopped") is not None
             or len(w["series"]["c"]) >= w["n_blocks"]
         )
 
     def fresh(w) -> bool:
+        """Whether walker *w* still starts from a freshly built state."""
         # Fresh-built states carry fewer fields than saved ones (e.g. MC bookkeeping), so the two
         # kinds are never mixed in one Batch.
         return len(w["series"]["c"]) == 0 and w["init"] != "checkpoint"
@@ -492,7 +494,7 @@ def main() -> None:
                     )
                 )
         batch = Batch.from_data_list(states)
-        _wrap_batch_positions(batch)
+        wrap_batch_positions(batch)
         # A new MC stream per chunk, so resumed walkers never replay an earlier stream.
         done_total = sum(len(w["series"]["c"]) for w in walkers)
         hybrid = build_hybrid(
@@ -519,8 +521,8 @@ def main() -> None:
             s["acceptance"].append(dict(blocks=len(s["c"]), acceptance=acceptance))
             n_done = len(s["c"])
             if n_done >= max(w["min_blocks"], 2 * EQUILIBRATION_WINDOW_BLOCKS):
-                gc = _equilibration_gate(s["c"], EQUILIBRATION_WINDOW_BLOCKS)
-                ge = _equilibration_gate(s["u"], EQUILIBRATION_WINDOW_BLOCKS)
+                gc = equilibration_gate(s["c"], EQUILIBRATION_WINDOW_BLOCKS)
+                ge = equilibration_gate(s["u"], EQUILIBRATION_WINDOW_BLOCKS)
                 passed = bool(gc.get("resolved")) and bool(ge.get("resolved"))
                 s.setdefault("gate", []).append(
                     dict(

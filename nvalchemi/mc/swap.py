@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from nvalchemi.data import Batch
-from nvalchemi.mc.base import BaseMonteCarlo
+from nvalchemi.mc.base import _draw_from_mask, _PairSwapMonteCarlo
 
 if TYPE_CHECKING:
     from nvalchemi.models.base import BaseModelMixin
@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["NonlocalSwap"]
 
 
-class NonlocalSwap(BaseMonteCarlo):
+class NonlocalSwap(_PairSwapMonteCarlo):
     r"""Batched canonical MC that swaps the species of two unlike atoms anywhere in a graph.
 
     Composition is fixed. A proposal draws one atom :math:`i` uniformly from
@@ -76,9 +76,6 @@ class NonlocalSwap(BaseMonteCarlo):
             Forwarded to :class:`~nvalchemi.mc.base.BaseMonteCarlo`.
         """
         super().__init__(model=model, temperature=temperature, **kwargs)
-        self._proposal_first: torch.Tensor | None = None
-        self._proposal_second: torch.Tensor | None = None
-        self._proposal_swapped: torch.Tensor | None = None
 
     def _propose(
         self,
@@ -92,58 +89,23 @@ class NonlocalSwap(BaseMonteCarlo):
         device-to-host sync stalls the next model call.
         """
         numbers = batch.atomic_numbers
-        flat = numbers.reshape(-1)
         ptr = batch.batch_ptr.to(torch.long)
         starts = ptr[:-1]
-        sizes = ptr[1:] - starts
         draws = torch.rand(
             2, batch.num_graphs, device=batch.device, generator=generator
         )
         # First atom: uniform over the graph's atoms.
-        first = starts + torch.floor(draws[0] * sizes).to(torch.long)
+        first = starts + torch.floor(draws[0] * (ptr[1:] - starts)).to(torch.long)
         first = torch.minimum(first, ptr[1:] - 1)
-        first_z = flat[first]
-        # Second atom: uniform over the graph's atoms of another species. Rank it
-        # among those atoms, then find its row as the first index whose running
-        # count of other-species atoms reaches that rank (as Kawasaki's edge draw).
+        # Second atom: uniform over the graph's atoms of another species.
         graph_of_atom = batch.batch_idx.to(torch.long)
-        other = (flat != first_z[graph_of_atom]).to(torch.long)
+        other = (numbers != numbers[first][graph_of_atom]).to(torch.long)
         counts = torch.zeros(batch.num_graphs, dtype=torch.long, device=batch.device)
         counts.index_add_(0, graph_of_atom, other)
         # A single-species graph has no legal move: drop it from this step
         # (``active`` is the sampler's own mask tensor, narrowed in place).
         active &= counts > 0
-        cumulative = torch.cumsum(other, dim=0)
-        exclusive = torch.cat((cumulative.new_zeros(1), cumulative[:-1]))
-        ranks = exclusive[starts] + torch.floor(draws[1] * counts.clamp(min=1)).to(
-            torch.long
-        )
-        second = torch.searchsorted(cumulative, ranks + 1)
+        second = _draw_from_mask(other, starts, counts, draws[1])
         # Inactive graphs draw no pair; keep their indices in range anyway.
         first = torch.where(active, first, starts)
-        second = torch.where(active, second.clamp(max=flat.numel() - 1), starts)
-        second_z = flat[second].clone()
-        first_z = flat[first].clone()
-        swap = active & (first_z != second_z)
-        with torch.no_grad():
-            flat[first[swap]] = second_z[swap]
-            flat[second[swap]] = first_z[swap]
-        self._proposal_first = first
-        self._proposal_second = second
-        self._proposal_swapped = swap
-
-    def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
-        """Swap back rejected trial pairs."""
-        if (
-            self._proposal_first is None
-            or self._proposal_second is None
-            or self._proposal_swapped is None
-        ):
-            raise RuntimeError("NonlocalSwap rejection attempted without a proposal")
-        undo = rejected & self._proposal_swapped
-        first = self._proposal_first[undo]
-        second = self._proposal_second[undo]
-        flat = batch.atomic_numbers.reshape(-1)
-        first_z = flat[first].clone()
-        flat[first] = flat[second]
-        flat[second] = first_z
+        self._apply_swap(batch, first, second, active)

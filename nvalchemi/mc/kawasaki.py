@@ -28,7 +28,7 @@ from nvalchemiops.torch.neighbors.neighbor_utils import (
 
 from nvalchemi.data import Batch
 from nvalchemi.dynamics.hooks._utils import KB_EV
-from nvalchemi.mc.base import BaseMonteCarlo, _is_batch
+from nvalchemi.mc.base import _draw_from_mask, _is_batch, _PairSwapMonteCarlo
 
 if TYPE_CHECKING:
     from nvalchemi.models.base import BaseModelMixin
@@ -112,7 +112,7 @@ def _nearest_neighbor_edges(
     return edges, counts
 
 
-class Kawasaki(BaseMonteCarlo):
+class Kawasaki(_PairSwapMonteCarlo):
     r"""Batched canonical MC with nearest-neighbour site-swap moves.
 
     Composition is fixed. A proposal draws one nearest-neighbour edge per
@@ -186,11 +186,9 @@ class Kawasaki(BaseMonteCarlo):
         self.unlike_pairs_only = unlike_pairs_only
         self._unlike_before: torch.Tensor | None = None
         self._edges: torch.Tensor | None = None
+        self._edge_graph: torch.Tensor | None = None
         self._edge_offsets: torch.Tensor | None = None
         self._graph_batch: weakref.ref[Batch] | None = None
-        self._proposal_first: torch.Tensor | None = None
-        self._proposal_second: torch.Tensor | None = None
-        self._proposal_swapped: torch.Tensor | None = None
 
     def _build_proposal_graph(self, batch: Batch) -> None:
         """(Re)build the fixed nearest-neighbour proposal graph in-place."""
@@ -203,6 +201,7 @@ class Kawasaki(BaseMonteCarlo):
         offsets = torch.zeros(counts.numel() + 1, dtype=torch.long, device=batch.device)
         offsets[1:] = torch.cumsum(counts, dim=0)
         self._edges = edges
+        self._edge_graph = batch.batch_idx[edges[:, 0]].to(torch.long)
         self._edge_offsets = offsets
         self._graph_batch = weakref.ref(batch)
 
@@ -222,23 +221,18 @@ class Kawasaki(BaseMonteCarlo):
         self._build_proposal_graph(batch)
 
     def _unlike_counts(self, batch: Batch) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return per-graph unlike-species edge counts and their running total.
-
-        The second value is the inclusive cumulative count over the
-        graph-ordered proposal edge list, which :meth:`_propose` searches to
-        turn a per-graph rank into an edge row.
+        """Return per-edge unlike-species flags and their per-graph counts.
 
         Runs twice per MC step, so it avoids ops whose output size depends on
         the data (``torch.bincount``, boolean-mask indexing): on CUDA those
         force a device-to-host sync that stalls the next model call.
         """
         edges = self._edges
-        numbers = batch.atomic_numbers.reshape(-1)
+        numbers = batch.atomic_numbers
         unlike = (numbers[edges[:, 0]] != numbers[edges[:, 1]]).to(torch.long)
-        graph_per_edge = batch.batch_idx[edges[:, 0]]
         counts = torch.zeros(batch.num_graphs, dtype=torch.long, device=numbers.device)
-        counts.index_add_(0, graph_per_edge, unlike)
-        return counts, torch.cumsum(unlike, dim=0)
+        counts.index_add_(0, self._edge_graph, unlike)
+        return unlike, counts
 
     def _propose(
         self,
@@ -251,37 +245,19 @@ class Kawasaki(BaseMonteCarlo):
         starts = self._edge_offsets[:-1]
         draws = torch.rand(batch.num_graphs, device=batch.device, generator=generator)
         if self.unlike_pairs_only:
-            counts, cumulative = self._unlike_counts(batch)
+            unlike, counts = self._unlike_counts(batch)
             self._unlike_before = counts
             # All-same-species neighbours mean no legal move: drop the graph
             # from this step's proposals and statistics (``active`` is the
             # sampler's own mask tensor, so this narrows it in place).
             active &= counts > 0
-            # Rank of the drawn unlike edge among all unlike edges, then the
-            # row holding it: the first row whose running total reaches it.
-            exclusive = torch.cat((cumulative.new_zeros(1), cumulative[:-1]))
-            ranks = exclusive[starts] + torch.floor(draws * counts.clamp(min=1)).to(
+            rows = _draw_from_mask(unlike, starts, counts, draws)
+        else:
+            self._unlike_before = None
+            rows = starts + torch.floor(draws * (self._edge_offsets[1:] - starts)).to(
                 torch.long
             )
-            rows = torch.searchsorted(cumulative, ranks + 1)
-            # Inactive graphs draw no edge; keep their row in range anyway.
-            rows = torch.where(active, rows, starts)
-        else:
-            counts = self._edge_offsets[1:] - starts
-            self._unlike_before = None
-            rows = starts + torch.floor(draws * counts).to(torch.long)
-        first = self._edges[rows, 0]
-        second = self._edges[rows, 1]
-        numbers = batch.atomic_numbers
-        first_z = numbers[first].clone()
-        second_z = numbers[second].clone()
-        swap = active & (first_z.reshape(-1) != second_z.reshape(-1))
-        with torch.no_grad():
-            numbers[first[swap]] = second_z[swap]
-            numbers[second[swap]] = first_z[swap]
-        self._proposal_first = first
-        self._proposal_second = second
-        self._proposal_swapped = swap
+        self._apply_swap(batch, self._edges[rows, 0], self._edges[rows, 1], active)
 
     def _chemical_delta(self, batch: Batch) -> torch.Tensor:
         r"""Return the Metropolis-Hastings correction for unlike-pair proposals.
@@ -296,7 +272,7 @@ class Kawasaki(BaseMonteCarlo):
         """
         if not self.unlike_pairs_only or self._unlike_before is None:
             return super()._chemical_delta(batch)
-        after, _ = self._unlike_counts(batch)
+        _, after = self._unlike_counts(batch)
         before = self._unlike_before
         dtype = batch.positions.dtype
         # A swapped unlike pair is still unlike, so n(x') > 0 whenever the
@@ -308,19 +284,3 @@ class Kawasaki(BaseMonteCarlo):
             torch.zeros(batch.num_graphs, dtype=dtype, device=batch.device),
         )
         return KB_EV * self._temperature_for(batch) * ratio
-
-    def _restore_rejected(self, batch: Batch, rejected: torch.Tensor) -> None:
-        """Swap back rejected trial pairs that were actually exchanged."""
-        if (
-            self._proposal_first is None
-            or self._proposal_second is None
-            or self._proposal_swapped is None
-        ):
-            raise RuntimeError("Kawasaki rejection attempted without a proposal")
-        undo = rejected & self._proposal_swapped
-        first = self._proposal_first[undo]
-        second = self._proposal_second[undo]
-        numbers = batch.atomic_numbers
-        first_z = numbers[first].clone()
-        numbers[first] = numbers[second]
-        numbers[second] = first_z
