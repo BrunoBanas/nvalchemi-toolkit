@@ -50,6 +50,11 @@
     unlike-species pairs are drawn, with the Metropolis-Hastings factor
     `n(x)/n(x')` over unlike-pair counts, so no evaluation is spent on a swap
     that cannot change the state.
+  - `NonlocalSwap`: fixed-composition swaps of two unlike atoms anywhere in a
+    graph (no neighbour graph), so one accepted move carries a solute across the
+    system, e.g. between a nanoparticle's core and surface. The draw (a uniform
+    atom, then a uniform atom of another species) is symmetric at fixed
+    composition, so plain Metropolis is exact.
   - Accepted moves update `atomic_masses` to the new species' mass (custom
     per-species masses are kept), so MD after MC integrates with the right mass.
   - Samplers compose with MD in a `FusedStage` (`mc + md`), each acting on its

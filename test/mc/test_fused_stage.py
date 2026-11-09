@@ -22,7 +22,7 @@ import torch
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.dynamics.base import FusedStage
 from nvalchemi.dynamics.demo import DemoDynamics
-from nvalchemi.mc import SGC
+from nvalchemi.mc import SGC, NonlocalSwap
 from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
 
@@ -71,3 +71,30 @@ def test_mc_moves_only_its_graphs_and_energies_stay_current(mu_2, mc_types) -> N
     assert sgc.stats.attempted == 6  # two MC graphs x three steps
     carried = batch.energy.reshape(-1).clone()
     torch.testing.assert_close(carried, fused.compute(batch)["energy"].reshape(-1))
+
+
+def test_mc_without_a_legal_move_leaves_the_stage_mask_alone() -> None:
+    """Narrowing the step's mask to graphs with a legal move is the sampler's own business.
+
+    A single-species graph has no swap; ``NonlocalSwap`` drops it from its
+    step, which must not clear it from the mask the ``FusedStage`` passed in.
+    """
+    batch = Batch.from_data_list(
+        [
+            AtomicData(
+                atomic_numbers=torch.tensor(numbers, dtype=torch.long),
+                positions=torch.arange(6.0).reshape(2, 3),
+            )
+            for numbers in ([1, 1], [1, 2])
+        ]
+    )
+    batch.energy = torch.zeros(batch.num_graphs, 1)
+    sampler = NonlocalSwap(
+        model=DemoModelWrapper(DemoModel()), temperature=1000.0, random_seed=7
+    )
+    mask = torch.ones(batch.num_graphs, dtype=torch.bool)
+
+    sampler._masked_pre_update(batch, mask)
+
+    assert mask.tolist() == [True, True]
+    assert sampler._active.tolist() == [False, True]

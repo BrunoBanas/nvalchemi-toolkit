@@ -268,14 +268,28 @@ away from zero, while the constraint can supply at most `2 kappa`, so without
 the calibrated reference (the same one an SGC scan is centred on) the walker
 runs to the favoured end member instead of sampling near the target.
 
-### Kawasaki: fixed composition
+### Kawasaki and NonlocalSwap: fixed composition
 
-For a fixed composition use `Kawasaki`: each step swaps the species of one
-nearest-neighbour pair per graph (by default only unlike pairs, so no move is
-wasted). The pairs come from a short-range proposal graph,
+Two canonical (fixed-composition) samplers swap species instead of
+transmuting them; neither needs a chemical potential or a reference.
+
+`Kawasaki` swaps the species of one nearest-neighbour pair per graph (by
+default only unlike pairs, so no move is wasted), so solutes move one bond at a
+time. The pairs come from a short-range proposal graph,
 `Kawasaki(model=model, temperature=1000.0, cutoff=3.4)`, built independently of
 the model's own neighbour list; call `synchronize(batch)` after positions change
 outside the sampler (e.g. after an MD block) so the graph is rebuilt.
+
+`NonlocalSwap` exchanges two unlike atoms anywhere in the graph, with no
+neighbour graph, so one accepted move can take a solute from a nanoparticle's
+core to its surface. Its draw (a uniform atom, then a uniform atom of another
+species) is symmetric at fixed composition, so plain Metropolis is exact:
+
+```python
+from nvalchemi.mc import NonlocalSwap
+
+mc = NonlocalSwap(model=model, temperature=400.0, random_seed=1)
+```
 
 ### Species, masses and fused stages
 

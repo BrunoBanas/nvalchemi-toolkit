@@ -26,3 +26,4 @@ that make them fast, see the :ref:`dynamics user guide <dynamics_simulations_gui
    SGC
    VCSGC
    Kawasaki
+   NonlocalSwap
