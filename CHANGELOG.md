@@ -4,6 +4,11 @@
 
 ### Added
 
+- Add the `nvalchemi-toolkit` agent skill under `skills/nvalchemi-toolkit/`: one
+  `SKILL.md` that scopes a request and routes to six task notes (data, models,
+  dynamics and optimization, training, generative workflows, and composition
+  and extension). It replaces the 14 skills under `.claude/skills/`, which are
+  removed from the repository.
 - `UMAWrapper.from_checkpoint(moe_layer_type=...)`: unmerged UMA backbones
   (`merge_mole=False`, as SGC / VC-SGC requires) run their mixture-of-experts
   layers through the `fairchem_cpp` `segment_mm` extension (fairchem's
@@ -20,6 +25,11 @@
   `mole_layer_counts` report the layers built. Availability is read from
   `fairchem...nn.mole.fairchem_cpp_found` (a real import): the same-named flag in
   `mole_utils` is unconditionally True in fairchem 2.22-2.24.
+
+### Fixed
+
+- The fine-tuning guide now passes `--checkpoint-index` to
+  `nvalchemi-training spec resume`, the flag the CLI accepts.
 
 ## 0.3.0
 
@@ -590,6 +600,11 @@
 
 ### Fixed
 
+- `DomainParallel.partition` now closes the model from a previous `partition`
+  before building the new one. The old model's adapter restore could otherwise
+  run after the new model had installed its own and put the stock functions back
+  over them, so a compiled run on a second system silently lost its decomposition
+  adapters.
 - AIMNet2's domain-decomposition adapters (`mol_sum` and the Coulomb heads) no
   longer break a plain forward made while a decomposed AIMNet2 model is open.
   Outside a decomposed forward they now give the stock result.
@@ -673,6 +688,11 @@
   retired on-policy frame carrying the flag, so an evicting buffer write
   chained the resident frames to one graph node and the second training step
   failed with "backward through the graph a second time".
+- **`FusedStage` step budgets** — a non-final sub-stage without a
+  `convergence_hook` is now ended by its `n_steps` alone. It was given the
+  default `fmax < 0.05` criterion before, so in
+  `FIRE2 + NVTLangevin(n_steps=...) + NVE(n_steps=...)` the NVT stage ran
+  0 steps (#238). A non-final sub-stage with neither raises a `UserWarning`.
 - `NeighborListHook` also runs at `DynamicsStage.ON_ADMISSION` and re-derives
   its neighbor width, buffers, and skin reference for the admitted systems. An
   inflight refill or pipeline receive that kept the atom and graph counts left
