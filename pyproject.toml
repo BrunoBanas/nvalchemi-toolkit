@@ -99,12 +99,12 @@ tensorboard = [
     "tensorboard",
 ]
 uma = [
-    "fairchem-core>=2.22.0",
+    "fairchem-core>=2.24.0",
     # torchtnt imports pkg_resources, which setuptools 81 removed.
     "setuptools>=70.0.0,<81",
 ]
 uma-cu12 = [
-    "fairchem-core>=2.22.0",
+    "fairchem-core>=2.24.0",
     "setuptools>=70.0.0,<81",
     "nvalchemi-toolkit-ops[torch-cu12]>=0.5.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",
@@ -112,7 +112,7 @@ uma-cu12 = [
     "cuequivariance-ops-torch-cu12>=0.8.0; sys_platform != 'darwin'",
 ]
 uma-cu13 = [
-    "fairchem-core>=2.22.0",
+    "fairchem-core>=2.24.0",
     "setuptools>=70.0.0,<81",
     "nvalchemi-toolkit-ops[torch-cu13]>=0.5.0; sys_platform != 'darwin'",
     "torch; sys_platform != 'darwin'",

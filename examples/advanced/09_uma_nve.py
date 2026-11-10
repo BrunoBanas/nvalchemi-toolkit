@@ -37,7 +37,7 @@ Key concepts demonstrated
 * Loading a UMA checkpoint and selecting a task head via
   ``UMAWrapper.from_checkpoint(..., task_name=...)``.
 * Reaching fairchem's ``torch.compile`` path through the
-  ``inference_settings`` argument (``"turbo"``).
+  ``inference_settings`` argument (``"multigpu"``).
 * Driving energy/force dynamics (NVE/NVT) and stress-coupled dynamics
   (NPT, periodic ``omat`` head) from the same wrapper.
 * Evolving a **batch** of replicas (perturbed starts) in a single shared
@@ -120,19 +120,21 @@ _GPA_TO_EV_PER_A3 = 6.241509074e-3
 #   (medium).  See ``fairchem.core.calculate.pretrained_mlip.available_models``.
 # * ``TASK`` — which task head to expose: ``omat`` (crystals), ``omol``
 #   (molecules), ``oc20``, ``odac``, ``omc``.
-# * ``INFERENCE_SETTINGS`` — ``"default"`` or ``"turbo"``.  ``"turbo"``
+# * ``INFERENCE_SETTINGS`` — ``"multigpu"`` (fairchem's former ``"turbo"``)
 #   enables fairchem's ``torch.compile`` + TF32 + MoLE merge; it is faster
 #   after a one-time compilation but assumes a **fixed atomic composition**
 #   for the whole run (true for MD) and shifts numerics slightly.
 # * ``N_REPLICAS`` — how many copies of the system to evolve **in one batch**.
 #   Replicas start from slightly perturbed positions + independent velocities,
 #   so their trajectories diverge while sharing a single batched forward pass.
+#   ``"default"`` (UMA Nitro, ``uma-s-1p2p1`` only) serves one system per
+#   call, so with ``N_REPLICAS > 1`` it falls back to ``"multigpu"``.
 
 CHECKPOINT = "uma-s-1p1"
 TASK = "omat"  # omat | omol | oc20 | odac | omc
 SYSTEM = "bcc-fe"  # bcc-fe | diamond | propane
 ENSEMBLE = "nve"  # nve | nvt | npt
-INFERENCE_SETTINGS = "turbo"  # "default" | "turbo"
+INFERENCE_SETTINGS = "multigpu"  # "multigpu" | "default" (UMA Nitro) | "batch"
 N_REPLICAS = 4
 N_STEPS = 300
 DT_FS = 0.5
@@ -272,7 +274,7 @@ print(
 # ------------------
 # ``from_checkpoint`` resolves the registered name, downloads the checkpoint
 # via HuggingFace Hub (gated — see the setup notes above), and pins the task
-# head.  ``inference_settings="turbo"`` routes through fairchem's
+# head.  ``inference_settings="multigpu"`` routes through fairchem's
 # ``torch.compile`` path.  If the checkpoint can't be loaded we exit early with
 # the setup hint, so the rest of the script needn't be guarded.
 
