@@ -173,3 +173,39 @@ def test_run_spec_is_hashable_and_consistent_with_equality() -> None:
         listed,
     }
     assert {run: 1}[same] == 1
+
+
+def test_delta_mu_scan_branches_march_from_their_own_endpoints(tmp_path) -> None:
+    """Each branch chains on its own previous step and never on the other branch."""
+    campaign = CampaignSpec.delta_mu_scan_from_endpoints(
+        [_reference("lo", -0.2), _reference("hi", 0.2)],
+        [[-0.2, 0.0, 0.2], [0.2, 0.0, -0.2]],
+        species=78,
+    )
+    by_id = campaign.by_id
+    for seed in ("lo", "hi"):
+        chain = [run for run in campaign.runs if run.run_id.startswith(f"{seed}.dmu")]
+        assert [run.parent_id for run in chain] == [seed, chain[0].run_id]
+        assert all(by_id[run.parent_id].run_id.startswith(seed) for run in chain)
+    assert [run.chemical_potentials_ev[78] for run in campaign.runs] == [
+        -0.2,
+        0.2,
+        0.0,
+        0.2,
+        0.0,
+        -0.2,
+    ]
+
+    scheduler = CampaignScheduler(campaign, FinalStateStore(tmp_path))
+    assert [run.run_id for run in scheduler.ready()] == ["lo", "hi"]
+    scheduler.complete("lo", _state(0.0))
+    assert [run.run_id for run in scheduler.ready()] == ["hi", "lo.dmu1.mu0"]
+
+
+def test_delta_mu_scan_ladder_must_start_at_its_seed() -> None:
+    with pytest.raises(ValueError, match="must start at its seed"):
+        CampaignSpec.delta_mu_scan_from_endpoints(
+            [_reference("lo", -0.2), _reference("hi", 0.2)],
+            [[0.0, 0.2], [0.2, 0.0]],
+            species=78,
+        )
