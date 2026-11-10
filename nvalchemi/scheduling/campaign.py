@@ -290,8 +290,7 @@ class CampaignSpec:
         :class:`CampaignSpec`. A seed's own ``parent_id`` is deliberately not
         checked against this method's own output: that lets a caller building
         a LARGER combined campaign (e.g. one seed continuation-chained onto a
-        different temperature's own endpoint, ``run_campaign.py``'s
-        ``_build_delta_mu_scan_schedule``) accumulate several calls' runs and
+        different temperature's own endpoint) accumulate several calls' runs and
         validate the complete graph once, in one final
         ``CampaignSpec(runs=..., name=...)``. Use
         :meth:`delta_mu_scan_from_endpoints` instead for the common
