@@ -233,7 +233,8 @@ checkpointed settings use the loop even when `moe_layer_type="dgl"` is passed
 (with a warning): fairchem cannot merge `MOLEDGL` layers (`AttributeError:
 ... merged_linear_layer`), and with checkpointing the edges are processed in
 131,072-edge chunks, past the first of which `segment_mm` fails ("Segment
-index out of bound"), i.e. above about 2,300 bulk or 3,000 nanoparticle atoms. On an A100-SXM4-80GB with `uma-s-1p2`, 500-atom Au-Pt:
+index out of bound"), i.e. above about 2,300 bulk or 3,000 nanoparticle atoms.
+On an A100-SXM4-80GB with `uma-s-1p2`, 500-atom Au-Pt:
 
 | Workload | 1 system | 4 systems |
 |---|---|---|
