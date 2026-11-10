@@ -119,9 +119,19 @@ import contextlib
 import copy
 import os
 import warnings
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, get_args
+from types import UnionType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 import torch
 from torch import nn
@@ -314,8 +324,28 @@ def _mole_layer_counts(predict_unit: Any) -> dict[str, int]:
 
 
 # Autograd-derived fairchem task properties that UMAWrapper can skip when
-# ``active_outputs`` does not ask for them (see ``_gate_derivative_heads``).
+# ``active_outputs`` does not ask for them (see ``_gated_derivatives``).
 _DERIVATIVE_PROPERTIES: frozenset[str] = frozenset({"forces", "stress", "hessian"})
+
+
+def _coerce_setting(key: str, raw: str, hint: Any) -> Any:
+    """Convert the string *raw* to the type *hint* of ``InferenceSettings.<key>``."""
+    kinds = get_args(hint) if get_origin(hint) in (Union, UnionType) else (hint,)
+    lowered = raw.lower()
+    if lowered in {"none", "null"} and type(None) in kinds:
+        return None
+    if bool in kinds and lowered in {"true", "false"}:
+        return lowered == "true"
+    for kind in (int, float):
+        if kind in kinds:
+            with contextlib.suppress(ValueError):
+                return kind(raw)
+    if torch.dtype in kinds:  # a string here can only name a dtype
+        if isinstance(dtype := getattr(torch, raw, None), torch.dtype):
+            return dtype
+    elif str in kinds:
+        return raw
+    raise ValueError(f"inference_settings {key}={raw!r} does not fit its type {hint}")
 
 
 def _resolve_inference_settings(settings: Any) -> Any:
@@ -324,14 +354,20 @@ def _resolve_inference_settings(settings: Any) -> Any:
     ``"compile=false,merge_mole=false,tf32=true"`` builds
     ``InferenceSettings(compile=False, merge_mole=False, tf32=True)``, so one
     string can name any combination -- the fairchem presets (``"default"``,
-    ``"multigpu"``, ``"batch"``) cannot express, e.g., the recommended SGC settings.
+    ``"multigpu"``, ``"batch"``) cannot express, e.g., eager unmerged inference with TF32.
     Preset names and ``InferenceSettings`` instances are returned unchanged.
+
+    Each value is converted to its field's declared type (``bool``, ``int``,
+    ``float``, ``str``, ``None`` where optional, or a ``torch.dtype`` name such
+    as ``float64``).
 
     Raises
     ------
     ValueError
-        On an item that is not ``key=value`` or a field ``InferenceSettings``
-        does not have (a typo must not be silently dropped).
+        On an item that is not ``key=value``, a field ``InferenceSettings``
+        does not have (a typo must not be silently dropped), or a value that
+        does not fit the field's type (e.g. ``compile=1`` or a set-valued
+        field, which must be given through ``InferenceSettings`` directly).
     """
     if not isinstance(settings, str) or "=" not in settings:
         return settings
@@ -339,28 +375,19 @@ def _resolve_inference_settings(settings: Any) -> Any:
         InferenceSettings,
     )
 
-    known = set(InferenceSettings.__dataclass_fields__)
+    hints = get_type_hints(InferenceSettings)
     fields: dict[str, Any] = {}
     for item in settings.split(","):
         if not item.strip():
             continue
         key, separator, raw = item.partition("=")
         key, raw = key.strip(), raw.strip()
-        if not separator or key not in known:
+        if not separator or key not in hints:
             raise ValueError(
                 f"inference_settings item {item.strip()!r} is not key=value with a field of "
-                f"InferenceSettings ({sorted(known)})"
+                f"InferenceSettings ({sorted(hints)})"
             )
-        lowered = raw.lower()
-        if lowered in {"true", "false"}:
-            fields[key] = lowered == "true"
-        elif lowered in {"none", "null"}:
-            fields[key] = None
-        else:
-            try:
-                fields[key] = int(raw)
-            except ValueError:
-                fields[key] = raw
+        fields[key] = _coerce_setting(key, raw, hints[key])
     return InferenceSettings(**fields)
 
 
@@ -1292,11 +1319,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # Snapshot before anything prunes the tables: fairchem builds them in
         # MLIPPredictUnit.__init__, so this is the full as-loaded set.
         self._derivative_tables = self._snapshot_derivative_tables()
-        self._applied_derivatives: tuple[bool, bool] | None = (
-            None
-            if self._derivative_tables is None
-            else (self._derivative_tables.forces, self._derivative_tables.stress)
-        )
         self._warned_ungated = False
 
         outputs = frozenset({"energy", "forces", "stress"})
@@ -1372,7 +1394,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             the removed ``"turbo"`` maps to ``"multigpu"``), a comma-separated ``key=value`` spec of
             ``InferenceSettings`` fields (e.g.
             ``"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"``,
-            the recommended SGC settings), or a
+            for composition-changing Monte Carlo), or a
             ``fairchem.core.units.mlip_unit.api.inference.InferenceSettings``
             instance. ``torch.compile`` is reached through this argument
             — see the module docstring's *torch.compile* section.
@@ -1927,7 +1949,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # offsets of +-ceil(cutoff * inverse plane spacing) around the positions
         # it is given, so it relies on wrapped input -- fairchem's own
         # AtomicData.from_ase wraps first. MD positions here are continuous
-        # (NPT and HybridMCMD never fold them back; WrapPeriodicHook is opt-in),
+        # (MD integrators never fold them back; WrapPeriodicHook is opt-in),
         # and once two atoms drift about a cell length apart their minimum image
         # is never generated: the interaction silently vanishes and atoms can
         # collapse onto each other. Whole-lattice-vector shifts leave energy,
@@ -2076,14 +2098,9 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         head ``regress_config`` does not switch off); the wrapper then computes
         every derivative and filters on output, as before gating existed.
 
-        The snapshot is stored on the predict unit and reused: gating prunes the
-        unit's live tables in place, so a second wrapper built on a unit an
-        earlier wrapper already gated would otherwise snapshot the pruned set
-        and never restore the missing derivatives.
+        Gating is undone after every call (see ``_gated_derivatives``), so the
+        unit is always as-loaded when another wrapper takes its snapshot.
         """
-        cached = getattr(self.predict_unit, "_nvalchemi_derivative_tables", None)
-        if cached is not None:
-            return cached
         inner = self._fairchem_model()
         tasks = getattr(inner, "_tasks", None)
         dataset_to_tasks = getattr(inner, "_dataset_to_tasks", None)
@@ -2100,7 +2117,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             for config in configs
         ):
             return None
-        tables = _DerivativeTables(
+        return _DerivativeTables(
             tasks=dict(tasks),
             dataset_to_tasks={
                 name: list(task_list) for name, task_list in dataset_to_tasks.items()
@@ -2108,62 +2125,30 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             forces=any(bool(getattr(config, "forces", False)) for config in configs),
             stress=any(bool(getattr(config, "stress", False)) for config in configs),
         )
-        self.predict_unit._nvalchemi_derivative_tables = tables
-        return tables
 
-    def _gate_derivative_heads(self) -> None:
-        """Make fairchem compute only the derivatives ``active_outputs`` asks for.
-
-        Dropping forces and stress removes the autograd backward pass entirely --
-        what a Monte Carlo step, which only reads energies, would otherwise pay
-        and discard. Stress is derived together with forces, so asking for
-        stress keeps forces on. A no-op when the request has not changed. Under
-        ``torch.compile`` each distinct setting compiles once and is then reused.
-        """
-        tables = self._derivative_tables
-        active = self.model_config.active_outputs
-        if tables is None:
-            if not {"forces", "stress"} <= set(active) and not self._warned_ungated:
-                warnings.warn(
-                    "UMAWrapper cannot skip forces/stress for this predict unit (unrecognized "
-                    "fairchem layout or direct-force checkpoint); they are computed and discarded.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                self._warned_ungated = True
-            return
-        want_stress = tables.stress and "stress" in active
-        want_forces = tables.forces and ("forces" in active or want_stress)
-        configs = self._regress_configs()
-        # Check the LIVE state, not just what was last applied: fairchem can
-        # swap model internals mid-run (fairchem 2.22's merge_mole fallback
-        # rebuilds an unmerged model after the first composition change), and
-        # the replacement comes back computing every derivative.
-        in_sync = (want_forces, want_stress) == self._applied_derivatives and all(
-            config.forces == want_forces and config.stress == want_stress
-            for config in configs
+    def _cellless_omol(self, data: AtomicData | Batch | None) -> bool:
+        """Whether *data* is an OMol molecule without a cell (no stress is returned)."""
+        return (
+            self.task_name == "omol"
+            and data is not None
+            and getattr(data, "cell", None) is None
         )
-        if in_sync:
-            unwanted = (
-                {"forces", "stress"}
-                - (  # hessians are never gated
-                    {"forces"} if want_forces else set()
-                )
-                - ({"stress"} if want_stress else set())
-            )
-            inner = self._fairchem_model()
-            live_tasks = getattr(inner, "_tasks", {})
-            if not any(
-                getattr(task, "property", None) in unwanted
-                for task in live_tasks.values()
-            ):
-                return
 
+    def _apply_derivatives(
+        self, tables: _DerivativeTables, forces: bool, stress: bool
+    ) -> None:
+        """Set every head's derivative flags and rebuild the task tables to match.
+
+        Applied to the live model each time, since fairchem can swap model
+        internals mid-run (2.22's merge_mole fallback rebuilds an unmerged
+        model after the first composition change).
+        """
+        configs = self._regress_configs()
         for config in configs:
-            config.forces = want_forces
-            config.stress = want_stress
-        produced = {"forces"} if want_forces else set()
-        if want_stress:
+            config.forces = forces
+            config.stress = stress
+        produced = {"forces"} if forces else set()
+        if stress:
             produced.add("stress")
         if any(getattr(config, "hessian", False) for config in configs):
             produced.add("hessian")  # hessians are not gated; keep their tasks
@@ -2175,14 +2160,58 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         # Rebuild both tables from the snapshot, in place: other fairchem objects
         # hold references to these same dict/list objects.
         inner = self._fairchem_model()
-        tasks, dataset_to_tasks = inner._tasks, inner._dataset_to_tasks
-        tasks.clear()
-        tasks.update({name: task for name, task in tables.tasks.items() if keep(task)})
+        live_tasks, dataset_to_tasks = inner._tasks, inner._dataset_to_tasks
+        live_tasks.clear()
+        live_tasks.update(
+            {name: task for name, task in tables.tasks.items() if keep(task)}
+        )
         for name, task_list in tables.dataset_to_tasks.items():
             dataset_to_tasks.setdefault(name, [])[:] = [
                 task for task in task_list if keep(task)
             ]
-        self._applied_derivatives = (want_forces, want_stress)
+
+    @contextlib.contextmanager
+    def _gated_derivatives(
+        self, data: AtomicData | Batch | None = None
+    ) -> Iterator[None]:
+        """Compute only the derivatives ``active_outputs`` asks for, for one call.
+
+        Dropping forces and stress removes the autograd backward pass entirely --
+        what a Monte Carlo step, which only reads energies, would otherwise pay
+        and discard. Stress is derived together with forces, so asking for
+        stress keeps forces on. The predict unit is restored to its as-loaded
+        derivatives on exit, so anything else sharing it (another wrapper, a
+        ``FAIRChemCalculator``) is unaffected. Gating and restoring only set
+        flags and rebuild two small tables, negligible next to the forward pass;
+        under ``torch.compile`` the graph sees the same gated flags every call,
+        so restoring between calls does not recompile.
+        """
+        tables = self._derivative_tables
+        active = self.model_config.active_outputs
+        if tables is None:
+            producible = {"forces", "stress"} & set(self.model_config.outputs)
+            if self._cellless_omol(data):
+                producible.discard("stress")
+            if producible - set(active) and not self._warned_ungated:
+                warnings.warn(
+                    "UMAWrapper cannot skip forces/stress for this predict unit (unrecognized "
+                    "fairchem layout or direct-force checkpoint); they are computed and discarded.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                self._warned_ungated = True
+            yield
+            return
+        want_stress = tables.stress and "stress" in active
+        want_forces = tables.forces and ("forces" in active or want_stress)
+        if (want_forces, want_stress) == (tables.forces, tables.stress):
+            yield
+            return
+        self._apply_derivatives(tables, want_forces, want_stress)
+        try:
+            yield
+        finally:
+            self._apply_derivatives(tables, tables.forces, tables.stress)
 
     # ------------------------------------------------------------------
     # forward
@@ -2211,7 +2240,7 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         Pipeline: ``adapt_input`` -> ``MLIPPredictUnit.predict`` -> ``adapt_output``.
         Derivatives absent from ``model_config.active_outputs`` are not computed:
         ``active_outputs={"energy"}`` skips the forces/stress autograd backward
-        (see ``_gate_derivative_heads``).
+        (see ``_gated_derivatives``).
         The single distribution touchpoint is ``ctx.maybe_pad_graph``, which under
         compiled domain decomposition pads the fairchem graph to stable per-rank
         shapes (a no-op single-process). The two blocks below handle fairchem's own
@@ -2234,7 +2263,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         """
         dd_ctx = current_dd_context()
         fc_data = dd_ctx.maybe_pad_graph(self.adapt_input(data, **kwargs))
-        self._gate_derivative_heads()
 
         settings = getattr(self.predict_unit, "inference_settings", None)
         first_call = not getattr(self.predict_unit, "lazy_model_intialized", True)
@@ -2262,6 +2290,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             if (first_call and compiling and self._static_compile(dd_ctx))
             else contextlib.nullcontext()
         )
-        with static_cm:
+        with static_cm, self._gated_derivatives(data):
             raw = self.predict_unit.predict(fc_data, undo_element_references=True)
         return self.adapt_output(raw, data=data)

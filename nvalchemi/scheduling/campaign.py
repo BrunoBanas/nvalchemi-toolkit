@@ -100,6 +100,28 @@ class RunSpec:
         object.__setattr__(self, "depends_on", dependencies)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
+    def __hash__(self) -> int:
+        """Hash the identity fields, so runs work in sets and as dict keys.
+
+        The generated dataclass hash would fail on the read-only mapping
+        views; ``metadata`` is left out since its values may be unhashable.
+        Equal runs still hash equally, as equality compares every field.
+        """
+        return hash(
+            (
+                self.run_id,
+                self.temperature_k,
+                tuple(sorted(self.chemical_potentials_ev.items())),
+                self.pressure_ev_per_a3,
+                self.parent_id,
+                self.depends_on,
+                self.model_key,
+                self.method_key,
+                self.species,
+                self.batch_group,
+            )
+        )
+
     @property
     def compatibility_key(self) -> tuple[str, str, tuple[int, ...], str]:
         """Return the properties that must agree within a batched runner."""
@@ -268,8 +290,7 @@ class CampaignSpec:
         :class:`CampaignSpec`. A seed's own ``parent_id`` is deliberately not
         checked against this method's own output: that lets a caller building
         a LARGER combined campaign (e.g. one seed continuation-chained onto a
-        different temperature's own endpoint, ``run_campaign.py``'s
-        ``_build_delta_mu_scan_schedule``) accumulate several calls' runs and
+        different temperature's own endpoint) accumulate several calls' runs and
         validate the complete graph once, in one final
         ``CampaignSpec(runs=..., name=...)``. Use
         :meth:`delta_mu_scan_from_endpoints` instead for the common

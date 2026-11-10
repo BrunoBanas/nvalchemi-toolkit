@@ -24,7 +24,7 @@ Markov chains.
 Install the dedicated UMA environment and authenticate with Hugging Face::
 
     UV_PROJECT_ENVIRONMENT=.venv-uma uv sync --extra uma --extra ase
-    huggingface-cli login
+    hf auth login  # or export HF_TOKEN
 
 This is a short API example, not a converged phase-diagram calculation. The
 optional CUDA pre-run selects a productive batch width for this exact model,
@@ -34,6 +34,8 @@ independently seeded replicas.
 
 from __future__ import annotations
 
+import sys
+import tempfile
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -63,7 +65,11 @@ from nvalchemi.scheduling import (
 
 CHECKPOINT = "uma-s-1p2"
 TASK = "omat"
-INFERENCE_SETTINGS = "batch"  # SGC changes atomic composition per step.
+# SGC changes the composition every step, so no MoLE merge, and no compile
+# since MD changes the geometry; energy-only MC is enabled in HybridMCMD below.
+INFERENCE_SETTINGS = (
+    "compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"
+)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # ASE crystal template. ``bulk`` supports common elemental structures such as
@@ -84,7 +90,9 @@ PRESSURE_EV_PER_A3 = 1.01325 / 1.602176634e6  # 1 atmosphere
 REFERENCE_TEMPERATURE_K = 3000.0
 COOLING_TEMPERATURES_K = (3000.0, 2800.0, 2600.0)
 REFERENCE_DELTA_MU_EV = (-0.10, 0.0, 0.10)
-CHECKPOINT_DIRECTORY = Path("11_uma_hybrid_sgc_npt_checkpoints")
+# A fresh directory per run of this example. For production use a persistent
+# path: completed runs found there are skipped, so an interrupted campaign resumes.
+CHECKPOINT_DIRECTORY = Path(tempfile.mkdtemp(prefix="uma_hybrid_sgc_npt_"))
 
 MC_STEPS_PER_BLOCK = 10
 MD_STEPS_PER_BLOCK = 20
@@ -183,18 +191,27 @@ def _make_batch(
 
 # %%
 # Build the model, then determine the batch width
-# -------------------------
+# -----------------------------------------------
+# The checkpoint is gated on Hugging Face; without access the example exits
+# early with the setup hint.
 
-model = UMAWrapper.from_checkpoint(
-    CHECKPOINT,
-    task_name=TASK,
-    device=str(DEVICE),
-    inference_settings=INFERENCE_SETTINGS,
-)
+try:
+    model = UMAWrapper.from_checkpoint(
+        CHECKPOINT,
+        task_name=TASK,
+        device=str(DEVICE),
+        inference_settings=INFERENCE_SETTINGS,
+    )
+except Exception as exc:  # noqa: BLE001
+    sys.exit(
+        f"Could not load UMA ({exc}). Install 'nvalchemi-toolkit[uma]', request "
+        "access to the gated 'facebook/UMA' repo, and authenticate via "
+        "'hf auth login' or HF_TOKEN."
+    )
 
 # %%
 # Assemble a workload factory and select a production batch width
-# -----------------------------
+# ---------------------------------------------------------------
 # The same UMA object is deliberately passed to both stages. This is required
 # by ``HybridMCMD`` so every trial energy and MD force is supplied by one model.
 
@@ -243,6 +260,7 @@ def make_workload(
             md=npt,
             mc_steps=MC_STEPS_PER_BLOCK,
             md_steps=MD_STEPS_PER_BLOCK,
+            mc_energy_only=True,
         ),
         _make_batch(runs, parent_states),
     )
@@ -327,7 +345,7 @@ elif AUTO_SELECT_BATCH_WIDTH:
 
 # %%
 # Run the dependency-aware campaign and checkpoint every final state
-# -----------------
+# ------------------------------------------------------------------
 
 while ready := campaign_scheduler.ready_batches(batch_width):
     for runs in ready:

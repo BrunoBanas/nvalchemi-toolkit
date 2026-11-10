@@ -166,9 +166,9 @@ def _endpoint_ladder(
     """Values from ``seed_value`` in toward (and including) 0.0, NON-UNIFORMLY
     spaced -- the per-branch delta_mu_excess ladder for
     ``CampaignSpec.delta_mu_scan_from_endpoints``. ``seed_value`` is the safe,
-    extreme starting point (PHASE_DIAGRAM_MANUAL.md section 4 step 1); walking
-    it toward 0.0 is section 4 step 3's "sweep outward from each endpoint,"
-    i.e. away from the safe corner and toward the transition.
+    extreme starting point; walking it toward 0.0 is the "sweep outward from
+    each endpoint" step, i.e. away from the safe corner and toward the
+    transition.
 
     Each new point is ``refine_ratio`` (default 0.5, i.e. halving) times the
     PREVIOUS point's own remaining distance to 0.0, so the absolute step size
@@ -226,8 +226,7 @@ def _build_delta_mu_scan_schedule(
     independent_temperatures: bool = False,
 ) -> tuple[CampaignSpec, tuple[RunSpec, ...]]:
     """Two-branch chemical-potential scans across one or more temperatures,
-    combined into ONE ``CampaignSpec`` (PHASE_DIAGRAM_MANUAL.md section 4,
-    all of steps 1-4).
+    combined into ONE ``CampaignSpec``.
 
     At ``temperatures_k[0]`` (the highest), two fresh A-rich/B-rich endpoints
     are built from scratch (step 1). At every next, lower temperature, new
@@ -412,10 +411,8 @@ def _load_delta_mu_ref(
     allow_unresolved: bool,
 ) -> dict[float, float]:
     """delta_mu_ref_eV per requested temperature, from
-    reference_energy_calibration.py's reference_energies.json (this file's
-    own TEMPERATURES_K, imported there as ``campaign.TEMPERATURES_K``, so the
-    default calibration grid already covers every temperature this campaign
-    needs). Raises on a missing temperature, a species mismatch, or an
+    a reference_energies.json, as written by ``compute_reference_energies``
+    (it must cover this file's TEMPERATURES_K). Raises on a missing temperature, a species mismatch, or an
     unresolved equilibration_gate (unless allow_unresolved) -- silently
     proceeding on any of those would reproduce exactly the uncalibrated-
     delta_mu problem this loader exists to fix.
@@ -434,7 +431,7 @@ def _load_delta_mu_ref(
         if entry is None:
             raise ValueError(
                 f"{reference_path} has no entry for T={t:g} K -- rerun "
-                f"reference_energy_calibration.py with --temperatures-k including {t:g}, "
+                f"the calibration with {t:g} K included, "
                 "or this campaign's TEMPERATURES_K no longer matches its calibration"
             )
         if "delta_mu_ref_eV" not in entry:
@@ -465,8 +462,7 @@ def _apply_calibrated_delta_mu(
     """Replace every run's literal chemical_potentials_ev with
     {Au: 0.0, Pt: delta_mu_ref_by_t[T] + delta_mu_excess}, using each run's
     OWN temperature_k -- not just the 3000 K reference row's -- since
-    delta_mu_ref(T) genuinely varies with T (phase_diagram_guide.md section
-    3). delta_mu_excess is recovered from each run's
+    delta_mu_ref(T) genuinely varies with T. delta_mu_excess is recovered from each run's
     metadata["delta_mu_ev"] -- the DELTA_MU_EV column identity that
     _build_campaign already carries unchanged through every reference and
     continuation-child row (``dataclasses.replace`` only overrides the
@@ -908,7 +904,8 @@ def main() -> None:
         "--reference-energies-json",
         type=Path,
         default=None,
-        help="reference_energy_calibration.py output. Rebuilds every run's "
+        help="reference_energies.json (e.g. auto_reference_energies.json from "
+        "compute_reference_energies). Rebuilds every run's "
         "chemical_potentials_ev as {Au: 0.0, Pt: delta_mu_ref_eV(T) + delta_mu_excess} "
         "at each run's own temperature, replacing the literal, uncalibrated DELTA_MU_EV "
         "sweep. Recommended -- see README 'Chemical-potential calibration'. "
@@ -927,8 +924,7 @@ def main() -> None:
         help="'cooling' (default): the existing 3000->1600 K, fixed-delta_mu "
         "campaign. 'delta-mu-scan': a two-branch (A-rich/B-rich) "
         "delta_mu_excess continuation across one or more "
-        "--scan-temperatures-k (PHASE_DIAGRAM_MANUAL.md section 4, all of "
-        "steps 1-4). Fully automatic: any requested temperature missing "
+        "--scan-temperatures-k. Fully automatic: any requested temperature missing "
         "from --reference-energies-json (or its complete absence) is "
         "calibrated in-process first, on the same GPU and the same already-"
         "loaded model, via compute_reference_energies -- see README 'Modes'.",
@@ -1098,16 +1094,15 @@ def main() -> None:
         type=int,
         default=1,
         choices=(1, 2),
-        help="independent walkers per phase; batch width = 2 x replicas (GPU_MEMORY_GUIDE.md: 2-4 "
-        "for the energy-only SGC spec). Keep fixed for one trace.json",
+        help="independent walkers per phase; batch width = 2 x replicas (2-4 "
+        "for the energy-only SGC spec; see the nvalchemi-uma-submission skill). Keep fixed for one trace.json",
     )
     parser.add_argument(
         "--calibration-n-blocks",
         type=int,
         default=100,
         help="--mode delta-mu-scan only, auto-calibration: MD blocks for each "
-        "missing temperature's pure-Au/pure-Pt NPT run. Default 100 (matches "
-        "reference_energy_calibration.py's own default).",
+        "missing temperature's pure-Au/pure-Pt NPT run. Default 100.",
     )
     parser.add_argument(
         "--calibration-md-steps-per-block",
@@ -1122,7 +1117,7 @@ def main() -> None:
         type=int,
         default=25,
         help="--mode delta-mu-scan only, auto-calibration: equilibration-gate "
-        "window, PHASE_DIAGRAM_MANUAL.md section 7. Default 25.",
+        "window. Default 25.",
     )
     parser.add_argument(
         "--calibration-velocity-seed",

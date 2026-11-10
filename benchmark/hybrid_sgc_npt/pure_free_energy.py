@@ -79,7 +79,7 @@ from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.models.uma import UMAWrapper
 
 # Pure-element runs have one fixed composition per task, so MoLE merging is valid and ~2x
-# faster for NPT (GPU_MEMORY_GUIDE.md / nvalchemi-uma-submission); merged and unmerged energies
+# faster for NPT (see the nvalchemi-uma-submission skill); merged and unmerged energies
 # agree to ueV/atom. Compile stays off: NPT changes the edge count every step.
 DEFAULT_SETTINGS = (
     "compile=false,merge_mole=true,tf32=true,activation_checkpointing=false"

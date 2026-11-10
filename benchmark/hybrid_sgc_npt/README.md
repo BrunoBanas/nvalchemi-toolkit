@@ -44,18 +44,18 @@ eV/atom on this UMA checkpoint, large enough to swamp the +-1.0 eV
 `delta_mu` (a scouting run at `delta_mu=0.0` showed exactly this
 failure).
 
-Pass `--reference-energies-json <reference_energy_calibration.py output>`
-(recommended; `--mode delta-mu-scan` can also calibrate the reference
-in-process, see `compute_reference_energies` in `campaign_lib.py`) to fix this: every
-run's `chemical_potentials_ev` is rebuilt as `{Au: 0.0, Pt:
-reference[T]["delta_mu_ref_eV"] + delta_mu_excess}` at that run's own
-temperature, with `DELTA_MU_EV`'s per-column value reinterpreted as
+Pass `--reference-energies-json <reference_energies.json>` (recommended; `--mode
+delta-mu-scan` calibrates the reference in-process and writes
+`auto_reference_energies.json`, see `compute_reference_energies` in
+`campaign_lib.py`) to fix this: every run's `chemical_potentials_ev` is rebuilt
+as `{Au: 0.0, Pt: reference[T]["delta_mu_ref_eV"] + delta_mu_excess}` at that
+run's own temperature, with `DELTA_MU_EV`'s per-column value reinterpreted as
 `delta_mu_excess`. `REFERENCE_ENERGIES_JSON` (env var) plumbs this through
-`submit_campaign.slurm`; `ALLOW_UNRESOLVED_REFERENCE=1` bypasses an
-unresolved `equilibration_gate` (not recommended). Omitting it keeps the
-old literal, uncalibrated behavior (a warning is printed at startup) — fine
-for a pure throughput/memory benchmark, not for drawing conclusions about
-the real Au-Pt phase boundary.
+`submit_campaign.slurm`; `ALLOW_UNRESOLVED_REFERENCE=1` bypasses an unresolved
+`equilibration_gate` (not recommended). Omitting it keeps the old literal,
+uncalibrated behavior (a warning is printed at startup) — fine for a pure
+throughput/memory benchmark, not for drawing conclusions about the real Au-Pt
+phase boundary.
 
 In `--mode delta-mu-scan` the file is optional: temperatures it lacks are
 calibrated in-process (pure Au and pure Pt NPT on the already-loaded model),
@@ -148,7 +148,7 @@ uv run python benchmark/hybrid_sgc_npt/run_campaign.py \
     --checkpoint-root benchmark/hybrid_sgc_npt/checkpoints \
     --device cuda \
     --reference-energies-json \
-        /path/to/reference_energy_calibration/<job_id>/run/reference_energies.json
+        /path/to/auto_reference_energies.json
 ```
 
 Drop the `--reference-energies-json` line for the old literal, uncalibrated

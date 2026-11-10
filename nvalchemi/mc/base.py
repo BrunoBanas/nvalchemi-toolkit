@@ -121,8 +121,8 @@ class BaseMonteCarlo(BaseDynamics):
 
     Atomic masses always follow the species. Every accepted move that changes
     an atom's type also sets that atom's ``atomic_masses`` entry to the mass of
-    its new species, so any dynamics run afterwards -- in ``HybridMCMD`` or a
-    hand-written MC/MD loop -- integrates each atom with the right mass. The
+    its new species, so any dynamics run afterwards (e.g. alternating MC and
+    MD blocks) integrates each atom with the right mass. The
     per-species masses are taken from the batch the first time the sampler sees
     it (so custom masses, e.g. a deuterium mass for H, are kept and move with
     the species); a species absent from that batch uses the periodic-table mass.
@@ -259,22 +259,26 @@ class BaseMonteCarlo(BaseDynamics):
         elif accepted.shape != (batch.num_graphs, 1):
             raise ValueError("batch.mc_accepted must have shape [num_graphs, 1]")
 
-    def _model_energy(self, batch: Batch) -> torch.Tensor:
+    def _model_energy(
+        self, batch: Batch, active_graph_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """Evaluate the model and return its one energy value per graph."""
-        outputs = self.compute(batch)
+        outputs = self.compute(batch, active_graph_mask)
         energy = outputs["energy"]
         if energy.numel() != batch.num_graphs:
             raise ValueError("Monte Carlo requires exactly one energy per graph")
         return energy.detach().reshape(batch.num_graphs)
 
-    def _initialize_energy(self, batch: Batch) -> None:
+    def _initialize_energy(
+        self, batch: Batch, active_graph_mask: torch.Tensor | None = None
+    ) -> None:
         """Evaluate the accepted starting configuration once."""
         if not _is_batch(self._validated_batch, batch):
             self._validate_batch(batch)
             self._validated_batch = weakref.ref(batch)
-        self._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch)
-        self._energy = self._model_energy(batch)
-        self._call_hooks(DynamicsStage.AFTER_COMPUTE, batch)
+        self._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch, active_graph_mask)
+        self._energy = self._model_energy(batch, active_graph_mask)
+        self._call_hooks(DynamicsStage.AFTER_COMPUTE, batch, active_graph_mask)
         self._energy_batch = weakref.ref(batch)
 
     def synchronize(self, batch: Batch) -> None:
@@ -455,27 +459,45 @@ class BaseMonteCarlo(BaseDynamics):
             self.post_update(batch)
 
     def step(self, batch: Batch) -> tuple[Batch, torch.Tensor | None]:
-        """Run one complete, hook-aware MC proposal and acceptance step."""
+        """Run one complete, hook-aware MC proposal and acceptance step.
+
+        Follows the :meth:`BaseDynamics.step` hook lifecycle (admission, the
+        per-step stages with the step's active-graph mask, convergence and
+        graduation); the first step on a batch evaluates its accepted energy
+        in place of force priming.
+        """
         self._ensure_state_initialized(batch)
+        self._ensure_admission_initialized(batch)
         self._ensure_observables(batch)
-        self._call_hooks(DynamicsStage.BEFORE_STEP, batch)
+        mask = self.active_graph_mask(batch, self.exit_status)
+        self._call_hooks(DynamicsStage.BEFORE_STEP, batch, mask)
         with self._stream_scope(batch.device):
             if self._energy is None or not _is_batch(self._energy_batch, batch):
-                self._initialize_energy(batch)
-            self._call_hooks(DynamicsStage.BEFORE_PRE_UPDATE, batch)
+                self._initialize_energy(batch, mask)
+            self._call_hooks(DynamicsStage.BEFORE_PRE_UPDATE, batch, mask)
             self.pre_update(batch)
-            self._call_hooks(DynamicsStage.AFTER_PRE_UPDATE, batch)
-            self._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch)
-            self._model_energy(batch)
-            self._call_hooks(DynamicsStage.AFTER_COMPUTE, batch)
-            self._call_hooks(DynamicsStage.BEFORE_POST_UPDATE, batch)
+            self._call_hooks(DynamicsStage.AFTER_PRE_UPDATE, batch, mask)
+            self._call_hooks(DynamicsStage.BEFORE_COMPUTE, batch, mask)
+            self._model_energy(batch, mask)
+            self._call_hooks(DynamicsStage.AFTER_COMPUTE, batch, mask)
+            self._call_hooks(DynamicsStage.BEFORE_POST_UPDATE, batch, mask)
             self.post_update(batch)
-            self._call_hooks(DynamicsStage.AFTER_POST_UPDATE, batch)
-        self._call_hooks(DynamicsStage.AFTER_STEP, batch)
+            self._call_hooks(DynamicsStage.AFTER_POST_UPDATE, batch, mask)
+        self._call_hooks(DynamicsStage.AFTER_STEP, batch, mask)
         converged = self._check_convergence(batch)
         self._last_converged = converged
         if converged is not None:
-            self._call_hooks(DynamicsStage.ON_CONVERGE, batch)
+            self._call_hooks(DynamicsStage.ON_CONVERGE, batch, mask)
+        # Dispatched whenever a hook listens: gating on the mask would host-sync.
+        if mask is not None and self._has_hooks_for_stage(DynamicsStage.ON_GRADUATE):
+            still_active = self.active_graph_mask(batch, self.exit_status)
+            self._call_hooks(
+                DynamicsStage.ON_GRADUATE,
+                batch,
+                mask,
+                ignore_frequency=True,
+                graduated_mask=mask & ~still_active,
+            )
         self.step_count += 1
         return batch, converged
 

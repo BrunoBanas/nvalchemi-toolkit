@@ -635,6 +635,21 @@
 
 ### Fixed
 
+- `UMAWrapper` derivative gating left a shared predict unit pruned after an
+  energy-only call, so a `FAIRChemCalculator` or a second wrapper on the same
+  unit silently lost forces and stress. Gating now wraps each `predict()` call
+  and restores the as-loaded flags and task tables on exit (also on error),
+  re-applied to the live model so a mid-run fairchem rebuild is still gated.
+  `key=value` inference settings are converted to each field's declared type
+  and reject values that do not fit.
+- `RunSpec` is hashable (identity fields; `metadata` excluded), so runs work in
+  sets and as dict keys; the generated hash failed on its mapping views.
+- Monte Carlo samplers follow the status-aware dynamics hook lifecycle:
+  admission once, the step's active-graph mask passed to hooks and `compute`,
+  and `ON_GRADUATE` dispatch, as in `BaseDynamics.step`.
+- `examples/advanced/17_uma_hybrid_sgc_npt.py` exits with a setup hint when the
+  gated UMA checkpoint is unavailable, uses the recommended SGC settings with
+  energy-only MC, and writes checkpoints to a fresh temporary directory.
 - `HybridMCMD` evaluated the model twice at the start of every MD block: an
   explicit `md.compute` followed by `md.run`, which primes forces itself since
   the dynamics hook-order fix (#182). One evaluation per block is saved

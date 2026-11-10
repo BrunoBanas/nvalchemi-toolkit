@@ -129,9 +129,7 @@ DT_FS = 3.0
 THERMOSTAT_TIME_FS = 100.0
 BAROSTAT_TIME_FS = 1000.0
 SEED = 20260827
-EQUILIBRATION_WINDOW_BLOCKS = (
-    25  # equilibration_gate check interval, PHASE_DIAGRAM_MANUAL.md section 7.
-)
+EQUILIBRATION_WINDOW_BLOCKS = 25  # equilibration_gate check interval.
 KB_EV = 8.617333262e-5  # Boltzmann constant, eV/K.
 
 
@@ -386,7 +384,7 @@ def pure_element_state(
     device: torch.device,
 ) -> AtomicData:
     """One pure-element ``AtomicData`` with a Maxwell-Boltzmann velocity draw
-    at ``temperature_k``. Adapted from reference_energy_calibration.py."""
+    at ``temperature_k``."""
     data = AtomicData.from_atoms(template, device=device)
     n = data.num_nodes
     data.atomic_masses = None
@@ -423,7 +421,7 @@ def compute_reference_energies(
     device: torch.device,
 ) -> dict:
     """Pure Au/Pt NPT reference-energy calibration, in-process, on an
-    ALREADY-LOADED model -- PHASE_DIAGRAM_MANUAL.md section 6.2's
+    ALREADY-LOADED model -- the reference
     ``delta_mu_ref(T) = g_Pt(T) - g_Au(T)``, computed at every requested
     temperature. This is what lets ``--mode delta-mu-scan`` run completely
     automatically on a single GPU: no second checkpoint load, no separate
@@ -534,7 +532,7 @@ def compute_reference_energies(
             t_entry[s1]["energy_eV_per_atom"] - t_entry[s0]["energy_eV_per_atom"]
         )
         t_entry["delta_mu_ref_definition"] = (
-            f"mu({s1}) - mu({s0}), per PHASE_DIAGRAM_MANUAL.md section 6.2"
+            f"mu({s1}) - mu({s0}) = g_{s1}(T) - g_{s0}(T)"
         )
 
     return {
@@ -563,12 +561,10 @@ def pt_fraction_per_graph(batch: Batch, pt_number: int, n_graphs: int) -> list[f
 
 
 def equilibration_gate(series: list[float], window: int) -> dict:
-    """PHASE_DIAGRAM_MANUAL.md section 7's live gate, one-shot: compare the
-    last two `window`-block windows' means against twice their combined
-    standard error. A single check run once at the end of a fixed-length run
-    -- NOT that section's full three-consecutive-checks protocol. Identical
-    to reference_energy_calibration.py's helper of the same name (different
-    repo, no shared import path).
+    """One-shot equilibration gate: compare the last two `window`-block
+    windows' means against twice their combined standard error. A single
+    check run once at the end of a fixed-length run, not a full
+    three-consecutive-checks promotion protocol.
     """
     if len(series) < 2 * window:
         return {
