@@ -970,6 +970,28 @@ class TestInferenceSettingsSpec:
         with pytest.raises(ValueError, match="compyle"):
             _resolve_inference_settings("compyle=false")
 
+    def test_values_take_their_field_types(self):
+        settings = _resolve_inference_settings(
+            "base_precision_dtype=float64,edge_chunk_size=512,execution_mode=general,max_atoms=none"
+        )
+        assert settings.base_precision_dtype is torch.float64
+        assert settings.edge_chunk_size == 512
+        assert settings.execution_mode == "general"
+        assert settings.max_atoms is None
+
+    @pytest.mark.parametrize(
+        "spec",
+        [
+            "compile=1",
+            "edge_chunk_size=true",
+            "base_precision_dtype=float7",
+            "predict_untrained_forces=x",
+        ],
+    )
+    def test_value_that_does_not_fit_the_field_is_rejected(self, spec):
+        with pytest.raises(ValueError, match="does not fit"):
+            _resolve_inference_settings(spec)
+
 
 class MOLE(nn.Module):
     """Stand-in named like fairchem's pure-PyTorch MoLE layer (counted by class name)."""
@@ -1248,7 +1270,7 @@ class TestDerivativeGating:
         assert pu.seen[-1] == (False, False, ["omat_energy"])
 
     def test_wrapper_built_after_another_gated_the_unit_restores_derivatives(self):
-        """A second wrapper on an already-pruned unit still sees the as-loaded tables."""
+        """A wrapper built after an energy-only one ran still sees the as-loaded tables."""
         pu = _GateablePredictUnit()
         batch = Batch.from_data_list([_make_periodic_cu()])
         energy_only = UMAWrapper(pu, task_name="omat")
@@ -1260,6 +1282,42 @@ class TestDerivativeGating:
             True,
             ["omat_energy", "omat_forces", "omat_stress"],
         )
+
+    def test_unit_is_as_loaded_after_an_energy_only_call(self):
+        """A calculator sharing the unit is not left without forces/stress."""
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        wrapper(Batch.from_data_list([_make_periodic_cu()]))
+
+        assert pu.seen[-1] == (False, False, ["omat_energy"])
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+        assert sorted(pu.model.module._tasks) == [
+            "omat_energy",
+            "omat_forces",
+            "omat_stress",
+        ]
+        assert len(pu.dataset_to_tasks["omat"]) == 3
+
+    def test_unit_is_restored_when_predict_raises(self):
+        pu = _GateablePredictUnit()
+        wrapper = UMAWrapper(pu, task_name="omat")
+        wrapper.model_config.active_outputs = {"energy"}
+        with (
+            patch.object(pu, "predict", side_effect=RuntimeError("boom")),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            wrapper(Batch.from_data_list([_make_periodic_cu()]))
+        assert (pu.regress.forces, pu.regress.stress) == (True, True)
+
+    def test_unrecognised_layout_no_warning_when_all_producible_outputs_requested(
+        self, mock_omol
+    ):
+        """A cellless omol molecule returns no stress: energy + forces discards nothing."""
+        mock_omol.model_config.active_outputs = {"energy", "forces"}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            mock_omol(Batch.from_data_list([_make_propane()]))
 
     def test_unrecognised_layout_warns_once_and_computes_everything(self, mock_omat):
         mock_omat.model_config.active_outputs = {"energy"}
