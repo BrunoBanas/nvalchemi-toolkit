@@ -58,7 +58,10 @@
   - Accepted moves update `atomic_masses` to the new species' mass (custom
     per-species masses are kept), so MD after MC integrates with the right mass.
   - Samplers compose with MD in a `FusedStage` (`mc + md`), each acting on its
-    own graphs within one shared forward pass.
+    own graphs within one shared forward pass. A graph leaving MC after a
+    rejected trial is re-primed before its first MD update; after an accepted
+    trial its forces carry over. Sub-stages flag such graphs through
+    `BaseDynamics._stale_on_exit`.
 - Add `GroupLayout` and `Batch.group_layout` for treating contiguous graphs as
   logical groups, with graph/node mappings, group cardinalities, reductions,
   broadcasts, cache invalidation, and grouped-batch append support.

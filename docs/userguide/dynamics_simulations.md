@@ -298,9 +298,11 @@ move changes, so MD run afterwards always integrates with the current species'
 mass. MC samplers also compose with MD in a `FusedStage` (`mc + md`), which
 runs MC on some graphs and MD on others, selected by `status`, sharing one
 forward pass per step. MC takes its acceptance baseline from the energy on the
-batch, so a graph that migrates into the MC stage needs no extra call; one
-migrating out of it carries the forces of its last (possibly rejected) trial
-into its first MD step.
+batch, so a graph that migrates into the MC stage needs no extra call. A graph
+migrating out of it after an accepted trial carries that trial's energy and
+forces, which describe its current state, into MD. After a rejected trial the
+carried forces describe the undone configuration, so the graph sits out one MD
+update while the shared forward pass re-primes it (no extra model call).
 
 ## Writing your own dynamics
 

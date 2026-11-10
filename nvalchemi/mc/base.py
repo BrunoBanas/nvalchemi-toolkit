@@ -384,6 +384,20 @@ class BaseMonteCarlo(BaseDynamics):
         with torch.no_grad():
             self._propose(batch, self._ensure_generator(batch), self._active)
 
+    def _stale_on_exit(self, batch: Batch) -> torch.Tensor | None:
+        """Return the graphs whose last trial was rejected.
+
+        The shared compute evaluated the trial; a rejection restores the species
+        and the energy but not the forces or stress, which still describe the
+        undone configuration. An accepted trial is the current state, so its
+        outputs carry over. A :class:`~nvalchemi.dynamics.base.FusedStage`
+        re-primes the rejected graphs as they leave for another sub-stage.
+        """
+        accepted = getattr(batch, "mc_accepted", None)
+        if accepted is None:
+            return None
+        return ~accepted.view(-1).bool()
+
     def _masked_post_update(self, batch: Batch, mask: torch.Tensor) -> None:
         """Accept or restore the :meth:`_masked_pre_update` proposals.
 

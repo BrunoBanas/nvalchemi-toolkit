@@ -73,6 +73,47 @@ def test_mc_moves_only_its_graphs_and_energies_stay_current(mu_2, mc_types) -> N
     torch.testing.assert_close(carried, fused.compute(batch)["energy"].reshape(-1))
 
 
+@pytest.mark.parametrize(("mu_2", "accepted"), [(-1.0e6, False), (1.0e6, True)])
+def test_graphs_leaving_mc_use_forces_of_their_current_state(mu_2, accepted) -> None:
+    """A rejected trial's forces are not carried into MD; an accepted one's are.
+
+    With ``n_steps=1`` the MC graphs make one trial, then migrate to MD. After a
+    rejection they skip one MD update while the shared compute re-primes them;
+    after an acceptance the trial forces describe the current state and MD
+    integrates with them straight away.
+    """
+    model = DemoModelWrapper(DemoModel())
+    sgc = SGC(
+        model=model,
+        temperature=1000.0,
+        species=[1, 2],
+        chemical_potentials={1: 0.0, 2: mu_2},
+        random_seed=7,
+        n_steps=1,
+    )
+    fused = sgc + DemoDynamics(model=model, n_steps=100, dt=1.0)
+    batch = _batch()
+
+    fused.step(batch)  # one MC trial on graphs 0 and 1, then migration to MD
+
+    assert batch.status.view(-1).tolist() == [1, 1, 1, 1]
+    assert batch.mc_accepted.view(-1)[:2].tolist() == [accepted, accepted]
+    assert batch.reprime_pending.view(-1)[:2].tolist() == [not accepted] * 2
+    carried = batch.forces[:2].clone()
+    current = model(batch.clone())["forces"][:2].detach()
+    # The rejected trial's forces belong to the undone species.
+    assert torch.allclose(carried, current) is accepted
+
+    positions = batch.positions[:2].clone()
+    fused.step(batch)
+
+    # Re-primed graphs sit out one update; accepted ones are integrated at once.
+    assert torch.equal(batch.positions[:2], positions) is not accepted
+    torch.testing.assert_close(
+        batch.forces[:2], model(batch.clone())["forces"][:2].detach()
+    )
+
+
 def test_mc_without_a_legal_move_leaves_the_stage_mask_alone() -> None:
     """Narrowing the step's mask to graphs with a legal move is the sampler's own business.
 
