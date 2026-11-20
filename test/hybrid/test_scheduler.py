@@ -202,3 +202,19 @@ def test_before_md_block_runs_after_mc_and_before_each_md_force_call() -> None:
     assert all(names[i + 1] == "md.compute" for i in prepares)
     assert events[prepares[0]][1] == 1  # before any MC move
     assert events[prepares[1]][1] == 2  # after the first MC block transmuted 1 -> 2
+
+
+def test_zero_md_steps_runs_mc_only() -> None:
+    """md_steps=0 is MC only: run() must not hand BaseDynamics.run a zero step count."""
+    from nvalchemi.dynamics.integrators.nvt_langevin import NVTLangevin
+    from nvalchemi.mc import NonlocalSwap
+    from test.mc.conftest import default_model, tether_batch
+
+    model = default_model()
+    batch = tether_batch(model, [2, 1, 1], 2)
+    mc = NonlocalSwap(model, 1000.0)
+    md = NVTLangevin(model, dt=1.0, temperature=1000.0, friction=0.01)
+    before = batch.positions.clone()
+    HybridMCMD(mc=mc, md=md, mc_steps=3, md_steps=0).run(batch, n_blocks=2)
+    assert mc.stats.attempted == 12  # 2 graphs x 3 trials x 2 blocks
+    assert torch.equal(batch.positions, before)

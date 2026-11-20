@@ -156,6 +156,7 @@ class HybridMCMD:
                 self.run_mc_block(batch)
                 self.prepare_md_block(batch)
                 self.md.compute(batch)
-                self.md.run(batch, n_steps=self.md_steps)
+                if self.md_steps:  # md_steps=0 is MC only; BaseDynamics.run rejects 0
+                    self.md.run(batch, n_steps=self.md_steps)
                 self.mc.synchronize(batch)
         return batch

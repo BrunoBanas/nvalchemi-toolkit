@@ -25,6 +25,7 @@ from nvalchemi.hybrid.batching import (
     WalkerAssignment,
 )
 from nvalchemi.hybrid.scheduler import HybridMCMD
+from nvalchemi.hybrid.tempering import ParallelTemperingMCMD
 
 __all__ = [
     "BatchMemoryEstimate",
@@ -33,5 +34,6 @@ __all__ = [
     "RunAssignment",
     "SimulationBatchPlanner",
     "HybridMCMD",
+    "ParallelTemperingMCMD",
     "WalkerAssignment",
 ]

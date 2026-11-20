@@ -17,16 +17,25 @@
 from __future__ import annotations
 
 from nvalchemi.mc.base import BaseMonteCarlo, MonteCarloStats
+from nvalchemi.mc.displacement import CompositeMC, Displacement
+from nvalchemi.mc.force_bias import ForceBiasMC
 from nvalchemi.mc.kawasaki import Kawasaki
+from nvalchemi.mc.ncmc import NCMCSwap
+from nvalchemi.mc.relaxed_swap import RelaxedSwap
 from nvalchemi.mc.sgc import SGC
 from nvalchemi.mc.swap import NonlocalSwap
 from nvalchemi.mc.vcsgc import VCSGC
 
 __all__ = [
     "BaseMonteCarlo",
+    "CompositeMC",
+    "Displacement",
+    "ForceBiasMC",
     "Kawasaki",
     "MonteCarloStats",
+    "NCMCSwap",
     "NonlocalSwap",
+    "RelaxedSwap",
     "SGC",
     "VCSGC",
 ]

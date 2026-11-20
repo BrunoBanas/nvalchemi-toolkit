@@ -4,6 +4,19 @@
 
 ### Added
 
+- MC method variants for equilibration-cost comparisons against hybrid MC-MD:
+  `nvalchemi.mc.Displacement` (off-lattice Metropolis, single-atom or collective
+  moves) and `CompositeMC` (mix move types per step, e.g. displacements +
+  `NonlocalSwap` for MC without MD); `ForceBiasMC` (collective force-bias MC:
+  tfMC/uniform acceptance, or exact with `metropolize=True`; a drop-in for the MD
+  stage of `HybridMCMD`); `RelaxedSwap` (swaps accepted on FIRE-relaxed local
+  energies -- fast but not Boltzmann); `NCMCSwap` (nonequilibrium candidate MC:
+  species switched alchemically over a short velocity-Verlet trajectory, exact at
+  any time step); and `nvalchemi.hybrid.ParallelTemperingMCMD` (temperature replica
+  exchange between hybrid blocks, configurations move between fixed-temperature
+  rows). Exact samplers are tested against the closed-form canonical distribution
+  of an analytic tether model (`test/mc/conftest.py`).
+
 - `UMAWrapper.from_checkpoint(moe_layer_type=...)`: unmerged UMA backbones
   (`merge_mole=False`, as SGC / VC-SGC requires) run their mixture-of-experts
   layers through the `fairchem_cpp` `segment_mm` extension (fairchem's
@@ -598,6 +611,8 @@
 
 ### Fixed
 
+- `HybridMCMD.run` with `md_steps=0` (MC only) no longer calls
+  `BaseDynamics.run(n_steps=0)`, which raises.
 - Enable periodic stress outputs for `UMAWrapper` with `task_name="omol"`,
   convert stress to the configured base precision, and preserve dynamic
   compilation when graph padding is inactive. Cell-less OMol inputs remain
