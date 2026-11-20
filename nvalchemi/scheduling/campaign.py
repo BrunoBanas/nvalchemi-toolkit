@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -98,6 +100,28 @@ class RunSpec:
         object.__setattr__(self, "depends_on", dependencies)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
+    def __hash__(self) -> int:
+        """Hash the identity fields, so runs work in sets and as dict keys.
+
+        The generated dataclass hash would fail on the read-only mapping
+        views; ``metadata`` is left out since its values may be unhashable.
+        Equal runs still hash equally, as equality compares every field.
+        """
+        return hash(
+            (
+                self.run_id,
+                self.temperature_k,
+                tuple(sorted(self.chemical_potentials_ev.items())),
+                self.pressure_ev_per_a3,
+                self.parent_id,
+                self.depends_on,
+                self.model_key,
+                self.method_key,
+                self.species,
+                self.batch_group,
+            )
+        )
+
     @property
     def compatibility_key(self) -> tuple[str, str, tuple[int, ...], str]:
         """Return the properties that must agree within a batched runner."""
@@ -136,38 +160,50 @@ class CampaignSpec:
                 raise ValueError(f"run {run.run_id!r} cannot be its own parent")
         self.topological_runs()
 
-    @property
+    @cached_property
     def by_id(self) -> Mapping[str, RunSpec]:
         """Return the campaign nodes indexed by stable run identifier."""
         return MappingProxyType({run.run_id: run for run in self.runs})
 
+    @cached_property
+    def _topological_order(self) -> tuple[RunSpec, ...]:
+        """Kahn's algorithm, level by level, each level in construction order."""
+        position = {run.run_id: index for index, run in enumerate(self.runs)}
+        pending = {run.run_id: len(set(run.dependency_ids)) for run in self.runs}
+        children: dict[str, list[str]] = {}
+        for run in self.runs:
+            for dependency in set(run.dependency_ids):
+                children.setdefault(dependency, []).append(run.run_id)
+        frontier = [run.run_id for run in self.runs if pending[run.run_id] == 0]
+        ordered: list[RunSpec] = []
+        while frontier:
+            ordered.extend(self.by_id[run_id] for run_id in frontier)
+            unlocked: list[str] = []
+            for run_id in frontier:
+                for child in children.get(run_id, ()):
+                    pending[child] -= 1
+                    if pending[child] == 0:
+                        unlocked.append(child)
+            frontier = sorted(unlocked, key=position.__getitem__)
+        if len(ordered) != len(self.runs):
+            raise ValueError("campaign continuation graph contains a cycle")
+        return tuple(ordered)
+
     def topological_runs(self) -> tuple[RunSpec, ...]:
         """Return nodes in dependency order and reject cyclic continuation."""
-        remaining = {run.run_id: run for run in self.runs}
-        ordered: list[RunSpec] = []
-        completed: set[str] = set()
-        while remaining:
-            ready = [
-                run
-                for run in remaining.values()
-                if set(run.dependency_ids).issubset(completed)
-            ]
-            if not ready:
-                raise ValueError("campaign continuation graph contains a cycle")
-            for run in ready:
-                ordered.append(run)
-                completed.add(run.run_id)
-                del remaining[run.run_id]
-        return tuple(ordered)
+        return self._topological_order
+
+    def is_ready(self, run: RunSpec, completed_ids: set[str] | frozenset[str]) -> bool:
+        """Return whether *run* is uncompleted and all its dependencies are complete."""
+        return run.run_id not in completed_ids and all(
+            dependency in completed_ids for dependency in run.dependency_ids
+        )
 
     def ready(self, completed_ids: set[str] | frozenset[str]) -> tuple[RunSpec, ...]:
         """Return uncompleted nodes whose parents have persistent final states."""
-        completed = set(completed_ids)
+        completed = frozenset(completed_ids)
         return tuple(
-            run
-            for run in self.topological_runs()
-            if run.run_id not in completed
-            and set(run.dependency_ids).issubset(completed)
+            run for run in self._topological_order if self.is_ready(run, completed)
         )
 
     @classmethod
@@ -244,19 +280,17 @@ class CampaignSpec:
         branch's own value. Every step's only new dependency is the
         immediately preceding step in its OWN branch, via ``RunSpec.parent_id``
         -- branches never share a parent, so neither can be silently re-seeded
-        from the other's basin. This implements PHASE_DIAGRAM_MANUAL.md
-        section 4 step 3: "From the A-rich endpoint, perform an
-        increasing-delta_mu sweep; from the B-rich endpoint, perform a
-        decreasing-delta_mu sweep. Within either sweep, start each point from
-        the final state at the preceding chemical potential."
+        from the other's basin: the A-rich endpoint sweeps toward increasing
+        Δμ, the B-rich endpoint toward decreasing Δμ, and each point starts
+        from the final state at the preceding chemical potential (the
+        hysteresis-sensitive protocol of an SGC phase-boundary scan).
 
         Returns a RAW tuple of every seed plus every marching child, in
         construction order -- NOT yet wrapped in a validated
         :class:`CampaignSpec`. A seed's own ``parent_id`` is deliberately not
         checked against this method's own output: that lets a caller building
         a LARGER combined campaign (e.g. one seed continuation-chained onto a
-        different temperature's own endpoint, ``run_campaign.py``'s
-        ``_build_delta_mu_scan_schedule``) accumulate several calls' runs and
+        different temperature's own endpoint) accumulate several calls' runs and
         validate the complete graph once, in one final
         ``CampaignSpec(runs=..., name=...)``. Use
         :meth:`delta_mu_scan_from_endpoints` instead for the common
@@ -486,7 +520,7 @@ class CampaignScheduler:
             raise KeyError(f"unknown run_id {run_id!r}")
         if run_id in self._completed:
             raise RuntimeError(f"run {run_id!r} is already complete")
-        if run not in self.ready():
+        if not self.campaign.is_ready(run, self._completed):
             raise RuntimeError(f"run {run_id!r} is not ready")
         self.state_store.save(run_id, state, runtime_state=runtime_state)
         self._completed.add(run_id)

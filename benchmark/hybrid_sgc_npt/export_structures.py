@@ -12,34 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Export equilibrated final-state checkpoints from a delta-mu scan campaign
-to viewable structure trajectories.
+"""Export final-state checkpoints to extended-XYZ structure files.
 
-Reads every ``<run_id>.pt`` checkpoint written by ``run_campaign.py`` /
-``FinalStateStore`` under ``--checkpoint-root`` and writes one extended-XYZ
-trajectory per hysteresis branch (temperature x A-rich/B-rich), ordered along
-the delta_mu ladder (seed first, then dmu1, dmu2, ...), plus a CSV summary of
-composition and energy per structure.
+Directory mode reads every ``<run_id>.pt`` checkpoint written by
+``run_campaign.py`` / ``FinalStateStore`` under ``--checkpoint-root`` and writes
+one trajectory per hysteresis branch (temperature x A-rich/B-rich), ordered
+along the delta_mu ladder (seed first, then dmu1, dmu2, ...), plus a CSV summary
+of composition and energy per structure. File mode (``--checkpoint-root
+<run_id>.pt``) converts one checkpoint to one frame, e.g. on a laptop after
+copying a single file back from the cluster.
 
-Deliberately depends on ``torch`` + ``ase`` only, not on ``nvalchemi``: a
-checkpoint's payload is ``{"run_id": ..., "state": AtomicData.model_dump(),
-"runtime_state": {...}}`` (see ``FinalStateStore.save``), and
-``model_dump()`` leaves every tensor field as a plain ``torch.Tensor`` inside
-plain dicts -- so the raw positions/atomic_numbers/cell/pbc/energy fields can
-be read with ``torch.load(..., weights_only=True)`` without importing the
-AtomicData class itself. That keeps this script runnable anywhere the
-campaign's own environment is available, with no extra install.
-
-Usage (in the campaign's environment):
+Depends on ``torch`` + ``ase`` only, not on ``nvalchemi``: a checkpoint holds
+``{"run_id", "state": AtomicData.model_dump(), "runtime_state"}`` (or a bare
+``model_dump()``), plain tensors in plain dicts, readable with
+``torch.load(..., weights_only=True)``. OVITO, VMD and ``ase gui`` read the
+output directly.
 
     python benchmark/hybrid_sgc_npt/export_structures.py \\
         --checkpoint-root <output_root>/hybrid_sgc_npt/checkpoints/<scan>/atoms500
-
-Then copy the resulting ``structures/`` folder back alongside the checkpoints
-(the same way you already copy Results) and open the ``.extxyz`` files in
-OVITO, VMD, or ``ase gui`` -- each file is one branch's structures in scan
-order, so stepping through frames shows that branch's equilibrated
-composition evolving along the delta_mu ladder.
+    python benchmark/hybrid_sgc_npt/export_structures.py \\
+        --checkpoint-root atoms500.T1400.Arich.pt --out frame.extxyz
 """
 
 from __future__ import annotations
@@ -70,20 +62,11 @@ _RUN_ID_RE = re.compile(
 def _load_state(path: Path) -> dict:
     """Load one checkpoint's raw AtomicData payload (tensors only, no class import)."""
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    return payload["state"]
+    return payload.get("state", payload)
 
 
 def _to_atoms(state: dict, run_id: str, pt_atomic_number: int) -> Atoms:
-    """Rebuild an ASE ``Atoms`` from one AtomicData's raw field dict.
-
-    Tensors here may already be on CPU (``_load_state`` loads checkpoints
-    with ``map_location="cpu"``) or still on the training/inference device
-    (``debug_npt_then_sgc.py`` / ``debug_npt_then_sgc_mace.py`` call this
-    directly on a live GPU batch via ``batch.get_data(0).model_dump(...)``,
-    with no CPU copy in between) -- ``.detach().cpu()`` is a no-op in the
-    former case and required in the latter, so always go through it before
-    ``.numpy()``.
-    """
+    """Rebuild an ASE ``Atoms`` from one AtomicData's raw field dict (CPU or GPU tensors)."""
 
     def _np(tensor):
         return tensor.detach().cpu().numpy()
@@ -158,13 +141,14 @@ def main() -> None:
         "--checkpoint-root",
         type=Path,
         required=True,
-        help="Directory of <run_id>.pt checkpoints",
+        help="Directory of <run_id>.pt checkpoints, or one checkpoint file",
     )
     parser.add_argument(
         "--out",
         type=Path,
         default=None,
-        help="Output directory (default: <checkpoint-root>/structures)",
+        help="Output directory (default: <checkpoint-root>/structures); "
+        "for a single checkpoint, the output file (default: <checkpoint>.extxyz)",
     )
     parser.add_argument(
         "--pt-atomic-number",
@@ -173,6 +157,15 @@ def main() -> None:
         help="Atomic number used for the Pt-fraction column",
     )
     args = parser.parse_args()
+
+    if args.checkpoint_root.is_file():
+        path = args.checkpoint_root
+        atoms = _to_atoms(_load_state(path), path.stem, args.pt_atomic_number)
+        _check_min_distance(atoms, path.stem)
+        out_path = args.out or path.with_suffix(".extxyz")
+        write(out_path, atoms, format="extxyz")
+        print(f"wrote {len(atoms)} atoms -> {out_path}")
+        return
 
     out_dir = args.out or (args.checkpoint_root / "structures")
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -16,12 +16,16 @@ Carlo, MD and hybrid MC-MD runs, and the benchmarks that calibrate them. The
 | `benchmark_batched_pure_sgc.py` | Batched SGC MC only. |
 | `benchmark_hybrid_sgc_npt_single_point.py` | SGC-NPT / Kawasaki-NPT hybrid, or `--md-only` NPT, with per-phase timing. |
 | `benchmark_npt_md_only_single_point.py` | Plain NPT; also the seeded-composition helper the MC benchmarks share. |
-| `memory_profile_matrix.py` | Peak memory vs batch width across kernels and system sizes. |
-| `profile_mole_overhead.py` | Where unmerged mixture-of-experts (MoLE) time goes, with cached-piece ablations. |
-| `check_mole_layer_type.py` | Which MoLE implementation (Python loop or fused) a checkpoint uses. |
-| `_uma_inference.py`, `_run_diagnostics.py` | Shared helpers: settings specs; crash-tolerant progress files. |
+| `_run_diagnostics.py` | Shared helpers: crash-tolerant progress files, settings record. |
 
-The benchmarks build their Au-Pt cells with `../hybrid_sgc_npt/run_campaign.py`
+Inference settings are passed straight to `UMAWrapper.from_checkpoint`, which
+accepts a preset name or a `key=value` spec (e.g.
+`compile=false,merge_mole=false,tf32=true,activation_checkpointing=false`);
+energy-only MC is `model.model_config.active_outputs = {"energy"}`, which the
+wrapper turns into skipping the forces/stress backward. The resolved MoLE
+implementation is `model.moe_layer_type`.
+
+The benchmarks build their Au-Pt cells with `../hybrid_sgc_npt/campaign_lib.py`
 (sizes 108, 256, 500, 1372, 2048, 4000 atoms) and write `metrics.json` plus
 `progress.jsonl` / `partial_metrics.json`, which survive a time-limit kill.
 
@@ -123,7 +127,6 @@ width) and total peak GiB:
 SGC MC with compile (no merge, energy-only) is slower than without at both widths
 (width 1: 9.72 vs 7.17 s/block, 2.9 vs 2.2 GiB).
 
-
 ### Compiled MD with dynamic shapes
 
 Kernels `npt_compile_recheck`, `kawasaki_npt_compile_recheck` and `sgc_npt_compile`
@@ -145,6 +148,7 @@ in the first block (one variant each for energy-only MC and full-output MD).
 Acceptance and final energies match the uncompiled runs. In `calibration.json`
 these are `relative_to` factors on the eager fits plus `compile_overhead_s`,
 which `plan_run.py` spreads over `--n-blocks`.
+
 ## Model
 
 Per batched model call on the reference card:
@@ -204,7 +208,7 @@ every workload measured (factor 0.45, from a few paired runs).
   (width 1 Kawasaki-NPT: ~9%).
 - Unmerged UMA is 2.7x (MD) to 3.5x (MC, width 4) slower than merged. The MoLE
   bookkeeping (expert-weight mixing, edge counts, coefficients) is under 1.5% of
-  it and caching it gains nothing (`profile_mole_overhead.py`); the time is in
+  it and caching it gains nothing (measured with a since-removed profiler); the time is in
   the matmuls, which run as plain-FP32 kernels (`gemmSN`, `ampere_sgemm`) instead
   of the TF32 tensor-core GEMMs the merged model's plain linear layers get.
   Re-merging an MD model per block costs ~3.7 s per merge, more than it saves.

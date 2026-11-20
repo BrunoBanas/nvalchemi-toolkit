@@ -16,7 +16,14 @@
   exchange between hybrid blocks, configurations move between fixed-temperature
   rows). Exact samplers are tested against the closed-form canonical distribution
   of an analytic tether model (`test/mc/conftest.py`).
-
+- UMA: support fairchem-core 2.24 and UMA Nitro (`uma-s-1p2p1`); the UMA extras
+  now require `fairchem-core>=2.24.0`. `"default"` / `"nitro"` run Nitro for
+  single-system calls and fall back to `"multigpu"` otherwise. The removed
+  `"turbo"` preset is mapped to `"multigpu"` (identical settings) with a
+  `DeprecationWarning`. `UMAWrapper.from_checkpoint(graph_gen_version=...)`:
+  preset names and `key=value` specs now default to
+  `internal_graph_gen_version=3` (nvalchemi-toolkit-ops neighbor list, faster
+  on one GPU); `InferenceSettings` instances are taken as given.
 - `UMAWrapper.from_checkpoint(moe_layer_type=...)`: unmerged UMA backbones
   (`merge_mole=False`, as SGC / VC-SGC requires) run their mixture-of-experts
   layers through the `fairchem_cpp` `segment_mm` extension (fairchem's
@@ -196,6 +203,35 @@
   `nvalchemi._serialization.MeasurementRecord`.
 
 ### Changed
+
+- `HybridMCMD.run(batch, n_blocks, on_block=fn)` calls `fn(batch, block)` after
+  every block (returning `True` stops early), and the new `after_md_block` hook
+  runs after each MD block before MC adopts the energy; `run_md_block` is the
+  public MD half of a block. The benchmark drivers (`run_campaign.py`,
+  `run_vcsgc_scan.py`, `uma_melting_coexistence.py`) use these instead of
+  private copies of the block loop, which also skipped `before_md_block`.
+- `CampaignSpec` computes its topological order and `by_id` index once
+  (Kahn's algorithm) instead of on every `ready()` / `complete()` call, which
+  was quadratic in the campaign size; new `CampaignSpec.is_ready`.
+- Removed the `nvalchemi.hybrid` planner aliases (`HybridBatchPlanner`,
+  `WalkerAssignment` and the re-exported planning types); import
+  `SimulationBatchPlanner`, `RunAssignment`, `BatchMeasurement` and
+  `BatchMemoryEstimate` from `nvalchemi.scheduling`.
+- Benchmark cleanup: removed one-off debugging and profiling scripts
+  (`debug_npt_then_sgc*.py`, `hybrid_diagnostic.py`, `profile_mole_overhead.py`,
+  `check_mole_layer_type.py`, `memory_profile_matrix.py`), the generated
+  `tracer_selftest/` outputs, and `_uma_inference.py` (superseded by
+  `UMAWrapper`'s `key=value` settings specs and `active_outputs` gating);
+  `export_structures.py` now also converts a single checkpoint (replacing
+  `local_export_structure.py`). `AGENTS.md` gains a simulation-setup map.
+- `benchmark/hybrid_sgc_npt/run_campaign.py` is split into `campaign_lib.py`
+  (constants, `make_workload`, observables and equilibration gate, reference
+  calibration, `NvalchemiTraceEngine`) and the campaign CLI; the other drivers,
+  benchmarks and tests import `campaign_lib`. Helpers shared across scripts lose
+  their leading underscore (`equilibration_gate`, `run_hybrid_with_observables`,
+  `npt_wrap_hooks`, `wrap_batch_positions`, `cell_volumes`, `pt_fraction_per_graph`,
+  `batch_means_se`; `_pure_element_endpoint` becomes `pure_element_state`), and
+  `--no-mc-energy-only` is passed explicitly instead of through a module global.
 
 - The `check_fp_dtype_consistency` cast warning fires once per distinct
   `(field, source dtype, target dtype)` cast per process instead of on every
@@ -611,8 +647,38 @@
 
 ### Fixed
 
-- `HybridMCMD.run` with `md_steps=0` (MC only) no longer calls
-  `BaseDynamics.run(n_steps=0)`, which raises.
+- `UMAWrapper` derivative gating left a shared predict unit pruned after an
+  energy-only call, so a `FAIRChemCalculator` or a second wrapper on the same
+  unit silently lost forces and stress. Gating now wraps each `predict()` call
+  and restores the as-loaded flags and task tables on exit (also on error),
+  re-applied to the live model so a mid-run fairchem rebuild is still gated.
+  `key=value` inference settings are converted to each field's declared type
+  and reject values that do not fit.
+- `RunSpec` is hashable (identity fields; `metadata` excluded), so runs work in
+  sets and as dict keys; the generated hash failed on its mapping views.
+- Monte Carlo samplers follow the status-aware dynamics hook lifecycle:
+  admission once, the step's active-graph mask passed to hooks and `compute`,
+  and `ON_GRADUATE` dispatch, as in `BaseDynamics.step`.
+- `examples/advanced/17_uma_hybrid_sgc_npt.py` exits with a setup hint when the
+  gated UMA checkpoint is unavailable, uses the recommended SGC settings with
+  energy-only MC, and writes checkpoints to a fresh temporary directory.
+- `HybridMCMD` evaluated the model twice at the start of every MD block: an
+  explicit `md.compute` followed by `md.run`, which primes forces itself since
+  the dynamics hook-order fix (#182). One evaluation per block is saved
+  (e.g. 11 -> 9 model calls for 2 blocks of 3 MD steps); trajectories are
+  unchanged. The same redundant call is removed from the benchmark drivers.
+- `HybridMCMD` with `md_steps=0` (rigid-lattice MC, e.g. `run_mu_ladder.py`
+  plans with `md_steps_per_block: 0`) raised `ValueError: n_steps must be
+  positive` from `md.run(n_steps=0)`; MC-only blocks now skip MD, and an
+  `after_md_block` hook still gets a fresh force/stress evaluation.
+- `SGC`, `Kawasaki` and `NonlocalSwap` proposals and rejections used
+  boolean-mask indexing, a device-to-host sync on every MC step despite their
+  "sync-free" docstrings; they now write through `torch.where`. A Python-float
+  temperature was also re-uploaded (a blocking host-to-device copy) at every
+  acceptance; it is now cached on device with the other sampler parameters.
+  The CUDA sync-detection test now covers a full proposal + acceptance for all
+  four samplers.
+
 - Enable periodic stress outputs for `UMAWrapper` with `task_name="omol"`,
   convert stress to the configured base precision, and preserve dynamic
   compilation when graph padding is inactive. Cell-less OMol inputs remain

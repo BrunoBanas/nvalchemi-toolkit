@@ -234,16 +234,20 @@ jobs:
     env:
       # Determine if this is a full test run (main/schedule/merge_group) or selective (PR)
       IS_FULL_RUN: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'merge_group' }}
+    # NVIDIA's H100 runners are not available to forks: skip there instead of
+    # queueing until GitHub cancels the job.
     if: |
-      (github.event_name == 'schedule') ||
-      contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:all') ||
-      (
-        !contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:skip') &&
-        (needs.changed-files.outputs.any_changed == 'true')
-      ) ||
-      (
-        (github.event_name == 'merge_group') &&
-        (needs.changed-files.outputs.any_changed == 'true')
+      github.repository == 'NVIDIA/nvalchemi-toolkit' && (
+        (github.event_name == 'schedule') ||
+        contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:all') ||
+        (
+          !contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:skip') &&
+          (needs.changed-files.outputs.any_changed == 'true')
+        ) ||
+        (
+          (github.event_name == 'merge_group') &&
+          (needs.changed-files.outputs.any_changed == 'true')
+        )
       )
     steps:
       - name: Checkout repository
@@ -512,17 +516,21 @@ jobs:
     env:
       IS_FULL_RUN: ${{ github.ref == 'refs/heads/main' || github.event_name == 'schedule' || github.event_name == 'merge_group' }}
       NCCL_DEBUG: WARN
+    # NVIDIA's H100 runners are not available to forks: skip there instead of
+    # queueing until GitHub cancels the job.
     if: |
-      (github.event_name == 'schedule') ||
-      contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:all') ||
-      contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ci:multigpu') ||
-      (
-        !contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:skip') &&
-        (needs.changed-files.outputs.dd_changed == 'true')
-      ) ||
-      (
-        (github.event_name == 'merge_group') &&
-        (needs.changed-files.outputs.dd_changed == 'true')
+      github.repository == 'NVIDIA/nvalchemi-toolkit' && (
+        (github.event_name == 'schedule') ||
+        contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:all') ||
+        contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ci:multigpu') ||
+        (
+          !contains(fromJSON(needs.get-pr-labels.outputs.labels || '[]'), 'ciflow:skip') &&
+          (needs.changed-files.outputs.dd_changed == 'true')
+        ) ||
+        (
+          (github.event_name == 'merge_group') &&
+          (needs.changed-files.outputs.dd_changed == 'true')
+        )
       )
     steps:
       - name: Checkout repository

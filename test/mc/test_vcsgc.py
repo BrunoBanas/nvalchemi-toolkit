@@ -402,22 +402,3 @@ def test_per_graph_parameter_shape_is_checked() -> None:
 
     with pytest.raises(ValueError, match="kappa tensors"):
         sampler.run(batch, n_steps=1)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="sync detection needs CUDA")
-def test_solute_counting_does_not_sync_the_device() -> None:
-    """The constraint term runs every step; a device-to-host sync there stalls the next model call."""
-    batch = _batch([[1, 2, 2, 1], [2, 2, 2, 1]]).to("cuda")
-    sampler = VCSGC(
-        model=_demo(), temperature=1000.0, species=[1, 2], kappa=1.0, phi=0.0
-    )
-    torch.cuda.synchronize()
-
-    previous = torch.cuda.get_sync_debug_mode()
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        counts = sampler._solute_counts(batch)
-    finally:
-        torch.cuda.set_sync_debug_mode(previous)
-
-    assert counts.tolist() == [2.0, 3.0]

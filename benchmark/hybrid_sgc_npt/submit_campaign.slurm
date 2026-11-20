@@ -47,8 +47,9 @@ N_ATOMS="${SIZES[$SLURM_ARRAY_TASK_ID]}"
 CHECKPOINT_ROOT="$REPO_ROOT/benchmark/hybrid_sgc_npt/checkpoints"
 
 # Set REFERENCE_ENERGIES_JSON (in the submitting shell, before sbatch) to a
-# reference_energy_calibration.py output to use the calibrated, trustworthy
-# delta_mu -- recommended, see run_campaign.py's module docstring
+# reference_energies.json (e.g. auto_reference_energies.json written by
+# --mode delta-mu-scan) to use the calibrated, trustworthy delta_mu --
+# recommended, see README.md
 # "Chemical-potential calibration". Leave it unset to fall back to the
 # literal, uncalibrated DELTA_MU_EV sweep (fine for a pure throughput
 # benchmark, not for real phase-diagram production).

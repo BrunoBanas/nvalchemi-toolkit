@@ -23,6 +23,7 @@ copy the skill folders into your project's or home skills directory.
 | Add per-step callbacks (neighbor lists, convergence, logging) | `nvalchemi-dynamics-hooks` |
 | Build reaction paths or run NEB for minimum-energy paths | `nvalchemi-mep` |
 | Implement a new integrator, optimizer, or sampler class | `nvalchemi-dynamics-implementation` |
+| Run domain-decomposed multi-GPU simulations (`DomainParallel`) | `nvalchemi-distributed` |
 | Add progress dashboards, TensorBoard, or CSV observability | `nvalchemi-reporting` |
 | Choose UMA inference settings, batch width, memory and jobs for MC / MD / hybrid runs | `nvalchemi-uma-submission` |
 | Turn SGC Monte Carlo isotherms into phase boundaries; trace a T-x coexistence line | `nvalchemi-sgc-phase-boundary` |
@@ -39,6 +40,7 @@ data-structures -> data-storage -> zarr-perf
 model-wrapping + loss-api -> training-api -> fine-tuning | distillation
 dynamics-hooks -> dynamics-api | dynamics-implementation
 dynamics-hooks + dynamics-api -> mep
+dynamics-api + model-wrapping -> distributed
 reporting (orthogonal: attaches to training and dynamics)
 dynamics-api -> uma-submission -> sgc-phase-boundary
 ```

@@ -52,7 +52,7 @@ walker is ready its class runs (trace chains are serial, so they get priority); 
 class that fills the largest fraction of its width runs. Within a class: trace walkers, then
 walkers already part-way through a step, then the rest in spec order. Slots are refilled as soon
 as walkers finish, so a batch only narrows when nothing else of its class is ready. Every step is gated: a walker stays
-at its (T, dmu) until its Pt fraction AND energy pass run_campaign's equilibration gate on
+at its (T, dmu) until its Pt fraction AND energy pass campaign_lib's equilibration gate on
 ``gate_passes`` consecutive checks (min..max blocks), then reports and moves on.
 
 Width. Per class: the largest width whose estimated peak ALLOCATED memory fits 85 % of the card
@@ -113,7 +113,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from run_campaign import (
+from campaign_lib import (
     BAROSTAT_TIME_FS,
     CHECKPOINT,
     DT_FS,
@@ -125,10 +125,10 @@ from run_campaign import (
     TASK,
     THERMOSTAT_TIME_FS,
     NvalchemiTraceEngine,
-    _equilibration_gate,
-    _npt_wrap_hooks,
-    _wrap_batch_positions,
     compute_reference_energies,
+    equilibration_gate,
+    npt_wrap_hooks,
+    wrap_batch_positions,
 )
 from run_vcsgc_scan import initial_state, load_state, run_chunk
 
@@ -178,6 +178,7 @@ class Walker:
 
     @property
     def n_steps(self) -> int:
+        """Number of delta_mu steps this walker runs (1 for VC-SGC)."""
         return 1 if self.kind == "vcsgc" else len(self.mus)
 
     def coefficients(self) -> tuple[float, float]:
@@ -511,6 +512,7 @@ def build_walkers(spec: dict, ref: dict, pool: Pool) -> list[dict]:
     d = spec.get("defaults", {})
 
     def gated(item, kind):
+        """Return *item*'s gate settings, filling in the campaign defaults."""
         g = dict(
             min_blocks=d.get("min_blocks", 100),
             max_blocks=d.get("max_blocks", 300),
@@ -526,6 +528,7 @@ def build_walkers(spec: dict, ref: dict, pool: Pool) -> list[dict]:
         return g
 
     def mu_list(item, T):
+        """Return *item*'s absolute delta_mu values at *T* (excess values are shifted by the reference)."""
         if "mu_excess" in item:
             return [
                 ref[f"{T:g}"]["delta_mu_ref_eV"] + float(m) for m in item["mu_excess"]
@@ -589,7 +592,7 @@ def build_walkers(spec: dict, ref: dict, pool: Pool) -> list[dict]:
 def melt_fresh(data, model, hot_T: float, T: float, ps: float, device):
     """Melt a fresh crystal: isotropic NPT at hot_T for ps (dt 1.5 fs), then velocities rescaled to T."""
     batch = Batch.from_data_list([data])
-    _wrap_batch_positions(batch)
+    wrap_batch_positions(batch)
     md = NPT(
         model=model,
         dt=1.5,
@@ -598,10 +601,9 @@ def melt_fresh(data, model, hot_T: float, T: float, ps: float, device):
         thermostat_time=THERMOSTAT_TIME_FS,
         barostat_time=BAROSTAT_TIME_FS,
         pressure_coupling="isotropic",
-        hooks=_npt_wrap_hooks(),
+        hooks=npt_wrap_hooks(),
     )
     with md:
-        md.compute(batch)
         md.run(batch, n_steps=max(1, round(ps * 1000 / 1.5)))
     batch.velocities = batch.velocities * math.sqrt(T / hot_T)
     out = batch.to_data_list()[0]
@@ -782,6 +784,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
 
     # traces only need the pure references (lattice constants) for a fresh start without "lattice_a"
     def fresh_needs_ref(t):
+        """Whether trace *t* builds a fresh state that needs a reference lattice constant."""
         return any(
             isinstance(t.get(k), dict) and "lattice_a" not in t[k]
             for k in ("alpha_state", "gamma_state", "solid_state", "liquid_state")
@@ -896,6 +899,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
         Tracer = make_exporting_tracer(BoundaryTracer, store, tdir)
 
         def target(engine=engine, t=t, tdir=tdir, Tracer=Tracer):
+            """Run one trace in its own thread (after its source trace, for a retrace)."""
             try:
                 if t.get("retrace_from"):
                     threads[t["retrace_from"]].join()
@@ -1050,7 +1054,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                 if device.type == "cuda":
                     torch.cuda.reset_peak_memory_stats(device)
                 batch = Batch.from_data_list(states, exclude_keys=["mc_accepted"])
-                _wrap_batch_positions(batch)
+                wrap_batch_positions(batch)
                 phis, kappas = zip(*(w.coefficients() for w in active))
                 temps_t = torch.tensor([w.T for w in active], device=device)
                 mc = VCSGC(
@@ -1073,7 +1077,7 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                     thermostat_time=THERMOSTAT_TIME_FS,
                     barostat_time=BAROSTAT_TIME_FS,
                     pressure_coupling="isotropic",
-                    hooks=_npt_wrap_hooks(),
+                    hooks=npt_wrap_hooks(),
                 )
                 hybrid = HybridMCMD(
                     mc=mc,
@@ -1121,8 +1125,8 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                     n = len(w.x)
                     gx = ge = {}
                     if n >= max(w.min_blocks, 2 * EQUILIBRATION_WINDOW_BLOCKS):
-                        gx = _equilibration_gate(w.x, EQUILIBRATION_WINDOW_BLOCKS)
-                        ge = _equilibration_gate(w.e, EQUILIBRATION_WINDOW_BLOCKS)
+                        gx = equilibration_gate(w.x, EQUILIBRATION_WINDOW_BLOCKS)
+                        ge = equilibration_gate(w.e, EQUILIBRATION_WINDOW_BLOCKS)
                         w.gate.append(
                             dict(
                                 blocks=n,

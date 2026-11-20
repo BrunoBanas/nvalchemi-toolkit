@@ -199,15 +199,22 @@ Registered checkpoint names (see
 **Inference settings.** `UMAWrapper` does not add a `compile_model`
 flag (unlike the MACE / AIMNet2 wrappers) because fairchem owns compilation
 internally as a field on its `InferenceSettings`. Reach it through
-`from_checkpoint`'s `inference_settings` argument. In fairchem 2.22,
-`"default"` enables `torch.compile` and MoLE merging in FP32, `"batch"` keeps
-eager execution for changing batch composition, and `"turbo"` also enables
-TF32. Pass an `InferenceSettings` instance when a run needs explicit,
-reproducible controls:
+`from_checkpoint`'s `inference_settings` argument. In fairchem 2.24,
+`"default"` (alias `"nitro"`) runs UMA Nitro's fused kernels for
+`uma-s-1p2p1` on one system per call (Ampere/Hopper/Blackwell) and falls back
+to `"multigpu"` for anything else (a batch, a composition change, another
+checkpoint); `"multigpu"` (formerly `"turbo"`, still accepted as an alias)
+enables `torch.compile`, MoLE merging and TF32; `"high-precision"` is the same
+in FP32; `"batch"` keeps eager execution for changing batch composition.
+Preset names and `key=value` specs default to `internal_graph_gen_version=3`
+(the nvalchemi-toolkit-ops neighbor list, fastest on one GPU); pass
+`graph_gen_version=2` for graph-parallel runs. Pass an `InferenceSettings`
+instance when a run needs explicit, reproducible controls:
 
 ```python
-fast = UMAWrapper.from_checkpoint(
-    "uma-s-1p1", task_name="omat", device="cuda", inference_settings="turbo"
+nitro = UMAWrapper.from_checkpoint("uma-s-1p2p1", task_name="omat", device="cuda")
+batched = UMAWrapper.from_checkpoint(
+    "uma-s-1p2p1", task_name="omat", device="cuda", inference_settings="multigpu"
 )
 ```
 
@@ -226,7 +233,8 @@ checkpointed settings use the loop even when `moe_layer_type="dgl"` is passed
 (with a warning): fairchem cannot merge `MOLEDGL` layers (`AttributeError:
 ... merged_linear_layer`), and with checkpointing the edges are processed in
 131,072-edge chunks, past the first of which `segment_mm` fails ("Segment
-index out of bound"), i.e. above about 2,300 bulk or 3,000 nanoparticle atoms. On an A100-SXM4-80GB with `uma-s-1p2`, 500-atom Au-Pt:
+index out of bound"), i.e. above about 2,300 bulk or 3,000 nanoparticle atoms.
+On an A100-SXM4-80GB with `uma-s-1p2`, 500-atom Au-Pt:
 
 | Workload | 1 system | 4 systems |
 |---|---|---|

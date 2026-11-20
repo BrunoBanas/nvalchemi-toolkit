@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""run_campaign.py's ``--inference-settings auto`` resolution (CPU only, no model)."""
+"""``--inference-settings auto`` resolution in ``campaign_lib`` (CPU only, no model)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ _BENCHMARK_DIR = Path(__file__).resolve().parents[2] / "benchmark" / "hybrid_sgc
 if str(_BENCHMARK_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCHMARK_DIR))
 
-campaign = pytest.importorskip("run_campaign")
+campaign = pytest.importorskip("campaign_lib")
 
 
 class TestResolveInferenceSettings:

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Crash- and timeout-tolerant progress diagnostics for long GPU benchmarks.
+"""Shared benchmark helpers: crash-tolerant progress diagnostics, settings records.
 
 A benchmark that only writes ``metrics.json`` at the very end leaves nothing
 behind when Slurm kills it at the time limit. :class:`RunDiagnostics` keeps
@@ -51,6 +51,22 @@ from typing import Any
 import torch
 
 _GIB = 1024**3
+
+
+def describe_inference(model: Any) -> dict[str, Any]:
+    """Return a JSON-safe record of a loaded ``UMAWrapper``'s inference settings."""
+    settings = getattr(model.predict_unit, "inference_settings", None)
+    fields = getattr(settings, "__dataclass_fields__", {})
+    record: dict[str, Any] = {
+        name: value
+        if value is None or isinstance(value, (bool, int, float, str))
+        else str(value)
+        for name in fields
+        for value in (getattr(settings, name),)
+    }
+    record["moe_layer_type"] = model.moe_layer_type
+    record["active_outputs"] = sorted(model.model_config.active_outputs)
+    return record
 
 
 def _host_rss_gib() -> float | None:

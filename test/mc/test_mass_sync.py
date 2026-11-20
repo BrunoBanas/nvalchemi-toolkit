@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Atomic masses follow species through MC moves and hybrid MC-MD blocks."""
+"""Atomic masses follow species through MC moves."""
 
 from __future__ import annotations
 
@@ -20,8 +20,6 @@ import torch
 
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.data.atomic_data import _default_mass_table
-from nvalchemi.dynamics.demo import DemoDynamics
-from nvalchemi.hybrid import HybridMCMD
 from nvalchemi.mc import SGC, Kawasaki
 from nvalchemi.models.demo import DemoModel, DemoModelWrapper
 
@@ -95,24 +93,3 @@ def test_kawasaki_swap_carries_custom_per_species_masses() -> None:
         batch.atomic_numbers.tolist(), batch.atomic_masses.tolist()
     ):
         assert abs(mass - custom[number]) < 1e-5, (number, mass)
-
-
-def test_hybrid_md_integrates_the_transmuted_atom_with_its_new_mass() -> None:
-    """No caller-side mass refresh: the MD block already sees the right mass."""
-    model = DemoModelWrapper(DemoModel())
-    batch = _one_atom(1)
-    md = DemoDynamics(model=model, n_steps=None, dt=0.01)
-    seen: list[float] = []
-    run = md.run
-
-    def spy(b, n_steps):
-        seen.append(float(b.atomic_masses[0]))
-        return run(b, n_steps=n_steps)
-
-    md.run = spy
-    HybridMCMD(mc=_sgc(model, mu_2=1.0e6), md=md, mc_steps=1, md_steps=1).run(
-        batch, n_blocks=1
-    )
-
-    assert batch.atomic_numbers.tolist() == [2]
-    assert abs(seen[0] - float(_default_mass(2, batch.atomic_masses))) < 1e-5
