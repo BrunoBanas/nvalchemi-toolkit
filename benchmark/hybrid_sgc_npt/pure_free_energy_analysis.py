@@ -138,7 +138,9 @@ def harmonic(state: dict, delta: str | None = None) -> tuple[float, float, str]:
     use = delta or keys[0]
     vals = [deltas[k]["sum_ln_lambda"] for k in keys]
     if any(v is None for v in vals):
-        raise SystemExit(f"{state['meta']['element']}: unstable force constants (negative eigenvalues)")
+        raise SystemExit(
+            f"{state['meta']['element']}: unstable force constants (negative eigenvalues)"
+        )
     return deltas[use]["sum_ln_lambda"], float(np.ptp(vals)), use
 
 
@@ -229,7 +231,9 @@ def harmonic_ts(el: dict, T: float) -> float:
 
 def g_of_T(el: dict, T: float) -> tuple[float, float]:
     e0, pv0, sum_ln, n, kb = el["_consts"]
-    anh, anh_se = anharmonic_integral(T, np.array(el["fit_powers"]), np.array(el["fit_coef"]), np.array(el["fit_cov"]))
+    anh, anh_se = anharmonic_integral(
+        T, np.array(el["fit_powers"]), np.array(el["fit_coef"]), np.array(el["fit_cov"])
+    )
     return float(g_harm(T, e0, pv0, sum_ln, n, kb)) - anh, anh_se
 
 
@@ -244,23 +248,54 @@ def u_at(el: dict, T: float) -> tuple[float, float]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("root", type=Path)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--temperature", type=float, nargs="+", default=[700.0])
-    ap.add_argument("--order", type=int, default=4, choices=[3, 4, 5], help="highest power in the dh(T) fit")
-    ap.add_argument("--delta", default=None, help="finite-difference displacement to use (default: smallest)")
-    ap.add_argument("--calibration", type=Path, help="auto_reference_energies.json from the SGC scan, for comparison")
-    ap.add_argument("--internal-reference", action="store_true",
-                    help="shift each e0 onto its NPT ladder's zero (free constant in the dh fit); see above")
-    ap.add_argument("--dg-table", action="store_true",
-                    help="also write pure_dG.json (g_Pt - g_Au per T) for boundary_tracer.py's dilute mode")
+    ap.add_argument(
+        "--order",
+        type=int,
+        default=4,
+        choices=[3, 4, 5],
+        help="highest power in the dh(T) fit",
+    )
+    ap.add_argument(
+        "--delta",
+        default=None,
+        help="finite-difference displacement to use (default: smallest)",
+    )
+    ap.add_argument(
+        "--calibration",
+        type=Path,
+        help="auto_reference_energies.json from the SGC scan, for comparison",
+    )
+    ap.add_argument(
+        "--internal-reference",
+        action="store_true",
+        help="shift each e0 onto its NPT ladder's zero (free constant in the dh fit); see above",
+    )
+    ap.add_argument(
+        "--dg-table",
+        action="store_true",
+        help="also write pure_dG.json (g_Pt - g_Au per T) for boundary_tracer.py's dilute mode",
+    )
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
     analyse = analyse_internal if args.internal_reference else analyse_element
-    els = {s: analyse(json.loads((args.root / f"{s}.json").read_text()), args.order, args.delta) for s in SPECIES}
-    cal = json.loads(args.calibration.read_text())["reference"] if args.calibration else {}
+    els = {
+        s: analyse(
+            json.loads((args.root / f"{s}.json").read_text()), args.order, args.delta
+        )
+        for s in SPECIES
+    }
+    cal = (
+        json.loads(args.calibration.read_text())["reference"]
+        if args.calibration
+        else {}
+    )
 
     pure, table = {}, []
     for T in args.temperature:
@@ -277,7 +312,8 @@ def main() -> None:
             dU_ladder_se=math.hypot(ua_se, ub_se),
             dG_excess=d_g - d_u,
             dG_excess_se=math.sqrt(ga_se**2 + gb_se**2 + ua_se**2 + ub_se**2),
-            harmonic_only_dG_excess=harmonic_ts(els["Pt"], T) - harmonic_ts(els["Au"], T),
+            harmonic_only_dG_excess=harmonic_ts(els["Pt"], T)
+            - harmonic_ts(els["Au"], T),
         )
         row["dS_k_per_atom"] = -(row["dG_excess"]) / (els["Au"]["_consts"][4] * T)
         c = cal.get(f"{T:g}")
@@ -291,22 +327,41 @@ def main() -> None:
     if args.dg_table:
         lo = max(min(e["ladder_T"]) for e in els.values())
         hi = min(max(e["ladder_T"]) for e in els.values())
-        grid = sorted({t for e in els.values() for t in e["ladder_T"]} | set(args.temperature))
+        grid = sorted(
+            {t for e in els.values() for t in e["ladder_T"]} | set(args.temperature)
+        )
         dg = {}
         for T in (t for t in grid if lo <= t <= hi):
             (ga, ga_se), (gb, gb_se) = g_of_T(els["Au"], T), g_of_T(els["Pt"], T)
             dg[f"{T:g}"] = {"dG": gb - ga, "se": math.hypot(ga_se, gb_se)}
-        (args.out / "pure_dG.json").write_text(json.dumps(dict(
-            convention="dG = g_Pt - g_Au (eV/atom), classical Gibbs energy at the run pressure"
-            + (", each element on its NPT ladder's energy zero" if args.internal_reference else ""),
-            internal_reference=bool(args.internal_reference), table=dg), indent=2) + "\n")
+        (args.out / "pure_dG.json").write_text(
+            json.dumps(
+                dict(
+                    convention="dG = g_Pt - g_Au (eV/atom), classical Gibbs energy at the run pressure"
+                    + (
+                        ", each element on its NPT ladder's energy zero"
+                        if args.internal_reference
+                        else ""
+                    ),
+                    internal_reference=bool(args.internal_reference),
+                    table=dg,
+                ),
+                indent=2,
+            )
+            + "\n"
+        )
     summary = dict(
-        elements={s: {k: v for k, v in e.items() if not k.startswith("_")} for s, e in els.items()},
+        elements={
+            s: {k: v for k, v in e.items() if not k.startswith("_")}
+            for s, e in els.items()
+        },
         temperatures=table,
         convention="g per atom, classical configurational Gibbs energy at the run pressure, eV; "
         "dG_excess = (g_Pt - g_Au) - (<U>_Pt - <U>_Au)",
     )
-    (args.out / "pure_free_energy_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    (args.out / "pure_free_energy_summary.json").write_text(
+        json.dumps(summary, indent=2) + "\n"
+    )
 
     for s, e in els.items():
         print(
@@ -336,19 +391,56 @@ def main() -> None:
     tt = np.linspace(1, max(max(e["ladder_T"]) for e in els.values()), 200)
     for s, col in zip(SPECIES, ("#d4a017", "#5b6b7a")):
         e = els[s]
-        ax[0].errorbar(e["ladder_T"], 1e3 * np.array(e["dh"]), 2e3 * np.array(e["dh_se"]), fmt="o", color=col, label=s)
+        ax[0].errorbar(
+            e["ladder_T"],
+            1e3 * np.array(e["dh"]),
+            2e3 * np.array(e["dh_se"]),
+            fmt="o",
+            color=col,
+            label=s,
+        )
         fit = sum(c * tt**k for k, c in zip(e["fit_powers"], e["fit_coef"]))
         ax[0].plot(tt, 1e3 * fit, color=col, lw=1)
         e0 = e["e0"]
-        ax[1].plot(tt, [1e3 * (g_of_T(e, t)[0] - e0) for t in tt], color=col, label=f"{s}: g - e0")
+        ax[1].plot(
+            tt,
+            [1e3 * (g_of_T(e, t)[0] - e0) for t in tt],
+            color=col,
+            label=f"{s}: g - e0",
+        )
         ax[1].plot(tt, 1e3 * (g_harm(tt, *e["_consts"]) - e0), color=col, ls=":", lw=1)
-    d_ex = [1e3 * ((g_of_T(els["Pt"], t)[0] - g_of_T(els["Au"], t)[0]) - (u_at(els["Pt"], t)[0] - u_at(els["Au"], t)[0])) for t in tt]
+    d_ex = [
+        1e3
+        * (
+            (g_of_T(els["Pt"], t)[0] - g_of_T(els["Au"], t)[0])
+            - (u_at(els["Pt"], t)[0] - u_at(els["Au"], t)[0])
+        )
+        for t in tt
+    ]
     ax[2].plot(tt, d_ex, color="#2a78d6")
     for r in table:
-        ax[2].errorbar(r["T"], 1e3 * r["dG_excess"], 2e3 * r["dG_excess_se"], fmt="o", color="#eb6834")
-    ax[0].set(xlabel="T (K)", ylabel="h - h_harm (meV/atom)", title="(a) anharmonic enthalpy, fit (2σ bars)")
-    ax[1].set(xlabel="T (K)", ylabel="meV/atom", title="(b) configurational g(T) (dotted: harmonic)")
-    ax[2].set(xlabel="T (K)", ylabel="meV/atom", title=r"(c) $\Delta G_{\rm excess}=\Delta g-\Delta\langle U\rangle$ (Pt$-$Au)")
+        ax[2].errorbar(
+            r["T"],
+            1e3 * r["dG_excess"],
+            2e3 * r["dG_excess_se"],
+            fmt="o",
+            color="#eb6834",
+        )
+    ax[0].set(
+        xlabel="T (K)",
+        ylabel="h - h_harm (meV/atom)",
+        title="(a) anharmonic enthalpy, fit (2σ bars)",
+    )
+    ax[1].set(
+        xlabel="T (K)",
+        ylabel="meV/atom",
+        title="(b) configurational g(T) (dotted: harmonic)",
+    )
+    ax[2].set(
+        xlabel="T (K)",
+        ylabel="meV/atom",
+        title=r"(c) $\Delta G_{\rm excess}=\Delta g-\Delta\langle U\rangle$ (Pt$-$Au)",
+    )
     for a in ax:
         a.grid(alpha=0.25, lw=0.5)
         a.spines[["top", "right"]].set_visible(False)

@@ -100,20 +100,19 @@ from run_campaign import (  # noqa: E402
     INFERENCE_SETTINGS,
     KB_EV,
     PRESSURE_EV_PER_A3,
+    SPECIES,  # noqa: E402
     TASK,
     THERMOSTAT_TIME_FS,
     _npt_wrap_hooks,
     _wrap_batch_positions,
 )
 
-from run_campaign import SPECIES  # noqa: E402
-
 from nvalchemi.data import AtomicData, Batch
-from nvalchemi.hybrid import HybridMCMD
-from nvalchemi.mc import SGC, NonlocalSwap
 from nvalchemi.dynamics.hooks import MaxForceClampHook
 from nvalchemi.dynamics.integrators.npt import NPT
 from nvalchemi.dynamics.integrators.nvt_langevin import NVTLangevin
+from nvalchemi.hybrid import HybridMCMD
+from nvalchemi.mc import SGC, NonlocalSwap
 from nvalchemi.models.uma import UMAWrapper
 
 # Experimental T_m (K) and a hot-melt temperature that liquefies a 1000-atom
@@ -279,7 +278,9 @@ def _integrate(
     hybrid = (
         None
         if mc is None or mc_steps < 1
-        else HybridMCMD(mc=mc, md=dynamics, mc_steps=mc_steps, md_steps=chunk, mc_energy_only=True)
+        else HybridMCMD(
+            mc=mc, md=dynamics, mc_steps=mc_steps, md_steps=chunk, mc_energy_only=True
+        )
     )
     with dynamics:
         dynamics.compute(batch)
@@ -381,14 +382,20 @@ def main() -> None:
     if x_pt is None:
         default_melt = DEFAULT_MELT_TEMPERATURE_K[el]
     else:
-        default_melt = (1 - x_pt) * DEFAULT_MELT_TEMPERATURE_K["Au"] + x_pt * DEFAULT_MELT_TEMPERATURE_K["Pt"]
+        default_melt = (1 - x_pt) * DEFAULT_MELT_TEMPERATURE_K[
+            "Au"
+        ] + x_pt * DEFAULT_MELT_TEMPERATURE_K["Pt"]
     melt_T = args.melt_temperature_k or max(default_melt, 1.8 * T)
     dmu = args.delta_mu_ev
     if dmu is not None and x_pt is not None:
-        raise SystemExit("--x-pt (canonical) and --delta-mu-ev (SGC) exclude each other")
+        raise SystemExit(
+            "--x-pt (canonical) and --delta-mu-ev (SGC) exclude each other"
+        )
     if x_pt is not None and not 0.0 < x_pt < 1.0:
         raise SystemExit("--x-pt must be strictly between 0 and 1")
-    if dmu is not None and "merge_mole=true" in args.inference_settings.replace(" ", ""):
+    if dmu is not None and "merge_mole=true" in args.inference_settings.replace(
+        " ", ""
+    ):
         raise SystemExit("--delta-mu-ev changes the composition: use merge_mole=false")
     out = args.out_dir / (el if x_pt is None else f"x{x_pt:.2f}") / f"T{T:g}"
     out.mkdir(parents=True, exist_ok=True)
@@ -397,8 +404,16 @@ def main() -> None:
         f"[setup] {el} T={T:g} K (exp. T_m {EXPERIMENTAL_TM_K[el]:g} K) nx={args.nx} nz/phase={args.nz} "
         f"dt={dt} fs melt_T={melt_T:g} K checkpoint={CHECKPOINT} task={TASK} device={device} "
         f"(single-graph batch, no multi-walker batching)"
-        + ("" if dmu is None else f" SGC delta_mu={dmu:+.4f} eV, MC trials/chunk frac={args.mc_step_fraction}")
-        + ("" if x_pt is None else f" canonical x_Pt={x_pt:.3f}, swap trials/chunk frac={args.mc_step_fraction}"),
+        + (
+            ""
+            if dmu is None
+            else f" SGC delta_mu={dmu:+.4f} eV, MC trials/chunk frac={args.mc_step_fraction}"
+        )
+        + (
+            ""
+            if x_pt is None
+            else f" canonical x_Pt={x_pt:.3f}, swap trials/chunk frac={args.mc_step_fraction}"
+        ),
         flush=True,
     )
 
@@ -414,10 +429,14 @@ def main() -> None:
         solid0 = bulk(el, "fcc", cubic=True) * (args.nx, args.nx, args.nz)
     else:
         # random alloy on a Vegard lattice (ASE reference lattice constants); NPT relaxes it
-        a0 = (1 - x_pt) * bulk("Au", "fcc", cubic=True).cell[0, 0] + x_pt * bulk("Pt", "fcc", cubic=True).cell[0, 0]
+        a0 = (1 - x_pt) * bulk("Au", "fcc", cubic=True).cell[0, 0] + x_pt * bulk(
+            "Pt", "fcc", cubic=True
+        ).cell[0, 0]
         solid0 = bulk(el, "fcc", a=a0, cubic=True) * (args.nx, args.nx, args.nz)
         z = np.full(len(solid0), SPECIES[0])
-        z[np.random.default_rng(args.seed).permutation(len(z))[: round(x_pt * len(z))]] = SPECIES[1]
+        z[
+            np.random.default_rng(args.seed).permutation(len(z))[: round(x_pt * len(z))]
+        ] = SPECIES[1]
         solid0.set_atomic_numbers(z)
     data = _data_from_arrays(
         solid0.numbers,
@@ -450,8 +469,14 @@ def main() -> None:
         if dmu is not None:
             return dict(mc=_sgc(model, T, dmu, seed, device), mc_steps=mc_steps)
         if x_pt is not None:
-            return dict(mc=NonlocalSwap(model=model, temperature=torch.tensor([T], device=device), random_seed=seed),
-                        mc_steps=mc_steps)
+            return dict(
+                mc=NonlocalSwap(
+                    model=model,
+                    temperature=torch.tensor([T], device=device),
+                    random_seed=seed,
+                ),
+                mc_steps=mc_steps,
+            )
         return {}
 
     _integrate(
@@ -619,8 +644,12 @@ def main() -> None:
             print(
                 f"[prod] {t_ps:6.2f} ps  E/atom={s['energy'] / len(s['masses']):.4f}  T={_temperature(s):6.0f}  "
                 f"L=({L[0]:.2f},{L[1]:.2f},{L[2]:.2f})  solid-like={state['f_s']:.3f}"
-                + ("" if dmu is None and x_pt is None else f"  x_Pt solid/liquid={(s['numbers'][m] == SPECIES[1]).mean():.3f}/"
-                   f"{(s['numbers'][~m] == SPECIES[1]).mean() if (~m).any() else float('nan'):.3f}"),
+                + (
+                    ""
+                    if dmu is None and x_pt is None
+                    else f"  x_Pt solid/liquid={(s['numbers'][m] == SPECIES[1]).mean():.3f}/"
+                    f"{(s['numbers'][~m] == SPECIES[1]).mean() if (~m).any() else float('nan'):.3f}"
+                ),
                 flush=True,
             )
             if state["streak"] >= 3:
@@ -664,12 +693,21 @@ def main() -> None:
     final = snaps["solid_mask"][-1].mean() if snaps["solid_mask"] else float("nan")
     # Phase compositions over the second half of the snapshots (solid-like vs liquid-like atoms).
     half = slice(len(snaps["pt"]) // 2, None)
+
     def _x(sel: bool) -> float:
-        num = sum(int((p & (m == sel)).sum()) for p, m in zip(snaps["pt"][half], snaps["solid_mask"][half]))
+        num = sum(
+            int((p & (m == sel)).sum())
+            for p, m in zip(snaps["pt"][half], snaps["solid_mask"][half])
+        )
         den = sum(int((m == sel).sum()) for m in snaps["solid_mask"][half])
         return num / den if den else float("nan")
+
     x_solid, x_liquid = _x(True), _x(False)
-    x_total = float(np.mean([p.mean() for p in snaps["pt"][half]])) if snaps["pt"] else float("nan")
+    x_total = (
+        float(np.mean([p.mean() for p in snaps["pt"][half]]))
+        if snaps["pt"]
+        else float("nan")
+    )
     verdict = state["verdict"]
     if verdict.startswith("coexisting"):
         verdict = (
@@ -696,7 +734,9 @@ def main() -> None:
         verdict=verdict,
         delta_mu_ev=dmu,
         x_pt_target=x_pt,
-        mc_step_fraction=args.mc_step_fraction if dmu is not None or x_pt is not None else 0.0,
+        mc_step_fraction=args.mc_step_fraction
+        if dmu is not None or x_pt is not None
+        else 0.0,
         x_pt_solid=x_solid,
         x_pt_liquid=x_liquid,
         x_pt_total=x_total,

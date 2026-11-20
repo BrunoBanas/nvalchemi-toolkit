@@ -144,7 +144,9 @@ class TraceConfig:
     """Settings for one boundary trace: start point, target temperature, step control and test thresholds."""
 
     t0: float  # starting temperature (K), a known coexistence point
-    mu0: float | None  # coexistence dmu at t0 (eV); None = from the dilute formula (needs dilute_dG)
+    mu0: (
+        float | None
+    )  # coexistence dmu at t0 (eV); None = from the dilute formula (needs dilute_dG)
     t_stop: float  # trace toward this temperature (either direction)
     dt: float = 50.0  # initial |dT| (K)
     dt_min: float = 5.0  # give up below this |dT|
@@ -169,19 +171,33 @@ class TraceConfig:
         None  # start compositions: enable recentering of the start point
     )
     x_g0: float | None = None
-    dilute_dG: dict | None = None  # {T: dG or {"dG": .., "se": ..}}: G_B - G_A of the pure phases (eV/atom)
-    dilute_tol: float = 0.003  # leave anchored mode when formula and eq. 29 differ by more (eV)
+    dilute_dG: dict | None = (
+        None  # {T: dG or {"dG": .., "se": ..}}: G_B - G_A of the pure phases (eV/atom)
+    )
+    dilute_tol: float = (
+        0.003  # leave anchored mode when formula and eq. 29 differ by more (eV)
+    )
     dilute_x_max: float = 0.15  # ... or when x_a or 1 - x_g exceeds this
     dt_floor: float = 0.0  # minimum step until the first rejection (K); 0 = off
-    melt_T: float | None = None  # pure host melting point (K): solid-liquid trace from T_m
+    melt_T: float | None = (
+        None  # pure host melting point (K): solid-liquid trace from T_m
+    )
     melt_T_se: float = 0.0
     melt_host: str = "A"  # "A" (x -> 0 end) or "B" (x -> 1 end)
-    melt_dH: float | None = None  # liquid - solid enthalpy of the host at T_m (eV/atom); None = measure
+    melt_dH: float | None = (
+        None  # liquid - solid enthalpy of the host at T_m (eV/atom); None = measure
+    )
     melt_dH_se: float = 0.0
     melt_dCp: float = 0.0  # liquid - solid heat capacity (eV/atom/K)
-    melt_mu_pure: float | None = None  # dmu keeping both walkers pure (for measuring dH_m)
-    melt_mu_probe: float | None = None  # dmu giving a few % solute at T_m (partition-ratio probe)
-    cross_mu: dict | None = None  # {T: dmu} of a competing line: stop where the trace crosses it
+    melt_mu_pure: float | None = (
+        None  # dmu keeping both walkers pure (for measuring dH_m)
+    )
+    melt_mu_probe: float | None = (
+        None  # dmu giving a few % solute at T_m (partition-ratio probe)
+    )
+    cross_mu: dict | None = (
+        None  # {T: dmu} of a competing line: stop where the trace crosses it
+    )
 
 
 # ----------------------------------------------------------------------------- physics
@@ -247,7 +263,9 @@ def melt_dG(cfg: TraceConfig, dH: float, dH_se: float, T: float) -> tuple[float,
     return dG, math.hypot(dH * T / Tm**2 * cfg.melt_T_se, (1.0 - T / Tm) * dH_se)
 
 
-def melt_mu(T: float, dG: float, ys: float, yl: float, mu_run: float, sign: float) -> float | None:
+def melt_mu(
+    T: float, dG: float, ys: float, yl: float, mu_run: float, sign: float
+) -> float | None:
     """Coexistence dmu from one run at mu_run with solute fractions ys (solid), yl (liquid).
 
     Solves kT ln[(1 - r ys)/(1 - r yl)] = dG for the solute scale factor r, then
@@ -362,13 +380,15 @@ class BoundaryTracer:
             stop_reason=None,
             next_dt=None,
             mode="dilute" if (cfg.dilute_dG or cfg.melt_T is not None) else "eq29",
-            anchor="melt" if cfg.melt_T is not None else ("dilute" if cfg.dilute_dG else None),
+            anchor="melt"
+            if cfg.melt_T is not None
+            else ("dilute" if cfg.dilute_dG else None),
         )
 
     # -- persistence ---------------------------------------------------------------
     def _save(self):
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.trace, indent=2, default=float))
+        tmp.write_text(json.dumps(self.trace, indent=2, default=float) + "\n")
         os.replace(tmp, self.path)
 
     def _event(self, **kw):
@@ -391,15 +411,21 @@ class BoundaryTracer:
             )
         pts = self.trace["points"]
         if cfg.melt_T is not None:
-            if "direction" not in self.trace:  # pure + probe runs at T_m, first anchored point
+            if (
+                "direction" not in self.trace
+            ):  # pure + probe runs at T_m, first anchored point
                 self._melt_start(state_a, state_g)
                 if self.trace["status"] != "running":
                     return self.trace
             self._set_kinds(self.trace["phase_kind"])
-        direction = self.trace.get("direction") or (1.0 if cfg.t_stop > cfg.t0 else -1.0)
+        direction = self.trace.get("direction") or (
+            1.0 if cfg.t_stop > cfg.t0 else -1.0
+        )
         t_stop = self.trace.get("t_stop", cfg.t_stop)
 
-        if not pts and self.trace.get("mode") == "dilute":  # anchored start from the pure phases
+        if (
+            not pts and self.trace.get("mode") == "dilute"
+        ):  # anchored start from the pure phases
             self._dilute_start(state_a, state_g, direction)
             if self.trace["status"] != "running":
                 return self.trace
@@ -620,7 +646,9 @@ class BoundaryTracer:
     def _floored(self, nxt: float) -> float:
         """Apply dt_floor (only until the first rejection) and dt_max to a proposed |dT|."""
         cfg = self.cfg
-        if cfg.dt_floor and not any(e.get("kind") == "rejected" for e in self.trace["events"]):
+        if cfg.dt_floor and not any(
+            e.get("kind") == "rejected" for e in self.trace["events"]
+        ):
             nxt = max(nxt, cfg.dt_floor)
         return min(nxt, cfg.dt_max)
 
@@ -633,13 +661,17 @@ class BoundaryTracer:
         cfg, pts = self.cfg, self.trace["points"]
         runs = 0
         while True:
-            a, g, sa_new, sg_new = self.engine.run(T, mu_run, sa, sg, tag=f"{tag}{runs}")
+            a, g, sa_new, sg_new = self.engine.run(
+                T, mu_run, sa, sg, tag=f"{tag}{runs}"
+            )
             runs += 1
             split = phase_problems(cfg, pts, T, a, g)
             problems = split["a"] + split["g"] + split["gap"]
             anchor = self._anchor(T, a, g, mu_run)
             if anchor is None and not problems:
-                problems = ["anchor formula has no solution (solute partitioning has the wrong sign)"]
+                problems = [
+                    "anchor formula has no solution (solute partitioning has the wrong sign)"
+                ]
             mu_f, se = anchor if anchor is not None else (mu_run, 0.0)
             if problems or abs(mu_f - mu_run) <= cfg.tol_mu or runs > cfg.max_corr:
                 return a, g, sa_new, sg_new, mu_run, mu_f, runs, problems, se
@@ -651,22 +683,29 @@ class BoundaryTracer:
         cfg = self.cfg
         if cfg.melt_T is None:
             d = dilute_dG_at(cfg, T)
-            return None if d is None else (dilute_mu(T, d[0], a["x"], g["x"]), dilute_se(T, d[1], a, g))
+            return (
+                None
+                if d is None
+                else (dilute_mu(T, d[0], a["x"], g["x"]), dilute_se(T, d[1], a, g))
+            )
         m = self.trace["melt"]
         dG, dG_se = melt_dG(cfg, m["dH"], m["dH_se"], T)
         sign = 1.0 if cfg.melt_host == "A" else -1.0
-        s, l = (a, g) if self.trace["phase_kind"]["a"] == "solid" else (g, a)
+        s, liq = (a, g) if self.trace["phase_kind"]["a"] == "solid" else (g, a)
 
         def mu(dg, ys, yl):
             return melt_mu(T, dg, ys, yl, mu_run, sign)
 
-        ys, yl = self._solute(s), self._solute(l)
+        ys, yl = self._solute(s), self._solute(liq)
         m0 = mu(dG, ys, yl)
         if m0 is None:
             return None
         errs = []
-        for dg, y1, y2 in ((dG + dG_se, ys, yl), (dG, ys + (s.get("x_se") or 0.0), yl),
-                           (dG, ys, yl + (l.get("x_se") or 0.0))):
+        for dg, y1, y2 in (
+            (dG + dG_se, ys, yl),
+            (dG, ys + (s.get("x_se") or 0.0), yl),
+            (dG, ys, yl + (liq.get("x_se") or 0.0)),
+        ):
             v = mu(dg, y1, y2)
             errs.append(0.0 if v is None else v - m0)
         return m0, math.sqrt(sum(e * e for e in errs))
@@ -691,12 +730,17 @@ class BoundaryTracer:
         """Pure runs at T_m (dH_m), probe run (partition ratio -> direction), first anchored point."""
         cfg, tr = self.cfg, self.trace
         Tm = cfg.melt_T
-        m = tr.setdefault("melt", dict(T_m=Tm, T_m_se=cfg.melt_T_se, host=cfg.melt_host))
+        m = tr.setdefault(
+            "melt", dict(T_m=Tm, T_m_se=cfg.melt_T_se, host=cfg.melt_host)
+        )
         self._set_kinds({"a": "solid", "g": "liquid"})
 
-        def bad(s, l):
-            return [f"{k} at T_m: {o.get('phase_note', 'left its phase')}" for k, o in (("solid", s), ("liquid", l))
-                    if o.get("phase_ok") is False]
+        def bad(s, liq):
+            return [
+                f"{k} at T_m: {o.get('phase_note', 'left its phase')}"
+                for k, o in (("solid", s), ("liquid", liq))
+                if o.get("phase_ok") is False
+            ]
 
         def fail(reason):
             tr.update(status="failed", stop_reason="melt start invalid: " + reason)
@@ -705,40 +749,74 @@ class BoundaryTracer:
         if cfg.melt_dH is None:
             if cfg.melt_mu_pure is None:
                 raise ValueError("melt mode needs melt_dH or melt_mu_pure")
-            s, l, s_solid, s_liquid = self.engine.run(Tm, cfg.melt_mu_pure, s_solid, s_liquid, tag=f"T{Tm:g}.melt.pure")
-            if bad(s, l):
-                return fail("; ".join(bad(s, l)))
-            dH, dH_se = l["E"] - s["E"], math.hypot(s.get("E_se") or 0.0, l.get("E_se") or 0.0)
-            m.update(pure=dict(mu=cfg.melt_mu_pure, E_solid=s["E"], E_liquid=l["E"], x_solid=s["x"], x_liquid=l["x"]))
+            s, liq, s_solid, s_liquid = self.engine.run(
+                Tm, cfg.melt_mu_pure, s_solid, s_liquid, tag=f"T{Tm:g}.melt.pure"
+            )
+            if bad(s, liq):
+                return fail("; ".join(bad(s, liq)))
+            dH, dH_se = (
+                liq["E"] - s["E"],
+                math.hypot(s.get("E_se") or 0.0, liq.get("E_se") or 0.0),
+            )
+            m.update(
+                pure=dict(
+                    mu=cfg.melt_mu_pure,
+                    E_solid=s["E"],
+                    E_liquid=liq["E"],
+                    x_solid=s["x"],
+                    x_liquid=liq["x"],
+                )
+            )
         else:
             dH, dH_se = cfg.melt_dH, cfg.melt_dH_se
         if dH <= 0:
-            return fail(f"dH_m = {dH:.4f} eV/atom is not positive (did the liquid crystallize?)")
+            return fail(
+                f"dH_m = {dH:.4f} eV/atom is not positive (did the liquid crystallize?)"
+            )
         m.update(dH=dH, dH_se=dH_se)
         if cfg.melt_mu_probe is None:
             raise ValueError("melt mode needs melt_mu_probe")
-        s, l, s_solid, s_liquid = self.engine.run(Tm, cfg.melt_mu_probe, s_solid, s_liquid, tag=f"T{Tm:g}.melt.probe")
-        if bad(s, l):
-            return fail("; ".join(bad(s, l)))
-        ys, yl = self._solute(s), self._solute(l)
-        d_se = math.hypot(s.get("x_se") or 0.0, l.get("x_se") or 0.0)
-        m.update(probe=dict(mu=cfg.melt_mu_probe, y_solid=ys, y_liquid=yl, ratio=ys / yl if yl > 0 else None))
+        s, liq, s_solid, s_liquid = self.engine.run(
+            Tm, cfg.melt_mu_probe, s_solid, s_liquid, tag=f"T{Tm:g}.melt.probe"
+        )
+        if bad(s, liq):
+            return fail("; ".join(bad(s, liq)))
+        ys, yl = self._solute(s), self._solute(liq)
+        d_se = math.hypot(s.get("x_se") or 0.0, liq.get("x_se") or 0.0)
+        m.update(
+            probe=dict(
+                mu=cfg.melt_mu_probe,
+                y_solid=ys,
+                y_liquid=yl,
+                ratio=ys / yl if yl > 0 else None,
+            )
+        )
         if abs(yl - ys) <= cfg.z * max(d_se, 1e-6):
-            return fail(f"solid and liquid solute fractions {ys:.4f} / {yl:.4f} indistinguishable "
-                        f"(se {d_se:.4f}): raise melt_mu_probe toward more solute")
-        direction = -1.0 if yl > ys else 1.0  # solute prefers the liquid -> melting point lowered
+            return fail(
+                f"solid and liquid solute fractions {ys:.4f} / {yl:.4f} indistinguishable "
+                f"(se {d_se:.4f}): raise melt_mu_probe toward more solute"
+            )
+        direction = (
+            -1.0 if yl > ys else 1.0
+        )  # solute prefers the liquid -> melting point lowered
         solid_low = (ys < yl) if cfg.melt_host == "A" else (ys > yl)
-        kinds = {"a": "solid", "g": "liquid"} if solid_low else {"a": "liquid", "g": "solid"}
+        kinds = (
+            {"a": "solid", "g": "liquid"}
+            if solid_low
+            else {"a": "liquid", "g": "solid"}
+        )
         sa, sg = (s_solid, s_liquid) if solid_low else (s_liquid, s_solid)
-        a, g = (s, l) if solid_low else (l, s)
+        a, g = (s, liq) if solid_low else (liq, s)
         t0 = Tm + direction * abs(cfg.dt)
         t_stop = Tm + direction * abs(cfg.t_stop - Tm)
         tr.update(direction=direction, t0=t0, t_stop=t_stop, phase_kind=kinds)
         self._set_kinds(kinds)
         self._save()
-        self.log(f"[trace] melt start: T_m={Tm:g} K dH_m={dH:.4f}+-{dH_se:.4f} eV/atom; probe mu={cfg.melt_mu_probe:.4f}: "
-                 f"y_solid={ys:.4f} y_liquid={yl:.4f} -> line runs {'DOWN' if direction < 0 else 'UP'} from T_m; "
-                 f"a = {kinds['a']}, g = {kinds['g']}")
+        self.log(
+            f"[trace] melt start: T_m={Tm:g} K dH_m={dH:.4f}+-{dH_se:.4f} eV/atom; probe mu={cfg.melt_mu_probe:.4f}: "
+            f"y_solid={ys:.4f} y_liquid={yl:.4f} -> line runs {'DOWN' if direction < 0 else 'UP'} from T_m; "
+            f"a = {kinds['a']}, g = {kinds['g']}"
+        )
         anchor = self._anchor(t0, a, g, cfg.melt_mu_probe)
         if anchor is None:
             return fail("no anchored dmu at t0")
@@ -749,7 +827,9 @@ class BoundaryTracer:
         cfg, pts = self.cfg, self.trace["points"]
         if not cfg.cross_mu or len(pts) < 2:
             return False
-        sides = [(p["T"], p["mu"], interp_table(cfg.cross_mu, p["T"])) for p in pts[-2:]]
+        sides = [
+            (p["T"], p["mu"], interp_table(cfg.cross_mu, p["T"])) for p in pts[-2:]
+        ]
         if any(c is None for _, _, c in sides):
             return False
         (T0, m0, c0), (T1, m1, c1) = sides
@@ -757,9 +837,13 @@ class BoundaryTracer:
         if d0 * d1 > 0:
             return False
         w = d0 / (d0 - d1) if d0 != d1 else 0.0
-        self.trace["three_phase"] = dict(T=T0 + w * (T1 - T0), mu=m0 + w * (m1 - m0), between=[T0, T1])
-        self._finish(f"crossed the competing coexistence line (three-phase point) near "
-                     f"{self.trace['three_phase']['T']:.0f} K")
+        self.trace["three_phase"] = dict(
+            T=T0 + w * (T1 - T0), mu=m0 + w * (m1 - m0), between=[T0, T1]
+        )
+        self._finish(
+            f"crossed the competing coexistence line (three-phase point) near "
+            f"{self.trace['three_phase']['T']:.0f} K"
+        )
         return True
 
     def _dilute_start(self, state_a, state_g, direction, t0=None, mu_guess=None):
@@ -775,17 +859,39 @@ class BoundaryTracer:
             t0, mu_guess, state_a, state_g, f"T{t0:g}.start.dil"
         )
         if problems:
-            self.trace.update(status="failed", stop_reason="anchored start invalid: " + "; ".join(problems))
+            self.trace.update(
+                status="failed",
+                stop_reason="anchored start invalid: " + "; ".join(problems),
+            )
             self._save()
             return
         f, fse = slope(t0, mu_run, a, g)
-        pts.append(dict(T=t0, mu=mu_run, mu_se=math.hypot(se, mu_f - mu_run), a=a, g=g, f=f, f_se=fse,
-                        dT=0.0, corrector_runs=runs, mu_pred=mu_guess, mu_corr=mu_f, mu_dilute=mu_f,
-                        anchored=True, state_a=sa, state_g=sg, recentered=None))
+        pts.append(
+            dict(
+                T=t0,
+                mu=mu_run,
+                mu_se=math.hypot(se, mu_f - mu_run),
+                a=a,
+                g=g,
+                f=f,
+                f_se=fse,
+                dT=0.0,
+                corrector_runs=runs,
+                mu_pred=mu_guess,
+                mu_corr=mu_f,
+                mu_dilute=mu_f,
+                anchored=True,
+                state_a=sa,
+                state_g=sg,
+                recentered=None,
+            )
+        )
         self.trace["next_dt"] = direction * abs(cfg.dt)
         self._save()
-        self.log(f"[trace] anchored start T={t0:g} mu={mu_run:.4f} (guess {mu_guess:.4f}) x_a={a['x']:.4f} "
-                 f"x_g={g['x']:.4f} runs={runs}")
+        self.log(
+            f"[trace] anchored start T={t0:g} mu={mu_run:.4f} (guess {mu_guess:.4f}) x_a={a['x']:.4f} "
+            f"x_g={g['x']:.4f} runs={runs}"
+        )
 
     def _dilute_step(self, p0, T1, dT, db, direction):
         """One anchored step; switches the trace to eq. (29) when the dilute regime ends."""
@@ -796,11 +902,18 @@ class BoundaryTracer:
             # regime (the check compares consecutive points): flag it; restart lower to be safe.
             first = len(pts) == 1
             self.trace.update(mode="eq29", dilute_exit_T=p0["T"])
-            self._event(T=T1, kind="dilute-exit", last_anchored_T=p0["T"], reason=reason,
-                        start_suspect=first)
+            self._event(
+                T=T1,
+                kind="dilute-exit",
+                last_anchored_T=p0["T"],
+                reason=reason,
+                start_suspect=first,
+            )
             if first:
-                self.log(f"[trace] WARNING: dilute regime left at the first step from t0={p0['T']:g} K; "
-                         "the start may be biased, restart from a lower t0")
+                self.log(
+                    f"[trace] WARNING: dilute regime left at the first step from t0={p0['T']:g} K; "
+                    "the start may be biased, restart from a lower t0"
+                )
             self._save()
 
         if not self._anchor_ok(T1):
@@ -818,29 +931,75 @@ class BoundaryTracer:
             T1, mu_pred, p0["state_a"], p0["state_g"], f"T{T1:g}.dil"
         )
         if problems:
-            return "rejected-end" if self._reject(p0, T1, dT, mu_run, problems) else "rejected"
+            return (
+                "rejected-end"
+                if self._reject(p0, T1, dT, mu_run, problems)
+                else "rejected"
+            )
         f1, f1se = slope(T1, mu_run, a, g)
         mu29 = p0["mu"] + 0.5 * (p0["f"] + f1) * db
         x_solute = self._x_solute(a, g)
         if abs(mu_f - mu29) > cfg.dilute_tol or x_solute > cfg.dilute_x_max:
-            reason = (f"formula {mu_f:.5f} vs eq. 29 {mu29:.5f} eV ({1e3 * (mu_f - mu29):+.2f} meV)"
-                      if abs(mu_f - mu29) > cfg.dilute_tol else f"solute fraction {x_solute:.3f} > {cfg.dilute_x_max}")
+            reason = (
+                f"formula {mu_f:.5f} vs eq. 29 {mu29:.5f} eV ({1e3 * (mu_f - mu29):+.2f} meV)"
+                if abs(mu_f - mu29) > cfg.dilute_tol
+                else f"solute fraction {x_solute:.3f} > {cfg.dilute_x_max}"
+            )
             leave(reason)
-            if abs(mu29 - mu_run) <= cfg.tol_mu:  # this run is already a valid eq. 29 point: keep it
+            if (
+                abs(mu29 - mu_run) <= cfg.tol_mu
+            ):  # this run is already a valid eq. 29 point: keep it
                 step_se = 0.5 * abs(db) * math.hypot(p0["f_se"], f1se)
-                pts.append(dict(T=T1, mu=mu_run, mu_se=math.hypot(p0["mu_se"], step_se), a=a, g=g, f=f1,
-                                f_se=f1se, dT=dT, corrector_runs=runs, mu_pred=mu_pred, mu_corr=mu29,
-                                mu_dilute=mu_f, anchored=False, state_a=sa, state_g=sg))
+                pts.append(
+                    dict(
+                        T=T1,
+                        mu=mu_run,
+                        mu_se=math.hypot(p0["mu_se"], step_se),
+                        a=a,
+                        g=g,
+                        f=f1,
+                        f_se=f1se,
+                        dT=dT,
+                        corrector_runs=runs,
+                        mu_pred=mu_pred,
+                        mu_corr=mu29,
+                        mu_dilute=mu_f,
+                        anchored=False,
+                        state_a=sa,
+                        state_g=sg,
+                    )
+                )
                 self.trace["next_dt"] = direction * self._floored(abs(dT))
                 self._save()
             return "switched"  # otherwise the main loop redoes T1 with eq. (29) from p0
-        pts.append(dict(T=T1, mu=mu_run, mu_se=math.hypot(se, mu_f - mu_run), a=a, g=g, f=f1, f_se=f1se, dT=dT,
-                        corrector_runs=runs, mu_pred=mu_pred, mu_corr=mu_f, mu_dilute=mu_f, mu_eq29=mu29,
-                        anchored=True, state_a=sa, state_g=sg))
-        self.trace["next_dt"] = direction * self._floored(min(abs(dT) * 1.5, cfg.dt_max))
+        pts.append(
+            dict(
+                T=T1,
+                mu=mu_run,
+                mu_se=math.hypot(se, mu_f - mu_run),
+                a=a,
+                g=g,
+                f=f1,
+                f_se=f1se,
+                dT=dT,
+                corrector_runs=runs,
+                mu_pred=mu_pred,
+                mu_corr=mu_f,
+                mu_dilute=mu_f,
+                mu_eq29=mu29,
+                anchored=True,
+                state_a=sa,
+                state_g=sg,
+            )
+        )
+        self.trace["next_dt"] = direction * self._floored(
+            min(abs(dT) * 1.5, cfg.dt_max)
+        )
         self._save()
-        self.log(f"[trace] T={T1:g} anchored mu={mu_run:.4f} (eq. 29 {mu29:.4f}, {1e3 * (mu_f - mu29):+.2f} meV) "
-                 f"x_a={a['x']:.4f} x_g={g['x']:.4f} runs={runs} next dT={self.trace['next_dt']:+g}")
+        self.log(
+            f"[trace] T={T1:g} anchored mu={mu_run:.4f} (eq. 29 {mu29:.4f}, {1e3 * (mu_f - mu29):+.2f} meV) "
+            f"x_a={a['x']:.4f} x_g={g['x']:.4f} runs={runs} next dT={self.trace['next_dt']:+g}"
+        )
         return "accepted"
 
     # -- recentering (paper Fig. 6) --------------------------------------------------
@@ -1147,7 +1306,7 @@ def report(
         critical_estimate=crit,
     )
     Path(out, "traced_boundary.json").write_text(
-        json.dumps(summary, indent=2, default=float)
+        json.dumps(summary, indent=2, default=float) + "\n"
     )
 
     import matplotlib
