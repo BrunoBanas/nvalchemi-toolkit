@@ -57,11 +57,14 @@ import argparse
 import copy
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
 
-SPECIES = ("Au", "Pt")  # A, B in the sgc-phase-boundary convention (x = x_Pt)
+# A, B in the sgc-phase-boundary convention (x = x_B), from NVALCHEMI_SPECIES="A,B" like campaign_lib
+# (default Au,Pt); reads <root>/<A>.json and <root>/<B>.json.
+SPECIES = tuple(s.strip() for s in os.environ.get("NVALCHEMI_SPECIES", "Au,Pt").split(","))
 
 
 # ----------------------------------------------------------------------------- force constants
@@ -299,8 +302,8 @@ def main() -> None:
 
     pure, table = {}, []
     for T in args.temperature:
-        (ga, ga_se), (gb, gb_se) = g_of_T(els["Au"], T), g_of_T(els["Pt"], T)
-        (ua, ua_se), (ub, ub_se) = u_at(els["Au"], T), u_at(els["Pt"], T)
+        (ga, ga_se), (gb, gb_se) = g_of_T(els[SPECIES[0]], T), g_of_T(els[SPECIES[1]], T)
+        (ua, ua_se), (ub, ub_se) = u_at(els[SPECIES[0]], T), u_at(els[SPECIES[1]], T)
         d_g, d_u = gb - ga, ub - ua
         row = dict(
             T=T,
@@ -312,10 +315,10 @@ def main() -> None:
             dU_ladder_se=math.hypot(ua_se, ub_se),
             dG_excess=d_g - d_u,
             dG_excess_se=math.sqrt(ga_se**2 + gb_se**2 + ua_se**2 + ub_se**2),
-            harmonic_only_dG_excess=harmonic_ts(els["Pt"], T)
-            - harmonic_ts(els["Au"], T),
+            harmonic_only_dG_excess=harmonic_ts(els[SPECIES[1]], T)
+            - harmonic_ts(els[SPECIES[0]], T),
         )
-        row["dS_k_per_atom"] = -(row["dG_excess"]) / (els["Au"]["_consts"][4] * T)
+        row["dS_k_per_atom"] = -(row["dG_excess"]) / (els[SPECIES[0]]["_consts"][4] * T)
         c = cal.get(f"{T:g}")
         if c:
             row["calibration_delta_mu_ref"] = c["delta_mu_ref_eV"]
@@ -332,12 +335,12 @@ def main() -> None:
         )
         dg = {}
         for T in (t for t in grid if lo <= t <= hi):
-            (ga, ga_se), (gb, gb_se) = g_of_T(els["Au"], T), g_of_T(els["Pt"], T)
+            (ga, ga_se), (gb, gb_se) = g_of_T(els[SPECIES[0]], T), g_of_T(els[SPECIES[1]], T)
             dg[f"{T:g}"] = {"dG": gb - ga, "se": math.hypot(ga_se, gb_se)}
         (args.out / "pure_dG.json").write_text(
             json.dumps(
                 dict(
-                    convention="dG = g_Pt - g_Au (eV/atom), classical Gibbs energy at the run pressure"
+                    convention=f"dG = g_{SPECIES[1]} - g_{SPECIES[0]} (eV/atom), classical Gibbs energy at the run pressure"
                     + (
                         ", each element on its NPT ladder's energy zero"
                         if args.internal_reference
@@ -371,12 +374,12 @@ def main() -> None:
         )
     for r in table:
         print(
-            f"T={r['T']:g} K: g_Pt-g_Au = {r['dG']:.5f} eV, <U>_Pt-<U>_Au = {r['dU_ladder']:.5f} eV  ->  "
+            f"T={r['T']:g} K: g_B-g_A = {r['dG']:.5f} eV, <U>_B-<U>_A = {r['dU_ladder']:.5f} eV  ->  "
             f"dG_excess = {1e3 * r['dG_excess']:+.2f} +/- {1e3 * r['dG_excess_se']:.2f} meV "
-            f"(harmonic only {1e3 * r['harmonic_only_dG_excess']:+.2f}), dS(Pt-Au) = {r['dS_k_per_atom']:+.3f} k"
+            f"(harmonic only {1e3 * r['harmonic_only_dG_excess']:+.2f}), dS(B-A) = {r['dS_k_per_atom']:+.3f} k"
             + (
                 f"; vs SGC calibration delta_mu_ref {r['calibration_delta_mu_ref']:.5f}: "
-                f"g_Pt-g_Au - delta_mu_ref = {1e3 * r['dG_minus_calibration_delta_mu_ref']:+.2f} meV"
+                f"g_B-g_A - delta_mu_ref = {1e3 * r['dG_minus_calibration_delta_mu_ref']:+.2f} meV"
                 if "calibration_delta_mu_ref" in r
                 else ""
             )
@@ -412,8 +415,8 @@ def main() -> None:
     d_ex = [
         1e3
         * (
-            (g_of_T(els["Pt"], t)[0] - g_of_T(els["Au"], t)[0])
-            - (u_at(els["Pt"], t)[0] - u_at(els["Au"], t)[0])
+            (g_of_T(els[SPECIES[1]], t)[0] - g_of_T(els[SPECIES[0]], t)[0])
+            - (u_at(els[SPECIES[1]], t)[0] - u_at(els[SPECIES[0]], t)[0])
         )
         for t in tt
     ]
@@ -439,7 +442,7 @@ def main() -> None:
     ax[2].set(
         xlabel="T (K)",
         ylabel="meV/atom",
-        title=r"(c) $\Delta G_{\rm excess}=\Delta g-\Delta\langle U\rangle$ (Pt$-$Au)",
+        title=r"(c) $\Delta G_{\rm excess}=\Delta g-\Delta\langle U\rangle$ " + f"({SPECIES[1]}$-${SPECIES[0]})",
     )
     for a in ax:
         a.grid(alpha=0.25, lw=0.5)

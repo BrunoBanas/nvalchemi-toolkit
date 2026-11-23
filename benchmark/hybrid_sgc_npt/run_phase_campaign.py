@@ -71,7 +71,11 @@ fresh ``liquid_state`` with ``"melt_T": 3000`` is melted by ``melt_ps`` of NPT a
 before its first block) and traces the solidus/liquidus pair with boundary_tracer's melt anchor:
 dH_m measured at ``melt_mu_pure``, partition ratio and direction from ``melt_mu_probe``.
 ``"cross_mu"`` (a {T: dmu} dict, or a CSV with T and mu columns such as
-traced_boundary_current.csv) stops it at the three-phase point. The liquid walker is checked the
+traced_boundary_current.csv) stops it at the three-phase point. ``"cross_from": "<trace>"`` instead
+waits for a solvus trace of the same spec and takes cross_mu from its accepted points, and
+``"melt_mu_from_cross": {"pure_kt": 8, "probe_kt": 2.8}`` then places melt_mu_pure / melt_mu_probe
+that many kT_m beyond the solvus dmu at T_m (so a eutectic's melt traces start as soon as the upward
+solvus trace ends, alongside its retrace). The liquid walker is checked the
 other way round: its solid-like fraction must stay below ``max_liquid_solid_fraction`` (0.5).
 
 Trace runs also check structure: every walker's final state must keep a solid-like fraction
@@ -119,9 +123,11 @@ from campaign_lib import (
     DT_FS,
     EQUILIBRATION_WINDOW_BLOCKS,
     INFERENCE_SETTINGS,
+    KB_EV,
     PRESSURE_EV_PER_A3,
     SEED,
     SPECIES,
+    SPECIES_SYMBOLS,
     TASK,
     THERMOSTAT_TIME_FS,
     NvalchemiTraceEngine,
@@ -487,7 +493,7 @@ def references(spec: dict, model, temps, out: Path, device) -> dict:
     missing = sorted({float(t) for t in temps if f"{t:g}" not in table})
     if missing:
         print(
-            f"[campaign] calibrating pure Au/Pt NPT references at {missing} K",
+            f"[campaign] calibrating pure {SPECIES_SYMBOLS[0]}/{SPECIES_SYMBOLS[1]} NPT references at {missing} K",
             flush=True,
         )
         cal = compute_reference_energies(
@@ -637,8 +643,8 @@ def initial(w: Walker, pool: Pool, ref: dict, n_atoms: int, device, model=None):
         {SPECIES[0]: a, SPECIES[1]: a}
         if a
         else {
-            SPECIES[0]: ref[T]["Au"]["lattice_constant_a_ang"],
-            SPECIES[1]: ref[T]["Pt"]["lattice_constant_a_ang"],
+            SPECIES[0]: ref[T][SPECIES_SYMBOLS[0]]["lattice_constant_a_ang"],
+            SPECIES[1]: ref[T][SPECIES_SYMBOLS[1]]["lattice_constant_a_ang"],
         }
     )
     x0 = s.get("c0", s.get("x0", 0.5))
@@ -683,7 +689,7 @@ def finish_step(
                 {
                     "run_id": rid,
                     "temperature_K": w.T,
-                    "chemical_potentials_ev": {"Au": 0.0, "Pt": mu},
+                    "chemical_potentials_ev": {SPECIES_SYMBOLS[0]: 0.0, SPECIES_SYMBOLS[1]: mu},
                     "delta_mu_ref_eV": w.ref,
                     "delta_mu_excess_eV": mu - w.ref,
                     "n_blocks": len(w.x),
@@ -859,11 +865,54 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
 
     names = {t["name"] for t in traces}
     for t in traces:
-        src = t.get("retrace_from")
-        if src and src not in names:
-            raise SystemExit(
-                f"trace {t['name']}: retrace_from {src!r} is not a trace in this spec"
+        for key in ("retrace_from", "cross_from"):
+            src = t.get(key)
+            if src and src not in names:
+                raise SystemExit(
+                    f"trace {t['name']}: {key} {src!r} is not a trace in this spec"
+                )
+
+    def cross_from_trace(t):
+        """cross_mu (and melt_mu_pure / melt_mu_probe if not given) from a finished solvus trace.
+
+        ``"cross_from": "<trace>"`` waits for that trace and uses its accepted points as the
+        three-phase stop. ``"melt_mu_from_cross": {"pure_kt": 8, "probe_kt": 2.8}`` places the
+        pure/probe dmu that many kT_m beyond the solvus dmu extrapolated (linearly, end segment)
+        to melt_T: below it for host A (less B), above it for host B.
+        """
+        src = json.loads(
+            (out / "traces" / t["cross_from"] / "trace.json").read_text()
+        )
+        pts = sorted((float(p["T"]), float(p["mu"])) for p in src.get("points", []))
+        if len(pts) < 2:
+            raise RuntimeError(
+                f"cross_from {t['cross_from']!r} has {len(pts)} point(s); need >= 2 for a solvus"
             )
+        cross = {T: mu for T, mu in pts}
+        kw = {}
+        rule = t.get("melt_mu_from_cross")
+        if rule is not None:
+            Tm = float(t["melt_T"])
+            seg = next(
+                ((p, q) for p, q in zip(pts, pts[1:]) if p[0] <= Tm <= q[0]),
+                pts[-2:] if Tm > pts[-1][0] else pts[:2],
+            )
+            (t0_, m0), (t1_, m1) = seg
+            mu_s = m0 + (Tm - t0_) * (m1 - m0) / (t1_ - t0_)
+            sign = -1.0 if t.get("melt_host", "A") == "A" else 1.0
+            kT = KB_EV * Tm
+            kw = dict(
+                melt_mu_pure=mu_s + sign * float(rule.get("pure_kt", 8.0)) * kT,
+                melt_mu_probe=mu_s + sign * float(rule.get("probe_kt", 2.8)) * kT,
+            )
+            kw = {k: v for k, v in kw.items() if k not in t}
+        print(
+            f"[trace] {t['name']}: cross_mu from {t['cross_from']} ({len(pts)} points "
+            f"{pts[0][0]:g}-{pts[-1][0]:g} K)"
+            + "".join(f", {k} {v:.5f}" for k, v in kw.items()),
+            flush=True,
+        )
+        return cross, kw
 
     def retrace_start(t):
         """Highest point of the source trace whose gap is still >= retrace_min_gap (None if only the start)."""
@@ -956,13 +1005,18 @@ def run(spec: dict, out: Path, model, device, settings: str) -> int:
                         flush=True,
                     )
                 elif t.get("melt_T") is not None:
+                    cross, mu_kw = cross_table(t), {}
+                    if t.get("cross_from"):
+                        threads[t["cross_from"]].join()
+                        cross, mu_kw = cross_from_trace(t)
                     cfg = TraceConfig(
                         t0=float(t["melt_T"]),
                         mu0=None,
                         t_stop=t["t_stop"],
                         melt_T=float(t["melt_T"]),
-                        cross_mu=cross_table(t),
+                        cross_mu=cross,
                         **{k: t[k] for k in cfg_keys if k in t},
+                        **mu_kw,
                     )
                     result = Tracer(cfg, engine, tdir / "trace.json").run(
                         t["solid_state"], t["liquid_state"]

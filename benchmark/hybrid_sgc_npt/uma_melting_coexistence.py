@@ -90,6 +90,7 @@ import numpy as np
 import torch
 from ase import Atoms
 from ase.build import bulk
+from ase.data import chemical_symbols
 from ase.io import write as ase_write
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -117,8 +118,8 @@ from nvalchemi.models.uma import UMAWrapper
 
 # Experimental T_m (K) and a hot-melt temperature that liquefies a 1000-atom
 # slab within a few ps; only used as defaults.
-EXPERIMENTAL_TM_K = {"Au": 1337.0, "Pt": 2041.0}
-DEFAULT_MELT_TEMPERATURE_K = {"Au": 2800.0, "Pt": 4000.0}
+EXPERIMENTAL_TM_K = {"Au": 1337.0, "Pt": 2041.0, "Ag": 1234.9, "Cu": 1357.8}
+DEFAULT_MELT_TEMPERATURE_K = {"Au": 2800.0, "Pt": 4000.0, "Ag": 2600.0, "Cu": 2800.0}
 LANGEVIN_FRICTION_PER_FS = 0.01
 SOLID_FRACTION_DONE = (0.05, 0.95)
 
@@ -378,8 +379,8 @@ def main() -> None:
         default_melt = DEFAULT_MELT_TEMPERATURE_K[el]
     else:
         default_melt = (1 - x_pt) * DEFAULT_MELT_TEMPERATURE_K[
-            "Au"
-        ] + x_pt * DEFAULT_MELT_TEMPERATURE_K["Pt"]
+            chemical_symbols[SPECIES[0]]
+        ] + x_pt * DEFAULT_MELT_TEMPERATURE_K[chemical_symbols[SPECIES[1]]]
     melt_T = args.melt_temperature_k or max(default_melt, 1.8 * T)
     dmu = args.delta_mu_ev
     if dmu is not None and x_pt is not None:
@@ -424,9 +425,9 @@ def main() -> None:
         solid0 = bulk(el, "fcc", cubic=True) * (args.nx, args.nx, args.nz)
     else:
         # random alloy on a Vegard lattice (ASE reference lattice constants); NPT relaxes it
-        a0 = (1 - x_pt) * bulk("Au", "fcc", cubic=True).cell[0, 0] + x_pt * bulk(
-            "Pt", "fcc", cubic=True
-        ).cell[0, 0]
+        a0 = (1 - x_pt) * bulk(chemical_symbols[SPECIES[0]], "fcc", cubic=True).cell[
+            0, 0
+        ] + x_pt * bulk(chemical_symbols[SPECIES[1]], "fcc", cubic=True).cell[0, 0]
         solid0 = bulk(el, "fcc", a=a0, cubic=True) * (args.nx, args.nx, args.nz)
         z = np.full(len(solid0), SPECIES[0])
         z[

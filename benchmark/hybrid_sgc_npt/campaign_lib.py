@@ -108,7 +108,23 @@ LATTICE_A_ANG = 4.00
 CONVENTIONAL_CELL = True
 PT_FRACTION = 0.50
 PRESSURE_EV_PER_A3 = 1.01325 / 1.602176634e6  # 1 atmosphere
-SPECIES = (79, 78)  # Au, Pt
+
+
+def _species_from_env() -> tuple[int, int]:
+    """(A, B) atomic numbers from NVALCHEMI_SPECIES="A,B" (default "Au,Pt").
+
+    Every driver follows the sgc-phase-boundary convention x = x_B and delta_mu = mu_B - mu_A
+    (A is held at mu = 0). Set it once per campaign (e.g. "Ag,Cu"); never mix pairs in one output.
+    """
+    raw = os.environ.get("NVALCHEMI_SPECIES", "Au,Pt")
+    syms = [s.strip() for s in raw.split(",")]
+    if len(syms) != 2 or syms[0] == syms[1] or any(s not in chemical_symbols[1:] for s in syms):
+        raise ValueError(f"NVALCHEMI_SPECIES={raw!r}: expected two distinct element symbols, 'A,B'")
+    return chemical_symbols.index(syms[0]), chemical_symbols.index(syms[1])
+
+
+SPECIES = _species_from_env()  # (A, B) atomic numbers; default Au, Pt
+SPECIES_SYMBOLS = (chemical_symbols[SPECIES[0]], chemical_symbols[SPECIES[1]])
 SIZE_REPEATS: dict[int, tuple[int, int, int]] = {
     # 108 and 256: small cells for batching benchmarks (the 108-atom cell is
     # 12 A across, twice UMA's 6 A cutoff; the graph builder handles images).

@@ -245,7 +245,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--element", required=True, choices=["Au", "Pt"])
+    ap.add_argument("--element", required=True, help="fcc element symbol (e.g. Au, Pt, Ag, Cu)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--n-atoms", type=int, default=500)
     ap.add_argument(
