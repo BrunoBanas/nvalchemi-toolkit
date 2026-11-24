@@ -24,7 +24,7 @@ Organised in tiers:
   decomposition halo policy and custom-op registration carried on the
   wrapper's ``distribution_spec`` — also mock-only, no checkpoint.
 * **Checkpoint tests** load a real fairchem checkpoint (default
-  ``uma-s-1p1``, override via ``NVALCHEMI_UMA_CKPT`` / ``NVALCHEMI_UMA_DEVICE``)
+  ``uma-s-1p2p1``, override via ``NVALCHEMI_UMA_CKPT`` / ``NVALCHEMI_UMA_DEVICE``)
   and cover forward-equivalence vs ``FAIRChemCalculator``, charged-input
   response, periodic OMol stress equivalence, NVE energy conservation
   (``@slow``), and the turbo / ``torch.compile`` device path (``@slow``, CUDA
@@ -68,7 +68,7 @@ from nvalchemi.models.uma import (  # noqa: E402
     _resolve_inference_settings,
 )
 
-_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p1")
+_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p2p1")
 _DEVICE = os.environ.get(
     "NVALCHEMI_UMA_DEVICE", "cuda" if torch.cuda.is_available() else "cpu"
 )

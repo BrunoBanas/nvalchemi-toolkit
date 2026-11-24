@@ -40,7 +40,7 @@ from ase.build import bulk
 from nvalchemi.data import AtomicData, Batch
 from nvalchemi.distributed.config import DomainConfig, StrategyKind
 
-_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p1")
+_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p2p1")
 _TASK = os.environ.get("NVALCHEMI_UMA_TASK", "omat")
 _PG_TIMEOUT = datetime.timedelta(minutes=30)
 

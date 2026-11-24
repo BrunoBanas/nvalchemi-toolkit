@@ -28,7 +28,7 @@ per-edge tensors and only need pass-through subclass handling.
 Requires:
 * 2+ CUDA GPUs.
 * ``fairchem-core`` installed (``nvalchemi-toolkit[uma]``).
-* HF access to a UMA checkpoint (default ``uma-s-1p1``).
+* HF access to a UMA checkpoint (default ``uma-s-1p2p1``).
 
 Run with::
 
@@ -54,7 +54,7 @@ from nvalchemi.data import AtomicData, Batch
 from nvalchemi.distributed.config import DomainConfig
 
 WORLD_SIZE = 2
-_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p1")
+_CKPT = os.environ.get("NVALCHEMI_UMA_CKPT", "uma-s-1p2p1")
 _TASK = os.environ.get("NVALCHEMI_UMA_TASK", "omat")
 # First-time UMA checkpoint download from HuggingFace can run multiple
 # minutes; the default 10-minute PG init timeout is enough for a warm

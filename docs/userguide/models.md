@@ -44,8 +44,8 @@ are lazily imported --- they only load when accessed, so missing dependencies wi
 break other imports.
 
 ````{note}
-**Install the UMA CUDA variant that matches the host.** Fairchem 2.22 uses
-torch 2.13.0. The standalone `uma-cu12` and `uma-cu13` extras pair UMA with the
+**Install the UMA CUDA variant that matches the host.** The locked fairchem-core
+(2.25) uses torch 2.13.0. The standalone `uma-cu12` and `uma-cu13` extras pair UMA with the
 matching torch wheel in its own environment; the standard CUDA extras no longer
 pull a RAPIDS stack.
 UMA also conflicts with MACE and the default `build` group, so keep it in its
@@ -193,8 +193,9 @@ Registered checkpoint names (see
 
 | Checkpoint | Size | Notes |
 |---|---|---|
-| `uma-s-1p1` | small | Default in the examples / tests |
+| `uma-s-1p1` | small | Default in the examples |
 | `uma-s-1p2` | small | Updated small release |
+| `uma-s-1p2p1` | small | UMA Nitro checkpoint; default in the UMA tests (fairchem-core >= 2.24) |
 | `uma-m-1p1` | medium | Higher accuracy, larger / slower |
 
 **Inference settings.** `UMAWrapper` does not add a `compile_model`

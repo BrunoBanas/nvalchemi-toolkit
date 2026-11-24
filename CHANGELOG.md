@@ -12,6 +12,9 @@
   preset names and `key=value` specs now default to
   `internal_graph_gen_version=3` (nvalchemi-toolkit-ops neighbor list, faster
   on one GPU); `InferenceSettings` instances are taken as given.
+- UMA checkpoint tests (`test/models/test_uma.py` and the two UMA multi-GPU
+  tests) default to `uma-s-1p2p1` (`NVALCHEMI_UMA_CKPT` still overrides it);
+  `uv.lock` resolves fairchem-core 2.25.0, and CI checks for 2.25.x.
 - `DistributedPipeline` supports grouped dynamics, including NEB, with
   complete-path transfers and preserved optimizer state. Transfer capacities
   apply to complete paths.
