@@ -1287,6 +1287,32 @@ class TestMLIPSpec:
         assert policy.gather_mode == "halo_read"
         assert spec.system_reductions is True
 
+    @pytest.mark.parametrize(
+        ("nitro", "mode", "ok"),
+        [
+            (False, None, True),
+            (False, "general", True),
+            (False, "umas_fast_gpu", False),
+            (False, "umas_fast_pytorch", False),
+            (True, None, False),
+        ],
+    )
+    def test_refuses_nitro_and_fast_backends(self, nitro, mode, ok):
+        """DD adapters patch the general eSCN-MD forward; Nitro and the fused
+        fast backends bypass it and gave wrong numbers, so the spec refuses them."""
+        from types import SimpleNamespace
+
+        from nvalchemi.models.uma import _check_distributable_settings
+
+        unit = SimpleNamespace(
+            inference_settings=SimpleNamespace(nitro=nitro, execution_mode=mode)
+        )
+        if ok:
+            _check_distributable_settings(unit)
+        else:
+            with pytest.raises(ValueError, match="execution_mode=general"):
+                _check_distributable_settings(unit)
+
     def test_no_triton_custom_ops(self, mock_omol):
         """No ``custom_ops``: the retired ``gp_utils``/replicated design
         registered five ``torch.ops.fairchem._kernel_*`` OpAdapters (two carrying
@@ -1369,7 +1395,12 @@ def predict_unit():
     from huggingface_hub.errors import GatedRepoError
 
     try:
-        return pretrained_mlip.get_predict_unit(_CKPT, device=_DEVICE)
+        # fairchem >= 2.24's "default" is UMA Nitro with TF32 for uma-s-1p2p1;
+        # "high-precision" is 2.22's "default" (compiled, merged MoLE, FP32), which
+        # the 1e-4 eV/A invariance tests below need.
+        return pretrained_mlip.get_predict_unit(
+            _CKPT, inference_settings="high-precision", device=_DEVICE
+        )
     except GatedRepoError as e:
         pytest.skip(f"no HF access to UMA checkpoint {_CKPT}: {e}")
     except Exception as e:  # noqa: BLE001 — top-level guard for CI portability

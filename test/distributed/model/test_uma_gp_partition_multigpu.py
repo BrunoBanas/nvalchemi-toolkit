@@ -99,7 +99,12 @@ def _worker(rank: int, world_size: int) -> None:
         s_ref = torch.zeros(1, 3, 3, dtype=dtype, device=device)
         if rank == 0:
             ref_wrapper = UMAWrapper.from_checkpoint(
-                _CKPT, task_name=_TASK, device=device, inference_settings="default"
+                # fairchem >= 2.24's "default" is Nitro + TF32; "high-precision"
+                # is 2.22's "default" (compiled, merged MoLE, FP32).
+                _CKPT,
+                task_name=_TASK,
+                device=device,
+                inference_settings="high-precision",
             )
             ro = ref_wrapper(_mk())
             e_ref = ro["energy"].sum().detach().view(1)
@@ -123,6 +128,8 @@ def _worker(rank: int, world_size: int) -> None:
             merge_mole=True,
             tf32=False,
             activation_checkpointing=False,
+            # fairchem >= 2.24 picks umas_fast_gpu for an unset mode; DD needs general.
+            execution_mode="general",
         )
         wrapper = UMAWrapper.from_checkpoint(
             _CKPT, task_name=_TASK, device=device, inference_settings=_inf

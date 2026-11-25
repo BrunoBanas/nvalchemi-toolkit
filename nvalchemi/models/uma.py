@@ -574,6 +574,42 @@ class _UMAGraphPadder:
             self._orig_otf_graph = None
 
 
+def _check_distributable_settings(predict_unit: Any) -> None:
+    """Refuse UMA execution paths that domain decomposition cannot drive.
+
+    The halo and node-partition adapters patch fairchem's general eSCN-MD
+    forward. UMA Nitro (``nitro=True``: the ``"default"`` / ``"nitro"`` presets in
+    fairchem >= 2.24) runs its own fused model, and fairchem >= 2.24 also picks the
+    ``umas_fast_gpu`` execution backend by itself for merged CUDA loads whose
+    ``execution_mode`` is unset. Under either, a distributed forward returned wrong
+    energies and forces (2-GPU A100 tests, fairchem 2.25: 62 eV off on 864 bcc Fe)
+    instead of failing, so fail here with the fix instead.
+
+    Raises
+    ------
+    ValueError
+        When the loaded predict unit runs Nitro or a non-general execution backend.
+    """
+    settings = getattr(predict_unit, "inference_settings", None)
+    if settings is None:
+        return
+    if getattr(settings, "nitro", False):
+        problem = "runs UMA Nitro (nitro=True)"
+    else:
+        mode = getattr(settings, "execution_mode", None)
+        mode = getattr(mode, "value", mode)
+        if mode in (None, "general"):
+            return
+        problem = f"runs the {mode!r} execution backend"
+    raise ValueError(
+        f"UMA domain decomposition needs fairchem's general execution path, but this "
+        f"model {problem}. Load it with an explicit execution_mode, e.g. "
+        "inference_settings='compile=true,merge_mole=true,tf32=false,"
+        "activation_checkpointing=false,execution_mode=general' (or an "
+        "InferenceSettings(..., nitro=False, execution_mode='general'))."
+    )
+
+
 @torch._dynamo.disable  # type: ignore[misc]
 def _eager_block_refresh(x: "torch.Tensor") -> "torch.Tensor":
     """Eager ghost-row refresh of the per-node features ``x``.
@@ -1359,6 +1395,8 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             a :class:`CompilePolicy` carrying the graph padder.
         """
         from nvalchemi.distributed.config import StrategyKind  # noqa: PLC0415
+
+        _check_distributable_settings(self.predict_unit)
 
         # Config-selected graph-parallel strategy. GRAPH_PARTITION → node-partition
         # (owned node slice, per-layer node-feature all-gather; its own minimal

@@ -15,6 +15,12 @@
 - UMA checkpoint tests (`test/models/test_uma.py` and the two UMA multi-GPU
   tests) default to `uma-s-1p2p1` (`NVALCHEMI_UMA_CKPT` still overrides it);
   `uv.lock` resolves fairchem-core 2.25.0, and CI checks for 2.25.x.
+- UMA domain decomposition (`distribution_spec`) raises a `ValueError` for a
+  model running UMA Nitro or a fused execution backend (`umas_fast_gpu`, which
+  fairchem >= 2.24 selects by itself for merged CUDA loads with no
+  `execution_mode`): the DD adapters patch fairchem's general forward, and those
+  paths returned wrong energies and forces. Load DD models with
+  `execution_mode=general`.
 - `DistributedPipeline` supports grouped dynamics, including NEB, with
   complete-path transfers and preserved optimizer state. Transfer capacities
   apply to complete paths.
