@@ -6,23 +6,14 @@
 
 Adds `nvalchemi.mc`, a batched Monte Carlo package built on `BaseDynamics`. Each step makes one proposal per active graph, evaluates every trial in one model call, and accepts or rejects each graph on its own. Proposals, acceptance and rejection stay on the device, with no device-to-host synchronization per step.
 
-### Performance: UMA derivative gating
-
-This PR carries the UMA derivative gating of NVIDIA/nvalchemi-toolkit#217, which Monte Carlo is built around:
-
-- `UMAWrapper` computes only the derivatives `active_outputs` asks for. MC reads energies only, so `model.set_config("active_outputs", {"energy"})` skips fairchem's forces/stress backward pass on every trial, instead of computing and discarding it.
-  - A100, energy-only MC on Au-Pt: 2.1x per step for site swaps under `turbo`, about 1.4x for transmutations.
-- A `key=value` `inference_settings` spec expresses settings no fairchem preset covers. For composition-changing MC the recommended spec is `"compile=false,merge_mole=false,tf32=true,activation_checkpointing=false"`.
-  - SGC on Au-Pt (500 atoms, 4 systems per batch, A100-SXM4-80GB): 24.5 s per 100-step block at 5.0 GiB peak, against 67.3 s and 9.2 GiB with `"batch"` (2.75x), with an identical sampled chain.
-
-**Stacked on NVIDIA/nvalchemi-toolkit#217** (which contains NVIDIA/nvalchemi-toolkit#216). Until #217 merges, this diff also shows #216 and #217. Review only the commits after #217, from `feat(mc): add batched GPU-resident Monte Carlo samplers` on.
+**Stacked on NVIDIA/nvalchemi-toolkit#217** (which contains NVIDIA/nvalchemi-toolkit#216). Energy-only MC uses #217's derivative gating, and the UMA guidance uses its `key=value` settings spec. Until #217 merges, this diff also shows #216 and #217. Review only the commits after #217, from `feat(mc): add batched GPU-resident Monte Carlo samplers` on.
 
 ## Type of Change
 
 - [ ] Bug fix (non-breaking change that fixes an issue)
 - [x] New feature (non-breaking change that adds functionality)
 - [ ] Breaking change (fix or feature that would cause existing functionality to not work as expected)
-- [x] Performance improvement (UMA derivative gating, via #217)
+- [ ] Performance improvement
 - [x] Documentation update
 - [ ] Refactoring (no functional changes)
 - [ ] CI/CD or infrastructure change
