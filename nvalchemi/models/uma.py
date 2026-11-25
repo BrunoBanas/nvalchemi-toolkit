@@ -574,42 +574,6 @@ class _UMAGraphPadder:
             self._orig_otf_graph = None
 
 
-def _check_distributable_settings(predict_unit: Any) -> None:
-    """Refuse UMA execution paths that domain decomposition cannot drive.
-
-    The halo and node-partition adapters patch fairchem's general eSCN-MD
-    forward. UMA Nitro (``nitro=True``: the ``"default"`` / ``"nitro"`` presets in
-    fairchem >= 2.24) runs its own fused model, and fairchem >= 2.24 also picks the
-    ``umas_fast_gpu`` execution backend by itself for merged CUDA loads whose
-    ``execution_mode`` is unset. Under either, a distributed forward returned wrong
-    energies and forces (2-GPU A100 tests, fairchem 2.25: 62 eV off on 864 bcc Fe)
-    instead of failing, so fail here with the fix instead.
-
-    Raises
-    ------
-    ValueError
-        When the loaded predict unit runs Nitro or a non-general execution backend.
-    """
-    settings = getattr(predict_unit, "inference_settings", None)
-    if settings is None:
-        return
-    if getattr(settings, "nitro", False):
-        problem = "runs UMA Nitro (nitro=True)"
-    else:
-        mode = getattr(settings, "execution_mode", None)
-        mode = getattr(mode, "value", mode)
-        if mode in (None, "general"):
-            return
-        problem = f"runs the {mode!r} execution backend"
-    raise ValueError(
-        f"UMA domain decomposition needs fairchem's general execution path, but this "
-        f"model {problem}. Load it with an explicit execution_mode, e.g. "
-        "inference_settings='compile=true,merge_mole=true,tf32=false,"
-        "activation_checkpointing=false,execution_mode=general' (or an "
-        "InferenceSettings(..., nitro=False, execution_mode='general'))."
-    )
-
-
 @torch._dynamo.disable  # type: ignore[misc]
 def _eager_block_refresh(x: "torch.Tensor") -> "torch.Tensor":
     """Eager ghost-row refresh of the per-node features ``x``.
@@ -949,6 +913,75 @@ def _distributed_undo_refs(
     per_atom = elem_refs[z].to(dtype=tensor.dtype)
     ref_sum = system_sum(per_atom, batch_src, num_systems, scope=scope)
     return tensor + ref_sum.view(tensor.shape)
+
+
+def _distributed_balance_channels_batched(
+    emb: "torch.Tensor",
+    target: "torch.Tensor",
+    natoms: "torch.Tensor",
+    batch: "torch.Tensor",
+    start_idx: int,
+    end_idx: int,
+    target_offset: float = 0.0,
+) -> "torch.Tensor":
+    """DD-aware replacement for fairchem ``balance_channels_batched``.
+
+    UMA 1.2+ checkpoints (``charge_balanced_channels`` / ``spin_balanced_channels``
+    in the backbone config; uma-s-1p1 has none) shift the ``l=0`` coefficients of
+    a few channels after every message-passing layer so that each system's sum over
+    its atoms equals its charge (or spin - 1). Fairchem sums every row it holds and
+    all-reduces only under its own ``gp_utils``. Under domain decomposition the rows
+    are this rank's owned + ghost (+ dead caps) atoms, so that sum is rank-local
+    and over-counts the ghost shell, and every layer then shifts each rank's
+    features by a different, wrong amount (2-GPU A100, uma-s-1p2p1, 864 bcc Fe:
+    energy 61.8 eV off).
+
+    Here the per-system channel sum and atom count cover owned rows only and are
+    all-reduced across the mesh (:attr:`Scope.OWNED`), so every rank applies the
+    single-process correction to all of its rows, ghosts included. Off the
+    distributed path it is fairchem's computation.
+
+    Parameters
+    ----------
+    emb : torch.Tensor
+        Node embeddings ``(n_rows, sph_features, channels)``.
+    target : torch.Tensor
+        Per-system target sum ``(num_systems,)`` (charge or spin).
+    natoms : torch.Tensor
+        Per-system atom count ``(num_systems,)``; used off the distributed path
+        only (under DD the global count is reduced from the owned rows).
+    batch : torch.Tensor
+        Per-row system index ``(n_rows,)``.
+    start_idx, end_idx : int
+        The contiguous channel range to balance, ``[start_idx, end_idx)``.
+    target_offset : float, default 0.0
+        Subtracted from ``target`` (1.0 for spin).
+
+    Returns
+    -------
+    torch.Tensor
+        A copy of ``emb`` with the channel range balanced to the target sums.
+    """
+    out_emb = emb.clone()
+    num_systems = int(natoms.shape[0])
+    channels = emb[:, 0, start_idx:end_idx]
+    if current_dd_context().is_distributed:
+        sums = system_sum(channels, batch, num_systems, scope=Scope.OWNED)
+        count = system_sum(
+            channels.new_ones(channels.shape[0], 1),
+            batch,
+            num_systems,
+            scope=Scope.OWNED,
+        )
+    else:
+        sums = channels.new_zeros(num_systems, channels.shape[1]).index_add_(
+            0, batch, channels
+        )
+        count = natoms.unsqueeze(1)
+    target_sums = (target - target_offset).unsqueeze(1).expand(-1, channels.shape[1])
+    corrections = (sums - target_sums) / count
+    out_emb[:, 0, start_idx:end_idx] = channels - corrections.to(emb.dtype)[batch]
+    return out_emb
 
 
 @distributed_method
@@ -1396,8 +1429,6 @@ class UMAWrapper(nn.Module, BaseModelMixin):
         """
         from nvalchemi.distributed.config import StrategyKind  # noqa: PLC0415
 
-        _check_distributable_settings(self.predict_unit)
-
         # Config-selected graph-parallel strategy. GRAPH_PARTITION → node-partition
         # (owned node slice, per-layer node-feature all-gather; its own minimal
         # adapter set). Cached separately from halo.
@@ -1483,6 +1514,13 @@ class UMAWrapper(nn.Module, BaseModelMixin):
             # Element-reference undo: sum refs over owned atoms only + all_reduce
             # (the owned-only model energy would otherwise be over-counted).
             MethodAdapter(ElementReferences, "undo_refs", _distributed_undo_refs),
+            # UMA 1.2+ per-layer charge/spin channel balancing: owned-only
+            # per-system sums + all-reduce (fairchem's sum would include ghosts).
+            PythonAdapter(
+                module_path="fairchem.core.models.uma.escn_md",
+                attr_name="balance_channels_batched",
+                replacement=_distributed_balance_channels_batched,
+            ),
             # MoLE composition-consistency guard (version-selected above): histogram
             # the real atoms only so dead caps atoms don't drift the composition.
             *mole_consistency,
@@ -1565,6 +1603,13 @@ class UMAWrapper(nn.Module, BaseModelMixin):
                     replacement=_distributed_reduce_node_to_system,
                 ),
                 MethodAdapter(ElementReferences, "undo_refs", _distributed_undo_refs),
+                # UMA 1.2+ per-layer charge/spin channel balancing: owned-only
+                # per-system sums + all-reduce (fairchem's sum would include ghosts).
+                PythonAdapter(
+                    module_path="fairchem.core.models.uma.escn_md",
+                    attr_name="balance_channels_batched",
+                    replacement=_distributed_balance_channels_batched,
+                ),
             )
             spec = dataclasses.replace(
                 spec,

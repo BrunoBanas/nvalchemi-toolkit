@@ -128,8 +128,6 @@ def _worker(rank: int, world_size: int) -> None:
             merge_mole=True,
             tf32=False,
             activation_checkpointing=False,
-            # fairchem >= 2.24 picks umas_fast_gpu for an unset mode; DD needs general.
-            execution_mode="general",
         )
         wrapper = UMAWrapper.from_checkpoint(
             _CKPT, task_name=_TASK, device=device, inference_settings=_inf

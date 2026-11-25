@@ -176,9 +176,7 @@ def _inference_settings(mode: str) -> Any:
             merge_mole=True,
             tf32=False,
             activation_checkpointing=False,
-            # Explicit: fairchem >= 2.24 picks the fused umas_fast_gpu backend for
-            # an unset mode, which the DD adapters cannot drive.
-            execution_mode="general",
+            execution_mode=None,
         )
     raise ValueError(f"unknown UMA inference mode: {mode}")
 
