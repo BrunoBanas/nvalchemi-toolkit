@@ -24,13 +24,13 @@ Depends on NVIDIA/nvalchemi-toolkit#217. NVIDIA/nvalchemi-toolkit#216 is reached
 
 ## Changes Made
 
-- `BaseMonteCarlo` (`nvalchemi/mc/base.py`): the trial/accept/restore cycle, Metropolis acceptance per graph, and per-species mass updates on accepted moves (custom per-species masses are kept). Temperatures, species and chemical potentials are cached on the device, and there is shared sync-free selection and pair-swap machinery.
+- `BaseMonteCarlo` (`nvalchemi/mc/base.py`): the trial/accept/restore cycle, Metropolis acceptance per graph, and mass updates on accepted moves from a per-graph species-to-mass lookup (custom masses are kept and never cross between graphs). `state_dict` / `load_state_dict` carry the generator state, so a restored run continues the same random sequence. Temperatures, species and chemical potentials are cached on the device, and there is shared sync-free selection and pair-swap machinery.
 - `SGC`: semi-grand-canonical single-site transmutations. Chemical potentials can be scalars or one value per graph.
 - `VCSGC`: binary variance-constrained SGC (Sadigh et al., PRB 85, 184203, 2012).
   - Parametrised by `phi` or by `target_concentration` with an intensive `kappa`.
   - Returns `mu_B - mu_A` for each graph.
   - `reference_exchange_potential` centres the constraint for ML potentials.
-- `Kawasaki`: nearest-neighbour swaps at fixed composition on a short-range proposal graph.
+- `Kawasaki`: nearest-neighbour swaps at fixed composition on a short-range proposal graph, rebuilt by both `synchronize` and `refresh_energy` after positions change.
   - By default only unlike-species pairs are drawn, with the Hastings factor `n(x)/n(x')`.
 - `NonlocalSwap`: fixed-composition swaps of two unlike atoms at any distance, so one accepted move carries a solute across the system, e.g. between a nanoparticle's core and surface.
   - Each step draws, per system, one atom uniformly from all its atoms and a second uniformly from the atoms of another species. No neighbour graph is built or kept between steps.
@@ -42,13 +42,13 @@ Depends on NVIDIA/nvalchemi-toolkit#217. NVIDIA/nvalchemi-toolkit#216 is reached
   - CHANGELOG entry under Unreleased / Added.
 - Agent skill:
   - Routing row and version check in `skills/nvalchemi-toolkit/SKILL.md`.
-  - Monte Carlo section in `references/dynamics-optimization.md`.
+  - Monte Carlo section in `references/dynamics-optimization.md` (the note stays under 500 lines).
   - UMA inference-settings bullet in `references/models.md`.
 
 ## Testing
 
 - [x] Unit tests pass on CUDA: `test/mc test/dynamics test/hooks --slow` all pass on a GPU node, including the CUDA-only checks that MC steps make no device-to-host synchronization, and the `FusedStage` stream tests.
-- [x] Unit tests pass on CPU: `test/mc --slow` (57 tests).
+- [x] Unit tests pass on CPU: `test/mc --slow` (67 passed; the 4 CUDA-only sync checks skip), including regression tests for per-graph masses, restarts into fresh and advanced samplers, and `Kawasaki.refresh_energy`.
 - [x] Linting passes (pre-commit: ruff, ruff format, interrogate, markdownlint, license)
 - [x] New tests added for new functionality meets coverage expectations?
 
