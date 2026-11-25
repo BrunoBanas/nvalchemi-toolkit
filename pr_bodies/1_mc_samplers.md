@@ -32,7 +32,9 @@ Depends on NVIDIA/nvalchemi-toolkit#217. NVIDIA/nvalchemi-toolkit#216 is reached
   - `reference_exchange_potential` centres the constraint for ML potentials.
 - `Kawasaki`: nearest-neighbour swaps at fixed composition on a short-range proposal graph.
   - By default only unlike-species pairs are drawn, with the Hastings factor `n(x)/n(x')`.
-- `NonlocalSwap`: swaps two unlike atoms anywhere in a graph. The proposal is symmetric at fixed composition.
+- `NonlocalSwap`: fixed-composition swaps of two unlike atoms at any distance, so one accepted move carries a solute across the system, e.g. between a nanoparticle's core and surface.
+  - Each step draws, per system, one atom uniformly from all its atoms and a second uniformly from the atoms of another species. No neighbour graph is built or kept between steps.
+  - The pair probability depends only on the species counts, which a swap preserves, so plain Metropolis is exact. Single-species systems are skipped.
 - `FusedStage` interop (`nvalchemi/dynamics/base.py`): a sub-stage can declare `_stale_on_exit`. A graph that leaves MC after a rejected trial is then re-primed before its first MD update, with no extra model call. After an accepted trial, its forces carry over.
 - Docs:
   - Monte Carlo section in `docs/userguide/dynamics_simulations.md`, including UMA settings for MC.
