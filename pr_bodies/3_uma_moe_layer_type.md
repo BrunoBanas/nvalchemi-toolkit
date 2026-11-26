@@ -14,7 +14,7 @@ Unmerged layers (`merge_mole=False`) are required whenever composition changes, 
 | MD call (energy, forces, stress) | 1.01x | 1.17x |
 | SGC-NPT hybrid MC-MD, time per block | 1.28x faster | 1.53x faster |
 
-This costs about 15% more peak GPU memory. Results agree with the loop to ~1e-5 eV/atom and ~5e-4 eV/Å.
+This costs about 15% more peak GPU memory. Results agree with the loop to ~1e-5 eV/atom and ~5e-4 eV/Å (measured below on an A100: 3.8e-6 eV/atom and 1.5e-4 eV/Å on a mixed Au-Pt batch).
 
 ## Type of Change
 
@@ -36,7 +36,7 @@ Stacked on NVIDIA/nvalchemi-toolkit#217 (which contains #216): the resolution re
   - `"auto"` (the default) selects the extension only where it is known to work: a registered `uma-*` checkpoint with `merge_mole=False`, `compile=False` and `activation_checkpointing=False`. If `fairchem_cpp` is not installed, it warns and falls back to the loop.
   - An explicit `"dgl"` raises `ImportError` when `fairchem_cpp` is missing.
   - The `NVALCHEMI_UMA_MOE_LAYER_TYPE` environment variable sets the `"auto"` behaviour per job: `=dgl` turns a missing extension into an error, `=pytorch` opts out.
-  - A `backbone.moe_layer_type` in `overrides` takes precedence over `"auto"`, and conflicting with an explicit value raises `ValueError`. The caller's `overrides` dict is never mutated.
+  - A `backbone.moe_layer_type` in `overrides` counts as an explicit request: it goes through the same checks as the argument, conflicting with an explicit value raises `ValueError`, and the resolved value replaces it in a copy of `overrides` (the caller's dict is never mutated).
 - Guards for cases where `MOLEDGL` does not work:
   - `merge_mole=True`: fairchem's merge step needs `MOLE.merged_linear_layer`, which `MOLEDGL` lacks.
   - `activation_checkpointing=True`: edges are processed in 131,072-edge chunks, and `segment_mm` raises "Segment index out of bound" past the first chunk (above about 2,300 bulk atoms).
@@ -50,7 +50,10 @@ Stacked on NVIDIA/nvalchemi-toolkit#217 (which contains #216): the resolution re
 ## Testing
 
 - [x] Unit tests pass on CUDA: `test/models/test_uma.py --slow` passes in full on a GPU node with the UMA checkpoint, including the real-checkpoint tests (`TestOMolEquivalence`, `TestChargedInputs`) and the CUDA-only `TestTurboCompile`. The two UMA multi-GPU tests pass on 2 GPUs.
-- [x] Unit tests pass on CPU (fairchem-core 2.24.0): 115 passed (#217's tests plus 22 new `moe_layer_type` cases). The resolution logic and the `from_checkpoint` plumbing are tested with fairchem's loader mocked.
+- [x] Unit tests pass on CPU (fairchem-core 2.24.0): 115 passed (#217's tests plus 22 new `moe_layer_type` cases). The resolution logic and the `from_checkpoint` plumbing (including overrides under `merge_mole=True`, activation checkpointing and a missing `fairchem_cpp`) are tested with fairchem's loader mocked.
+- [x] CUDA: `TestMoLEDGLExtension` (`--slow`, skipped without CUDA, `fairchem_cpp` or the checkpoint) loads the checkpoint with each implementation, checks that real `MOLEDGL` layers were built, and compares energy, forces and stress on a batch of three Au-Pt systems of different composition (4, 16 and 28 Pt out of 32 atoms). Both tests pass on an A100-SXM4-80GB (fairchem-core 2.22.0, torch 2.13.0+cu126, `fairchem_cpp` from fairchem's `fairchem_cpp` branch, `uma-s-1p2`):
+  - Layers: the `dgl` model builds 24 `MOLEDGL` and 3 `MOLE` layers (the 3 are fairchem's per-dataset output head, which always uses the loop); the `pytorch` model builds 27 `MOLE`.
+  - Agreement with the loop, max |dgl − pytorch|: energy 3.8e-6 eV/atom (test tolerance 1e-4), forces 1.5e-4 eV/Å with the largest force 1.29 eV/Å (tolerance 2e-3), stress 2.5e-6 eV/Å³ with the largest stress 7.6e-2 (tolerance 1e-4).
 - [x] Linting passes (pre-commit: ruff, ruff format, interrogate, markdownlint, license)
 - [x] New tests added for new functionality meets coverage expectations?
 
